@@ -1,15 +1,14 @@
 """
 J SIMPLE 高架床 Bot
-- LINE + FB Messenger Webhook
-- 關鍵字自動回覆 + 5 分鐘冷卻
-- /admin?key=密碼  後台（回覆/關鍵字/測試/紀錄）
+- LINE + FB Messenger 分開管理
+- 動態新增/刪除意圖、關鍵字
+- 各平台獨立開關
+- /admin        總覽
+- /admin/line   LINE 管理
+- /admin/fb     FB 管理
 """
 
-import os
-import json
-import base64
-import urllib.request
-import time
+import os, json, base64, urllib.request, time
 from collections import deque
 from flask import Flask, request, abort, render_template_string, redirect, jsonify
 from linebot.v3 import WebhookHandler
@@ -19,7 +18,10 @@ from linebot.v3.messaging import (
     ReplyMessageRequest, TextMessage
 )
 from linebot.v3.webhooks import MessageEvent, TextMessageContent
-from knowledge_base import REPLIES as DEFAULT_REPLIES, BRAND_INFO
+from knowledge_base import (
+    BRAND_INFO, LINE_ENABLED, FB_ENABLED, INTENT_LABELS,
+    LINE_REPLIES, FB_REPLIES, LINE_KEYWORDS, FB_KEYWORDS
+)
 
 app = Flask(__name__)
 
@@ -35,61 +37,49 @@ GITHUB_FILE               = "knowledge_base.py"
 configuration = Configuration(access_token=LINE_CHANNEL_ACCESS_TOKEN)
 handler = WebhookHandler(LINE_CHANNEL_SECRET)
 
-custom_replies = dict(DEFAULT_REPLIES)
-
 COOLDOWN_SECONDS = 300
-line_cooldown: dict = {}
-fb_cooldown: dict = {}
-
 message_log = deque(maxlen=100)
 
-REPLY_LABELS = {
-    "greeting": "打招呼",
-    "price":    "價格詢問",
-    "custom":   "訂製/客製",
-    "shipping": "運費/安裝",
-    "size":     "尺寸詢問",
-    "delivery": "出貨時間",
-    "warranty": "保固",
-    "material": "材質/安全",
-    "color":    "顏色/款式",
-    "payment":  "付款方式",
-    "return":   "退換貨",
-    "default":  "預設回覆",
+# 各平台獨立狀態
+platforms = {
+    "line": {
+        "enabled":  LINE_ENABLED,
+        "replies":  dict(LINE_REPLIES),
+        "keywords": {k: list(v) for k, v in LINE_KEYWORDS.items()},
+        "labels":   dict(INTENT_LABELS),
+    },
+    "fb": {
+        "enabled":  FB_ENABLED,
+        "replies":  dict(FB_REPLIES),
+        "keywords": {k: list(v) for k, v in FB_KEYWORDS.items()},
+        "labels":   dict(INTENT_LABELS),
+    },
 }
 
-custom_keywords = {
-    "price":    ["價格", "多少錢", "費用", "報價", "貴不貴", "預算", "幾千", "便宜", "優惠", "折扣", "特價"],
-    "custom":   ["訂製", "客製", "客製化", "尺寸訂做", "特殊尺寸", "訂做", "可以改", "能不能改", "調整"],
-    "shipping": ["運費", "運送", "安裝費", "搬運", "配送", "送貨", "怎麼安裝", "自己裝", "組裝", "師傅"],
-    "size":     ["尺寸", "幾尺", "多大", "寬度", "長度", "高度", "天花板", "幾公分", "cm", "幾米", "空間", "放得下"],
-    "delivery": ["幾天", "出貨", "交期", "到貨", "多久", "等多久", "快嗎", "現貨", "庫存", "有貨", "現在有"],
-    "warranty": ["保固", "保證", "壞掉", "維修", "故障", "生鏽", "鏽", "螺絲鬆"],
-    "material": ["材質", "鋼管", "鐵", "木", "板材", "幾mm", "厚度", "堅固", "穩", "晃", "承重", "幾公斤", "kg", "重量限制", "安全"],
-    "color":    ["顏色", "黑色", "白色", "什麼色", "有哪些色", "款式", "外觀", "樣式", "型號"],
-    "payment":  ["付款", "匯款", "刷卡", "信用卡", "轉帳", "分期", "Line Pay", "linepay", "pay", "怎麼付"],
-    "return":   ["退貨", "換貨", "退款", "不喜歡", "不符合", "取消", "退"],
-    "greeting": ["你好", "您好", "hi", "hello", "詢問", "想問", "請問", "想了解", "看一下", "查詢"],
-}
+cooldowns = {"line": {}, "fb": {}}
 
-# ── 共用邏輯 ─────────────────────────────────────────────
+# ── 核心邏輯 ─────────────────────────────────────────────
 
-def classify_intent(text: str) -> str:
+def classify_intent(text: str, platform: str) -> str:
+    kw = platforms[platform]["keywords"]
     text_lower = text.lower()
-    for intent, words in custom_keywords.items():
+    for intent, words in kw.items():
         if any(w in text_lower for w in words):
             return intent
     return "default"
 
-def get_reply(text: str, user_id: str, cooldown_store: dict, channel: str = "") -> str | None:
-    intent = classify_intent(text)
+def get_reply(text: str, user_id: str, platform: str) -> str | None:
+    cfg = platforms[platform]
+    if not cfg["enabled"]:
+        return None
+    intent = classify_intent(text, platform)
     now = time.time()
-    user_times = cooldown_store.setdefault(user_id, {})
+    store = cooldowns[platform]
+    user_times = store.setdefault(user_id, {})
     cooled = now - user_times.get(intent, 0) < COOLDOWN_SECONDS
-    reply_text = custom_replies.get(intent, custom_replies["default"])
     message_log.appendleft({
         "time": time.strftime("%m/%d %H:%M", time.localtime(now)),
-        "channel": channel,
+        "platform": platform.upper(),
         "msg": text[:40],
         "intent": intent,
         "replied": not cooled,
@@ -97,7 +87,7 @@ def get_reply(text: str, user_id: str, cooldown_store: dict, channel: str = "") 
     if cooled:
         return None
     user_times[intent] = now
-    return reply_text
+    return cfg["replies"].get(intent, cfg["replies"].get("default", ""))
 
 # ── LINE Webhook ──────────────────────────────────────────
 
@@ -113,15 +103,13 @@ def callback():
 
 @handler.add(MessageEvent, message=TextMessageContent)
 def handle_line_message(event):
-    reply_text = get_reply(event.message.text.strip(), event.source.user_id, line_cooldown, "LINE")
-    if reply_text is None:
+    reply_text = get_reply(event.message.text.strip(), event.source.user_id, "line")
+    if not reply_text:
         return
     with ApiClient(configuration) as api_client:
         MessagingApi(api_client).reply_message_with_http_info(
-            ReplyMessageRequest(
-                reply_token=event.reply_token,
-                messages=[TextMessage(text=reply_text)]
-            )
+            ReplyMessageRequest(reply_token=event.reply_token,
+                                messages=[TextMessage(text=reply_text)])
         )
 
 # ── FB Messenger Webhook ──────────────────────────────────
@@ -139,12 +127,12 @@ def fb_webhook():
     if data.get("object") == "page":
         for entry in data.get("entry", []):
             for event in entry.get("messaging", []):
-                sender_id = event.get("sender", {}).get("id", "")
+                sid = event.get("sender", {}).get("id", "")
                 msg = event.get("message", {})
-                if sender_id and "text" in msg:
-                    reply_text = get_reply(msg["text"].strip(), sender_id, fb_cooldown, "FB")
-                    if reply_text:
-                        fb_send(sender_id, reply_text)
+                if sid and "text" in msg:
+                    reply = get_reply(msg["text"].strip(), sid, "fb")
+                    if reply:
+                        fb_send(sid, reply)
     return "OK", 200
 
 def fb_send(psid: str, text: str):
@@ -158,116 +146,179 @@ def fb_send(psid: str, text: str):
     except Exception:
         pass
 
-# ── Admin API ─────────────────────────────────────────────
+# ── API ───────────────────────────────────────────────────
+
+def auth_required():
+    key = request.args.get("key", "")
+    return key == ADMIN_PASSWORD, key
 
 @app.route("/api/test", methods=["POST"])
 def api_test():
-    key = request.args.get("key", "")
-    if key != ADMIN_PASSWORD:
+    ok, _ = auth_required()
+    if not ok:
         return jsonify({"error": "unauthorized"}), 403
-    text = (request.get_json(silent=True) or {}).get("text", "")
-    intent = classify_intent(text)
-    reply = custom_replies.get(intent, custom_replies["default"])
-    return jsonify({"intent": intent, "label": REPLY_LABELS.get(intent, intent), "reply": reply})
+    data = request.get_json(silent=True) or {}
+    text = data.get("text", "")
+    platform = data.get("platform", "line")
+    intent = classify_intent(text, platform)
+    cfg = platforms[platform]
+    label = cfg["labels"].get(intent, intent)
+    reply = cfg["replies"].get(intent, cfg["replies"].get("default", ""))
+    return jsonify({"intent": intent, "label": label, "reply": reply})
 
-@app.route("/api/logs", methods=["GET"])
+@app.route("/api/logs")
 def api_logs():
-    key = request.args.get("key", "")
-    if key != ADMIN_PASSWORD:
+    ok, _ = auth_required()
+    if not ok:
         return jsonify({"error": "unauthorized"}), 403
-    return jsonify(list(message_log))
+    platform = request.args.get("platform", "all")
+    logs = [l for l in message_log if platform == "all" or l["platform"] == platform.upper()]
+    return jsonify(logs)
 
-# ── Admin 後台 ────────────────────────────────────────────
+# ── Admin HTML ────────────────────────────────────────────
 
-ADMIN_HTML = """<!DOCTYPE html>
-<html lang="zh-TW">
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>J SIMPLE Bot 後台</title>
+DASH_HTML = """<!DOCTYPE html>
+<html lang="zh-TW"><head><meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>J SIMPLE Bot 總覽</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:-apple-system,sans-serif;background:#f5f5f5;color:#333}
+.header{background:#1a1a1a;color:#fff;padding:14px 20px;font-size:17px;font-weight:700}
+.container{max-width:500px;margin:30px auto;padding:0 16px}
+.card{background:#fff;border-radius:14px;padding:22px;margin-bottom:16px;box-shadow:0 1px 4px rgba(0,0,0,.08);display:flex;align-items:center;justify-content:space-between;text-decoration:none;color:#333}
+.card:hover{box-shadow:0 3px 12px rgba(0,0,0,.13)}
+.card-left{display:flex;align-items:center;gap:14px}
+.icon{width:46px;height:46px;border-radius:12px;display:flex;align-items:center;justify-content:center;font-size:22px}
+.icon-line{background:#e8f5e9}
+.icon-fb{background:#e3f2fd}
+.card-title{font-size:16px;font-weight:700}
+.card-sub{font-size:13px;color:#888;margin-top:2px}
+.status{font-size:12px;font-weight:700;padding:4px 10px;border-radius:10px}
+.on{background:#e8f5e9;color:#2e7d32}
+.off{background:#fdecea;color:#c62828}
+.arrow{color:#ccc;font-size:20px}
+</style></head><body>
+<div class="header">⚡ J SIMPLE Bot 後台總覽</div>
+<div class="container">
+  <a class="card" href="/admin/line?key={{ key }}">
+    <div class="card-left">
+      <div class="icon icon-line">💬</div>
+      <div>
+        <div class="card-title">LINE Bot 管理</div>
+        <div class="card-sub">@JSIMPLE</div>
+      </div>
+    </div>
+    <div style="display:flex;align-items:center;gap:10px">
+      <span class="status {{ 'on' if line_on else 'off' }}">{{ '開啟' if line_on else '關閉' }}</span>
+      <span class="arrow">›</span>
+    </div>
+  </a>
+  <a class="card" href="/admin/fb?key={{ key }}">
+    <div class="card-left">
+      <div class="icon icon-fb">📘</div>
+      <div>
+        <div class="card-title">FB Messenger 管理</div>
+        <div class="card-sub">逸雅傢俱</div>
+      </div>
+    </div>
+    <div style="display:flex;align-items:center;gap:10px">
+      <span class="status {{ 'on' if fb_on else 'off' }}">{{ '開啟' if fb_on else '關閉' }}</span>
+      <span class="arrow">›</span>
+    </div>
+  </a>
+</div>
+</body></html>"""
+
+PLATFORM_HTML = """<!DOCTYPE html>
+<html lang="zh-TW"><head><meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>{{ pname }} 管理</title>
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
 body{font-family:-apple-system,sans-serif;background:#f5f5f5;color:#333;font-size:15px}
-.header{background:#1a1a1a;color:#fff;padding:14px 20px;display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px}
-.header h1{font-size:17px;font-weight:700}
-.badges{display:flex;gap:6px}
-.badge{font-size:11px;padding:3px 9px;border-radius:12px;font-weight:600}
-.badge-line{background:#00c300;color:#fff}
-.badge-fb{background:#1877f2;color:#fff}
+.header{background:#1a1a1a;color:#fff;padding:13px 18px;display:flex;align-items:center;gap:12px}
+.back{color:#aaa;text-decoration:none;font-size:20px;line-height:1}
+.header h1{font-size:16px;font-weight:700;flex:1}
+.toggle-wrap{display:flex;align-items:center;gap:8px}
+.toggle-label{font-size:13px}
+.toggle{position:relative;width:46px;height:26px}
+.toggle input{opacity:0;width:0;height:0}
+.slider{position:absolute;inset:0;border-radius:26px;background:#555;cursor:pointer;transition:.3s}
+.slider:before{content:"";position:absolute;width:20px;height:20px;left:3px;bottom:3px;background:#fff;border-radius:50%;transition:.3s}
+input:checked+.slider{background:#00c300}
+input:checked+.slider:before{transform:translateX(20px)}
 .tabs{display:flex;background:#fff;border-bottom:2px solid #eee;overflow-x:auto;scrollbar-width:none}
 .tabs::-webkit-scrollbar{display:none}
-.tab{padding:12px 20px;cursor:pointer;white-space:nowrap;font-weight:600;color:#888;border-bottom:3px solid transparent;margin-bottom:-2px;transition:.15s}
-.tab.active{color:#00c300;border-bottom-color:#00c300}
+.tab{padding:11px 18px;cursor:pointer;white-space:nowrap;font-weight:600;color:#999;border-bottom:3px solid transparent;margin-bottom:-2px;font-size:14px}
+.tab.active{color:var(--ac);border-bottom-color:var(--ac)}
 .tab-content{display:none}
 .tab-content.active{display:block}
-.container{max-width:860px;margin:20px auto;padding:0 14px 90px}
-.card{background:#fff;border-radius:12px;padding:18px;margin-bottom:14px;box-shadow:0 1px 4px rgba(0,0,0,.07)}
+.container{max-width:860px;margin:18px auto;padding:0 14px 90px}
+.card{background:#fff;border-radius:12px;padding:16px;margin-bottom:12px;box-shadow:0 1px 4px rgba(0,0,0,.07)}
 .card-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:10px}
 .card-title{font-size:15px;font-weight:700}
-.card-label{font-size:11px;color:#bbb;background:#f5f5f5;padding:2px 8px;border-radius:8px}
-textarea{width:100%;border:1px solid #e0e0e0;border-radius:8px;padding:11px;font-size:14px;line-height:1.75;resize:vertical;min-height:100px;font-family:inherit;transition:.15s}
-textarea:focus{outline:none;border-color:#00c300;box-shadow:0 0 0 3px rgba(0,195,0,.08)}
-.kw-input{width:100%;border:1px solid #e0e0e0;border-radius:8px;padding:9px 11px;font-size:14px;font-family:inherit}
-.kw-input:focus{outline:none;border-color:#00c300}
-.kw-hint{font-size:12px;color:#aaa;margin-top:5px}
-.btn-row{position:fixed;bottom:0;left:0;right:0;background:#fff;border-top:1px solid #eee;padding:11px 16px;display:flex;gap:10px;justify-content:center;z-index:100}
-.btn{padding:11px 24px;border:none;border-radius:8px;font-size:14px;font-weight:600;cursor:pointer;transition:.15s}
+.card-meta{display:flex;align-items:center;gap:8px}
+.badge{font-size:11px;color:#bbb;background:#f5f5f5;padding:2px 8px;border-radius:8px}
+.del-btn{border:none;background:none;color:#e57373;cursor:pointer;font-size:18px;padding:2px 6px;border-radius:6px}
+.del-btn:hover{background:#fdecea}
+textarea{width:100%;border:1px solid #e0e0e0;border-radius:8px;padding:10px;font-size:14px;line-height:1.75;resize:vertical;min-height:90px;font-family:inherit}
+textarea:focus{outline:none;border-color:var(--ac);box-shadow:0 0 0 3px rgba(var(--ac-rgb),.08)}
+.kw-input,input[type=text]{width:100%;border:1px solid #e0e0e0;border-radius:8px;padding:9px 11px;font-size:14px;font-family:inherit}
+.kw-input:focus,input[type=text]:focus{outline:none;border-color:var(--ac)}
+.hint{font-size:12px;color:#bbb;margin-top:5px}
+.add-card{border:2px dashed #e0e0e0;border-radius:12px;padding:18px;margin-bottom:12px;background:none}
+.add-card:hover{border-color:var(--ac)}
+.add-title{font-size:14px;font-weight:700;color:#888;margin-bottom:12px}
+.field{margin-bottom:10px}
+.field label{font-size:13px;color:#888;display:block;margin-bottom:4px}
+.btn-row{position:fixed;bottom:0;left:0;right:0;background:#fff;border-top:1px solid #eee;padding:10px 14px;display:flex;gap:10px;justify-content:center;z-index:100}
+.btn{padding:10px 22px;border:none;border-radius:8px;font-size:14px;font-weight:600;cursor:pointer}
 .btn:hover{opacity:.85}
-.btn-save{background:#00c300;color:#fff}
-.btn-deploy{background:#1a1a1a;color:#fff}
-.btn-test-send{background:#1877f2;color:#fff;width:100%;margin-top:10px;padding:12px}
-.flash{padding:11px 18px;border-radius:8px;margin-bottom:14px;font-size:14px}
-.ok{background:#e8f5e9;color:#2e7d32}
-.err{background:#fdecea;color:#c62828}
-.login-wrap{max-width:340px;margin:80px auto;background:#fff;border-radius:16px;padding:36px;box-shadow:0 2px 16px rgba(0,0,0,.1);text-align:center}
-.login-wrap h2{margin-bottom:22px;font-size:19px}
-.login-wrap input{width:100%;padding:11px;border:1px solid #ddd;border-radius:8px;font-size:15px;margin-bottom:14px}
-.login-wrap .btn{width:100%;background:#00c300;color:#fff}
-.err-msg{color:red;margin-top:10px;font-size:13px}
-.test-box{background:#fff;border-radius:12px;padding:18px;box-shadow:0 1px 4px rgba(0,0,0,.07)}
+.btn-save{background:var(--ac);color:#fff}
+.btn-back{background:#f0f0f0;color:#555}
+.btn-add{width:100%;padding:11px;background:var(--ac);color:#fff;border:none;border-radius:8px;font-size:14px;font-weight:600;cursor:pointer;margin-top:4px}
+.btn-add:hover{opacity:.85}
 .test-input{width:100%;border:1px solid #ddd;border-radius:8px;padding:11px;font-size:15px;font-family:inherit}
-.test-input:focus{outline:none;border-color:#1877f2}
+.test-input:focus{outline:none;border-color:var(--ac)}
+.btn-test{width:100%;margin-top:10px;padding:11px;background:var(--ac);color:#fff;border:none;border-radius:8px;font-size:14px;font-weight:600;cursor:pointer}
 .test-result{margin-top:14px;display:none}
-.test-result .intent-badge{display:inline-block;background:#e3f2fd;color:#1565c0;padding:3px 10px;border-radius:10px;font-size:12px;font-weight:600;margin-bottom:8px}
-.test-result .reply-text{background:#f5f5f5;border-radius:8px;padding:12px;font-size:14px;line-height:1.7;white-space:pre-wrap}
+.intent-badge{display:inline-block;padding:3px 10px;border-radius:10px;font-size:12px;font-weight:600;margin-bottom:8px;background:rgba(var(--ac-rgb),.12);color:var(--ac)}
+.reply-pre{background:#f5f5f5;border-radius:8px;padding:12px;font-size:14px;line-height:1.7;white-space:pre-wrap}
 .log-table{width:100%;border-collapse:collapse;font-size:13px}
 .log-table th{text-align:left;padding:8px 10px;background:#f9f9f9;color:#888;font-weight:600;border-bottom:2px solid #eee}
-.log-table td{padding:9px 10px;border-bottom:1px solid #f0f0f0;vertical-align:top}
+.log-table td{padding:8px 10px;border-bottom:1px solid #f0f0f0;vertical-align:top}
 .log-table tr:last-child td{border-bottom:none}
-.ch-line{color:#00c300;font-weight:700;font-size:12px}
-.ch-fb{color:#1877f2;font-weight:700;font-size:12px}
-.replied-yes{color:#aaa;font-size:12px}
-.replied-no{color:#00c300;font-weight:600;font-size:12px}
-.empty-log{text-align:center;color:#bbb;padding:40px;font-size:14px}
-@media(max-width:600px){
-  .tab{padding:10px 14px;font-size:13px}
-  .btn{padding:10px 16px;font-size:13px}
-}
+.replied-yes{color:#00b050;font-weight:600;font-size:12px}
+.replied-no{color:#bbb;font-size:12px}
+.empty{text-align:center;color:#ccc;padding:40px;font-size:14px}
+.flash{padding:10px 16px;border-radius:8px;margin-bottom:12px;font-size:14px}
+.ok{background:#e8f5e9;color:#2e7d32}
+.err{background:#fdecea;color:#c62828}
+@media(max-width:600px){.tab{padding:9px 12px;font-size:13px}.btn{padding:9px 14px;font-size:13px}}
 </style>
 </head>
-<body>
-{% if not auth %}
-<div class="login-wrap">
-  <h2>🔐 J SIMPLE 後台</h2>
-  <form method="POST" action="{{ login_action }}">
-    <input type="password" name="password" placeholder="請輸入密碼" autofocus>
-    <button class="btn" type="submit">登入</button>
-  </form>
-  {% if error %}<p class="err-msg">{{ error }}</p>{% endif %}
-</div>
-{% else %}
+<body style="--ac:{{ ac }};--ac-rgb:{{ ac_rgb }}">
 <div class="header">
-  <h1>⚡ Bot 後台</h1>
-  <div class="badges">
-    <span class="badge badge-line">LINE</span>
-    <span class="badge badge-fb">FB Messenger</span>
+  <a class="back" href="/admin?key={{ key }}">‹</a>
+  <h1>{{ pname }}</h1>
+  <div class="toggle-wrap">
+    <span class="toggle-label">{{ '開啟' if cfg.enabled else '關閉' }}</span>
+    <form method="POST" action="/admin/{{ platform }}/toggle?key={{ key }}" style="display:inline">
+      <label class="toggle">
+        <input type="checkbox" onchange="this.form.submit()" {{ 'checked' if cfg.enabled }}>
+        <span class="slider"></span>
+      </label>
+    </form>
   </div>
 </div>
+
 <div class="tabs">
   <div class="tab active" onclick="switchTab('replies',this)">💬 回覆內容</div>
   <div class="tab" onclick="switchTab('keywords',this)">🏷️ 關鍵字</div>
+  <div class="tab" onclick="switchTab('add',this)">➕ 新增</div>
   <div class="tab" onclick="switchTab('test',this)">🧪 測試</div>
-  <div class="tab" onclick="switchTab('logs',this)" id="logs-tab">📋 紀錄</div>
+  <div class="tab" onclick="switchTab('logs',this)">📋 紀錄</div>
 </div>
 
 <div class="container">
@@ -275,35 +326,40 @@ textarea:focus{outline:none;border-color:#00c300;box-shadow:0 0 0 3px rgba(0,195
 
   <!-- 回覆內容 -->
   <div id="tab-replies" class="tab-content active">
-    <form method="POST" action="{{ save_action }}" id="replies-form">
-      {% for id, label in labels.items() %}
+    <form method="POST" action="/admin/{{ platform }}/save?key={{ key }}">
+      {% for id, label in cfg.labels.items() %}
       <div class="card">
         <div class="card-head">
           <div class="card-title">{{ label }}</div>
-          <span class="card-label">{{ id }}</span>
+          <div class="card-meta">
+            <span class="badge">{{ id }}</span>
+            {% if id not in builtin_intents %}
+            <button type="button" class="del-btn" onclick="delIntent('{{ id }}')">×</button>
+            {% endif %}
+          </div>
         </div>
-        <textarea name="{{ id }}">{{ replies[id] }}</textarea>
+        <textarea name="reply_{{ id }}">{{ cfg.replies.get(id,'') }}</textarea>
       </div>
       {% endfor %}
       <div class="btn-row">
         <button class="btn btn-save" type="submit" name="action" value="save">💾 儲存</button>
-        <button class="btn btn-deploy" type="submit" name="action" value="deploy">🚀 部署</button>
+        <button class="btn btn-save" type="submit" name="action" value="deploy" style="background:#1a1a1a">🚀 部署</button>
       </div>
     </form>
   </div>
 
   <!-- 關鍵字 -->
   <div id="tab-keywords" class="tab-content">
-    <form method="POST" action="{{ kw_save_action }}" id="kw-form">
-      {% for id, label in labels.items() %}
+    <form method="POST" action="/admin/{{ platform }}/kw-save?key={{ key }}">
+      {% for id, label in cfg.labels.items() %}
       {% if id != 'default' %}
       <div class="card">
         <div class="card-head">
           <div class="card-title">{{ label }}</div>
-          <span class="card-label">{{ id }}</span>
+          <span class="badge">{{ id }}</span>
         </div>
-        <input class="kw-input" type="text" name="{{ id }}" value="{{ keywords[id]|join(', ') }}" placeholder="關鍵字1, 關鍵字2, ...">
-        <div class="kw-hint">逗號分隔，不分大小寫</div>
+        <input class="kw-input" type="text" name="kw_{{ id }}" value="{{ cfg.keywords.get(id,[])|join(', ') }}" placeholder="關鍵字1, 關鍵字2, ...">
+        <div class="hint">逗號分隔，不分大小寫</div>
       </div>
       {% endif %}
       {% endfor %}
@@ -313,15 +369,41 @@ textarea:focus{outline:none;border-color:#00c300;box-shadow:0 0 0 3px rgba(0,195
     </form>
   </div>
 
+  <!-- 新增意圖 -->
+  <div id="tab-add" class="tab-content">
+    <form method="POST" action="/admin/{{ platform }}/add-intent?key={{ key }}">
+      <div class="add-card">
+        <div class="add-title">➕ 新增回覆類別</div>
+        <div class="field">
+          <label>識別碼（英文，不可重複）</label>
+          <input type="text" name="intent_key" placeholder="例如：assembly" required pattern="[a-z_]+">
+        </div>
+        <div class="field">
+          <label>顯示名稱</label>
+          <input type="text" name="intent_label" placeholder="例如：安裝教學" required>
+        </div>
+        <div class="field">
+          <label>觸發關鍵字（逗號分隔）</label>
+          <input type="text" name="intent_keywords" placeholder="例如：怎麼裝,安裝步驟,組裝說明" required>
+        </div>
+        <div class="field">
+          <label>回覆內容</label>
+          <textarea name="intent_reply" style="min-height:80px" placeholder="輸入回覆文字..." required></textarea>
+        </div>
+        <button type="submit" class="btn-add">新增</button>
+      </div>
+    </form>
+  </div>
+
   <!-- 測試 -->
   <div id="tab-test" class="tab-content">
-    <div class="test-box">
+    <div class="card">
       <div class="card-title" style="margin-bottom:12px">模擬用戶訊息</div>
       <input class="test-input" id="test-input" type="text" placeholder="輸入訊息，例如：這個有現貨嗎" onkeydown="if(event.key==='Enter')runTest()">
-      <button class="btn btn-test-send" onclick="runTest()">送出測試</button>
+      <button class="btn-test" onclick="runTest()">送出測試</button>
       <div class="test-result" id="test-result">
         <div class="intent-badge" id="test-intent"></div>
-        <div class="reply-text" id="test-reply"></div>
+        <div class="reply-pre" id="test-reply"></div>
       </div>
     </div>
   </div>
@@ -329,114 +411,224 @@ textarea:focus{outline:none;border-color:#00c300;box-shadow:0 0 0 3px rgba(0,195
   <!-- 紀錄 -->
   <div id="tab-logs" class="tab-content">
     <div class="card" style="padding:0;overflow:hidden">
-      <div id="log-content"><div class="empty-log">載入中...</div></div>
+      <div id="log-content"><div class="empty">載入中...</div></div>
     </div>
   </div>
 </div>
 
+<!-- 刪除意圖 form（hidden） -->
+<form id="del-form" method="POST" action="/admin/{{ platform }}/del-intent?key={{ key }}">
+  <input type="hidden" name="intent_key" id="del-key">
+</form>
+
 <script>
-const KEY = "{{ key }}";
-function switchTab(name, el) {
+const KEY="{{ key }}",PLATFORM="{{ platform }}";
+function switchTab(name,el){
   document.querySelectorAll('.tab-content').forEach(t=>t.classList.remove('active'));
   document.querySelectorAll('.tab').forEach(t=>t.classList.remove('active'));
   document.getElementById('tab-'+name).classList.add('active');
   el.classList.add('active');
-  if(name==='logs') loadLogs();
+  if(name==='logs')loadLogs();
 }
-function runTest() {
-  const text = document.getElementById('test-input').value.trim();
-  if(!text) return;
-  fetch('/api/test?key='+KEY, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({text})})
+function runTest(){
+  const text=document.getElementById('test-input').value.trim();
+  if(!text)return;
+  fetch('/api/test?key='+KEY,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({text,platform:PLATFORM})})
     .then(r=>r.json()).then(d=>{
-      document.getElementById('test-intent').textContent = d.label + '（' + d.intent + '）';
-      document.getElementById('test-reply').textContent = d.reply;
-      document.getElementById('test-result').style.display = 'block';
+      document.getElementById('test-intent').textContent=d.label+'（'+d.intent+'）';
+      document.getElementById('test-reply').textContent=d.reply;
+      document.getElementById('test-result').style.display='block';
     });
 }
-function loadLogs() {
-  fetch('/api/logs?key='+KEY).then(r=>r.json()).then(logs=>{
-    if(!logs.length){
-      document.getElementById('log-content').innerHTML='<div class="empty-log">尚無訊息紀錄</div>';
-      return;
-    }
-    let html = '<table class="log-table"><thead><tr><th>時間</th><th>來源</th><th>訊息</th><th>意圖</th><th>回覆</th></tr></thead><tbody>';
+function loadLogs(){
+  fetch('/api/logs?key='+KEY+'&platform='+PLATFORM).then(r=>r.json()).then(logs=>{
+    if(!logs.length){document.getElementById('log-content').innerHTML='<div class="empty">尚無訊息紀錄</div>';return;}
+    let h='<table class="log-table"><thead><tr><th>時間</th><th>訊息</th><th>意圖</th><th>狀態</th></tr></thead><tbody>';
     logs.forEach(l=>{
-      const ch = l.channel==='LINE' ? '<span class="ch-line">LINE</span>' : '<span class="ch-fb">FB</span>';
-      const rep = l.replied ? '<span class="replied-no">✓ 回覆</span>' : '<span class="replied-yes">冷卻中</span>';
-      html += `<tr><td>${l.time}</td><td>${ch}</td><td>${l.msg}</td><td>${l.intent}</td><td>${rep}</td></tr>`;
+      const rep=l.replied?'<span class="replied-yes">✓ 已回覆</span>':'<span class="replied-no">冷卻中</span>';
+      h+=`<tr><td>${l.time}</td><td>${l.msg}</td><td>${l.intent}</td><td>${rep}</td></tr>`;
     });
-    html += '</tbody></table>';
-    document.getElementById('log-content').innerHTML = html;
+    h+='</tbody></table>';
+    document.getElementById('log-content').innerHTML=h;
   });
 }
+function delIntent(key){
+  if(!confirm('確定刪除「'+key+'」這個類別？'))return;
+  document.getElementById('del-key').value=key;
+  document.getElementById('del-form').submit();
+}
 </script>
-{% endif %}
-</body>
-</html>"""
+</body></html>"""
 
-_flash_store = {}
+LOGIN_HTML = """<!DOCTYPE html>
+<html lang="zh-TW"><head><meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>J SIMPLE Bot 後台</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:-apple-system,sans-serif;background:#f5f5f5}
+.wrap{max-width:340px;margin:80px auto;background:#fff;border-radius:16px;padding:36px;box-shadow:0 2px 16px rgba(0,0,0,.1);text-align:center}
+h2{margin-bottom:22px;font-size:19px;color:#333}
+input{width:100%;padding:11px;border:1px solid #ddd;border-radius:8px;font-size:15px;margin-bottom:14px}
+button{width:100%;background:#00c300;color:#fff;border:none;border-radius:8px;padding:12px;font-size:15px;font-weight:600;cursor:pointer}
+.err{color:red;margin-top:10px;font-size:13px}
+</style></head><body>
+<div class="wrap">
+  <h2>🔐 J SIMPLE 後台</h2>
+  <form method="POST" action="/admin/login">
+    <input type="hidden" name="next" value="{{ next }}">
+    <input type="password" name="password" placeholder="請輸入密碼" autofocus>
+    <button type="submit">登入</button>
+  </form>
+  {% if error %}<p class="err">{{ error }}</p>{% endif %}
+</div>
+</body></html>"""
 
-def render_admin(key, login_action, save_action, kw_save_action="", error=None):
-    auth = (key == ADMIN_PASSWORD)
-    flash_data = _flash_store.pop("msg", "")
-    flash_type = _flash_store.pop("type", "ok")
-    return render_template_string(ADMIN_HTML,
-        auth=auth, key=key,
-        replies=custom_replies,
-        labels=REPLY_LABELS,
-        keywords=custom_keywords,
-        flash=flash_data,
-        flash_type=flash_type,
-        error=error,
-        login_action=login_action,
-        save_action=save_action,
-        kw_save_action=kw_save_action)
+_flash = {}
+BUILTIN_INTENTS = {"greeting","price","custom","shipping","size","delivery","warranty","material","color","payment","return","default"}
+
+PLATFORM_META = {
+    "line": {"name": "LINE Bot 管理", "ac": "#00c300", "ac_rgb": "0,195,0"},
+    "fb":   {"name": "FB Messenger 管理", "ac": "#1877f2", "ac_rgb": "24,119,242"},
+}
+
+def check_auth():
+    key = request.args.get("key", "")
+    return key == ADMIN_PASSWORD, key
+
+def render_platform(platform, key):
+    meta = PLATFORM_META[platform]
+    cfg = platforms[platform]
+    flash_msg = _flash.pop("msg", "")
+    flash_type = _flash.pop("type", "ok")
+    return render_template_string(PLATFORM_HTML,
+        platform=platform, pname=meta["name"],
+        ac=meta["ac"], ac_rgb=meta["ac_rgb"],
+        key=key, cfg=cfg,
+        builtin_intents=BUILTIN_INTENTS,
+        flash=flash_msg, flash_type=flash_type)
+
+# ── Admin Routes ──────────────────────────────────────────
 
 @app.route("/admin")
-def admin():
-    key = request.args.get("key", "")
-    return render_admin(key, "/admin/login", f"/admin/save?key={key}", f"/admin/kw-save?key={key}")
+def admin_dash():
+    ok, key = check_auth()
+    if not ok:
+        return render_template_string(LOGIN_HTML, next="/admin", error=None)
+    return render_template_string(DASH_HTML, key=key,
+        line_on=platforms["line"]["enabled"],
+        fb_on=platforms["fb"]["enabled"])
 
 @app.route("/admin/login", methods=["POST"])
 def admin_login():
     pw = request.form.get("password", "")
+    next_url = request.form.get("next", "/admin")
     if pw == ADMIN_PASSWORD:
-        return redirect(f"/admin?key={pw}")
-    return render_admin("", "/admin/login", "/admin/save", error="密碼錯誤")
+        return redirect(f"{next_url}?key={pw}")
+    return render_template_string(LOGIN_HTML, next=next_url, error="密碼錯誤")
 
-def do_save(key, redirect_base):
-    if key != ADMIN_PASSWORD:
-        return redirect(f"/{redirect_base}")
-    for k in REPLY_LABELS:
-        if k in request.form:
-            custom_replies[k] = request.form[k]
+@app.route("/admin/<platform>")
+def platform_admin(platform):
+    if platform not in platforms:
+        abort(404)
+    ok, key = check_auth()
+    if not ok:
+        return render_template_string(LOGIN_HTML, next=f"/admin/{platform}", error=None)
+    return render_platform(platform, key)
+
+@app.route("/admin/<platform>/toggle", methods=["POST"])
+def platform_toggle(platform):
+    if platform not in platforms:
+        abort(404)
+    ok, key = check_auth()
+    if not ok:
+        abort(403)
+    platforms[platform]["enabled"] = not platforms[platform]["enabled"]
+    state = "開啟" if platforms[platform]["enabled"] else "關閉"
+    _flash["msg"] = f"✅ {PLATFORM_META[platform]['name']} 已{state}"
+    _flash["type"] = "ok"
+    return redirect(f"/admin/{platform}?key={key}")
+
+@app.route("/admin/<platform>/save", methods=["POST"])
+def platform_save(platform):
+    if platform not in platforms:
+        abort(404)
+    ok, key = check_auth()
+    if not ok:
+        abort(403)
+    cfg = platforms[platform]
+    for k in cfg["labels"]:
+        field = f"reply_{k}"
+        if field in request.form:
+            cfg["replies"][k] = request.form[field]
     if request.form.get("action") == "deploy" and GITHUB_TOKEN:
-        ok, msg = commit_to_github()
-        _flash_store["msg"] = msg
-        _flash_store["type"] = "ok" if ok else "err"
+        success, msg = commit_to_github()
+        _flash["msg"] = msg
+        _flash["type"] = "ok" if success else "err"
     else:
-        _flash_store["msg"] = "✅ 已儲存（重啟後還原，請點「🚀 部署」永久生效）"
-        _flash_store["type"] = "ok"
-    return redirect(f"/{redirect_base}?key={key}")
+        _flash["msg"] = "✅ 已儲存（點「🚀 部署」永久生效）"
+        _flash["type"] = "ok"
+    return redirect(f"/admin/{platform}?key={key}")
 
-def do_kw_save(key, redirect_base):
-    if key != ADMIN_PASSWORD:
-        return redirect(f"/{redirect_base}")
-    for k in custom_keywords:
-        if k in request.form:
-            raw = request.form[k]
-            custom_keywords[k] = [w.strip() for w in raw.split(",") if w.strip()]
-    _flash_store["msg"] = "✅ 關鍵字已更新（重啟後還原，回「回覆內容」點「🚀 部署」永久生效）"
-    _flash_store["type"] = "ok"
-    return redirect(f"/{redirect_base}?key={key}")
+@app.route("/admin/<platform>/kw-save", methods=["POST"])
+def platform_kw_save(platform):
+    if platform not in platforms:
+        abort(404)
+    ok, key = check_auth()
+    if not ok:
+        abort(403)
+    cfg = platforms[platform]
+    for k in cfg["labels"]:
+        if k == "default":
+            continue
+        field = f"kw_{k}"
+        if field in request.form:
+            cfg["keywords"][k] = [w.strip() for w in request.form[field].split(",") if w.strip()]
+    _flash["msg"] = "✅ 關鍵字已更新"
+    _flash["type"] = "ok"
+    return redirect(f"/admin/{platform}?key={key}")
 
-@app.route("/admin/save", methods=["POST"])
-def admin_save():
-    return do_save(request.args.get("key", ""), "admin")
+@app.route("/admin/<platform>/add-intent", methods=["POST"])
+def platform_add_intent(platform):
+    if platform not in platforms:
+        abort(404)
+    ok, key = check_auth()
+    if not ok:
+        abort(403)
+    cfg = platforms[platform]
+    k = request.form.get("intent_key", "").strip().lower().replace(" ", "_")
+    label = request.form.get("intent_label", "").strip()
+    kws = [w.strip() for w in request.form.get("intent_keywords", "").split(",") if w.strip()]
+    reply = request.form.get("intent_reply", "").strip()
+    if k and label and kws and reply and k not in cfg["labels"]:
+        cfg["labels"][k] = label
+        cfg["keywords"][k] = kws
+        cfg["replies"][k] = reply
+        _flash["msg"] = f"✅ 已新增「{label}」類別"
+        _flash["type"] = "ok"
+    else:
+        _flash["msg"] = "❌ 新增失敗（識別碼重複或欄位未填）"
+        _flash["type"] = "err"
+    return redirect(f"/admin/{platform}?key={key}#tab-add")
 
-@app.route("/admin/kw-save", methods=["POST"])
-def admin_kw_save():
-    return do_kw_save(request.args.get("key", ""), "admin")
+@app.route("/admin/<platform>/del-intent", methods=["POST"])
+def platform_del_intent(platform):
+    if platform not in platforms:
+        abort(404)
+    ok, key = check_auth()
+    if not ok:
+        abort(403)
+    k = request.form.get("intent_key", "")
+    cfg = platforms[platform]
+    if k and k not in BUILTIN_INTENTS and k in cfg["labels"]:
+        cfg["labels"].pop(k)
+        cfg["keywords"].pop(k, None)
+        cfg["replies"].pop(k, None)
+        _flash["msg"] = f"✅ 已刪除「{k}」類別"
+        _flash["type"] = "ok"
+    return redirect(f"/admin/{platform}?key={key}")
+
+# ── GitHub Deploy ─────────────────────────────────────────
 
 def commit_to_github():
     try:
@@ -449,7 +641,7 @@ def commit_to_github():
         with urllib.request.urlopen(req) as r:
             sha = json.loads(r.read())["sha"]
         payload = json.dumps({
-            "message": "admin: update replies",
+            "message": "admin: update platform config",
             "content": base64.b64encode(content.encode()).decode(),
             "sha": sha,
         }).encode()
@@ -464,16 +656,37 @@ def commit_to_github():
         return False, f"❌ 部署失敗：{e}"
 
 def build_knowledge_base_py() -> str:
-    lines = ['"""\nJ SIMPLE 高架床 Bot 知識庫\n"""\n\n']
-    lines.append("BRAND_INFO = {\n")
+    lp = platforms["line"]
+    fp = platforms["fb"]
+
+    def dict_to_py(d, indent=4):
+        sp = " " * indent
+        lines = []
+        for k, v in d.items():
+            if isinstance(v, str):
+                esc = v.replace("\\", "\\\\").replace('"""', '\\"\\"\\"')
+                lines.append(f'{sp}"{k}": """{esc}""",\n')
+            elif isinstance(v, list):
+                items = ", ".join(f'"{x}"' for x in v)
+                lines.append(f'{sp}"{k}": [{items}],\n')
+        return "".join(lines)
+
+    out = ['"""\nJ SIMPLE 高架床 Bot 知識庫\n"""\n\n']
+    out.append("BRAND_INFO = {\n")
     for k, v in BRAND_INFO.items():
-        lines.append(f'    "{k}": "{v}",\n')
-    lines.append("}\n\nSHIPPING = {\n    \"north\": 1000,\n    \"central_south\": 1300,\n    \"floor_surcharge\": 300,\n    \"elevator_surcharge\": 300,\n}\n\nREPLIES = {\n")
-    for k, v in custom_replies.items():
-        escaped = v.replace("\\", "\\\\").replace('"""', '\\"\\"\\"')
-        lines.append(f'    "{k}": """{escaped}""",\n\n')
-    lines.append("}\n")
-    return "".join(lines)
+        out.append(f'    "{k}": "{v}",\n')
+    out.append("}\n\n")
+    out.append('SHIPPING = {"north":1000,"central_south":1300,"floor_surcharge":300,"elevator_surcharge":300}\n\n')
+    out.append(f'LINE_ENABLED = {lp["enabled"]}\n')
+    out.append(f'FB_ENABLED = {fp["enabled"]}\n\n')
+    out.append("INTENT_LABELS = {\n" + dict_to_py(lp["labels"]) + "}\n\n")
+    out.append("LINE_REPLIES = {\n" + dict_to_py(lp["replies"]) + "}\n\n")
+    out.append("FB_REPLIES = {\n" + dict_to_py(fp["replies"]) + "}\n\n")
+    out.append("LINE_KEYWORDS = {\n" + dict_to_py(lp["keywords"]) + "}\n\n")
+    out.append("FB_KEYWORDS = {\n" + dict_to_py(fp["keywords"]) + "}\n\n")
+    out.append("_BASE_REPLIES = LINE_REPLIES\n")
+    out.append("_BASE_KEYWORDS = LINE_KEYWORDS\n")
+    return "".join(out)
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
