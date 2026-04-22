@@ -15,7 +15,7 @@ from linebot.v3 import WebhookHandler
 from linebot.v3.exceptions import InvalidSignatureError
 from linebot.v3.messaging import (
     Configuration, ApiClient, MessagingApi,
-    ReplyMessageRequest, TextMessage
+    ReplyMessageRequest, TextMessage, ImageMessage
 )
 from linebot.v3.webhooks import MessageEvent, TextMessageContent
 from knowledge_base import (
@@ -43,16 +43,18 @@ message_log = deque(maxlen=100)
 # 各平台獨立狀態
 platforms = {
     "line": {
-        "enabled":  LINE_ENABLED,
-        "replies":  dict(LINE_REPLIES),
-        "keywords": {k: list(v) for k, v in LINE_KEYWORDS.items()},
-        "labels":   dict(INTENT_LABELS),
+        "enabled":    LINE_ENABLED,
+        "replies":    dict(LINE_REPLIES),
+        "keywords":   {k: list(v) for k, v in LINE_KEYWORDS.items()},
+        "labels":     dict(INTENT_LABELS),
+        "image_urls": {},
     },
     "fb": {
-        "enabled":  FB_ENABLED,
-        "replies":  dict(FB_REPLIES),
-        "keywords": {k: list(v) for k, v in FB_KEYWORDS.items()},
-        "labels":   dict(INTENT_LABELS),
+        "enabled":    FB_ENABLED,
+        "replies":    dict(FB_REPLIES),
+        "keywords":   {k: list(v) for k, v in FB_KEYWORDS.items()},
+        "labels":     dict(INTENT_LABELS),
+        "image_urls": {},
     },
 }
 
@@ -85,9 +87,11 @@ def get_reply(text: str, user_id: str, platform: str) -> str | None:
         "replied": not cooled,
     })
     if cooled:
-        return None
+        return None, None
     user_times[intent] = now
-    return cfg["replies"].get(intent, cfg["replies"].get("default", ""))
+    text = cfg["replies"].get(intent, cfg["replies"].get("default", ""))
+    image_url = cfg["image_urls"].get(intent, "")
+    return text, image_url
 
 # ── LINE Webhook ──────────────────────────────────────────
 
@@ -103,13 +107,17 @@ def callback():
 
 @handler.add(MessageEvent, message=TextMessageContent)
 def handle_line_message(event):
-    reply_text = get_reply(event.message.text.strip(), event.source.user_id, "line")
-    if not reply_text:
+    text, image_url = get_reply(event.message.text.strip(), event.source.user_id, "line")
+    if not text and not image_url:
         return
+    messages = []
+    if text:
+        messages.append(TextMessage(text=text))
+    if image_url:
+        messages.append(ImageMessage(original_content_url=image_url, preview_image_url=image_url))
     with ApiClient(configuration) as api_client:
         MessagingApi(api_client).reply_message_with_http_info(
-            ReplyMessageRequest(reply_token=event.reply_token,
-                                messages=[TextMessage(text=reply_text)])
+            ReplyMessageRequest(reply_token=event.reply_token, messages=messages)
         )
 
 # ── FB Messenger Webhook ──────────────────────────────────
@@ -130,9 +138,11 @@ def fb_webhook():
                 sid = event.get("sender", {}).get("id", "")
                 msg = event.get("message", {})
                 if sid and "text" in msg:
-                    reply = get_reply(msg["text"].strip(), sid, "fb")
-                    if reply:
-                        fb_send(sid, reply)
+                    text, image_url = get_reply(msg["text"].strip(), sid, "fb")
+                    if text:
+                        fb_send(sid, text)
+                    if image_url:
+                        fb_send_image(sid, image_url)
     return "OK", 200
 
 def fb_send(psid: str, text: str):
@@ -145,6 +155,45 @@ def fb_send(psid: str, text: str):
         urllib.request.urlopen(req)
     except Exception:
         pass
+
+def fb_send_image(psid: str, image_url: str):
+    if not FB_PAGE_ACCESS_TOKEN:
+        return
+    url = f"https://graph.facebook.com/v19.0/me/messages?access_token={FB_PAGE_ACCESS_TOKEN}"
+    payload = json.dumps({"recipient": {"id": psid}, "message": {
+        "attachment": {"type": "image", "payload": {"url": image_url, "is_reusable": True}}
+    }}).encode()
+    req = urllib.request.Request(url, data=payload, headers={"Content-Type": "application/json"})
+    try:
+        urllib.request.urlopen(req)
+    except Exception:
+        pass
+
+def upload_image_to_github(filename: str, data: bytes) -> str:
+    url = f"https://api.github.com/repos/{GITHUB_REPO}/contents/images/{filename}"
+    try:
+        req = urllib.request.Request(url, headers={
+            "Authorization": f"token {GITHUB_TOKEN}",
+            "Accept": "application/vnd.github.v3+json",
+        })
+        sha = None
+        try:
+            with urllib.request.urlopen(req) as r:
+                sha = json.loads(r.read()).get("sha")
+        except Exception:
+            pass
+        body = {"message": f"upload image: {filename}", "content": base64.b64encode(data).decode()}
+        if sha:
+            body["sha"] = sha
+        req2 = urllib.request.Request(url, data=json.dumps(body).encode(), method="PUT", headers={
+            "Authorization": f"token {GITHUB_TOKEN}",
+            "Content-Type": "application/json",
+            "Accept": "application/vnd.github.v3+json",
+        })
+        urllib.request.urlopen(req2)
+        return f"https://raw.githubusercontent.com/{GITHUB_REPO}/main/images/{filename}"
+    except Exception as e:
+        return ""
 
 # ── API ───────────────────────────────────────────────────
 
@@ -165,6 +214,29 @@ def api_test():
     label = cfg["labels"].get(intent, intent)
     reply = cfg["replies"].get(intent, cfg["replies"].get("default", ""))
     return jsonify({"intent": intent, "label": label, "reply": reply})
+
+@app.route("/admin/<platform>/upload-image", methods=["POST"])
+def upload_image(platform):
+    if platform not in platforms:
+        abort(404)
+    ok, _ = check_auth()
+    if not ok:
+        return jsonify({"error": "unauthorized"}), 403
+    if not GITHUB_TOKEN:
+        return jsonify({"error": "GITHUB_TOKEN 未設定"}), 500
+    f = request.files.get("file")
+    if not f:
+        return jsonify({"error": "no file"}), 400
+    import re, time as _time
+    safe = re.sub(r"[^a-zA-Z0-9._-]", "_", f.filename)
+    filename = f"{int(_time.time())}_{safe}"
+    image_url = upload_image_to_github(filename, f.read())
+    if not image_url:
+        return jsonify({"error": "上傳失敗"}), 500
+    intent_key = request.form.get("intent_key", "")
+    if intent_key:
+        platforms[platform]["image_urls"][intent_key] = image_url
+    return jsonify({"url": image_url})
 
 @app.route("/api/logs")
 def api_logs():
@@ -339,6 +411,26 @@ textarea:focus{outline:none;border-color:var(--ac);box-shadow:0 0 0 3px rgba(var
           </div>
         </div>
         <textarea name="reply_{{ id }}">{{ cfg.replies.get(id,'') }}</textarea>
+        <div style="margin-top:10px">
+          <div style="font-size:12px;color:#aaa;margin-bottom:6px">圖片回覆（選填）</div>
+          {% set img = cfg.image_urls.get(id,'') %}
+          {% if img %}
+          <div id="img-preview-{{ id }}" style="margin-bottom:8px">
+            <img src="{{ img }}" style="max-width:120px;max-height:80px;border-radius:6px;border:1px solid #eee">
+            <button type="button" onclick="clearImage('{{ id }}')" style="margin-left:8px;border:none;background:none;color:#e57373;cursor:pointer;font-size:13px">✕ 移除</button>
+          </div>
+          {% else %}
+          <div id="img-preview-{{ id }}" style="display:none;margin-bottom:8px">
+            <img id="img-thumb-{{ id }}" src="" style="max-width:120px;max-height:80px;border-radius:6px;border:1px solid #eee">
+            <button type="button" onclick="clearImage('{{ id }}')" style="margin-left:8px;border:none;background:none;color:#e57373;cursor:pointer;font-size:13px">✕ 移除</button>
+          </div>
+          {% endif %}
+          <input type="hidden" name="img_{{ id }}" id="img-url-{{ id }}" value="{{ img }}">
+          <label style="display:inline-flex;align-items:center;gap:6px;background:#f5f5f5;border:1px solid #ddd;border-radius:8px;padding:7px 12px;cursor:pointer;font-size:13px">
+            📷 上傳圖片
+            <input type="file" accept="image/*" style="display:none" onchange="uploadImg('{{ id }}',this)">
+          </label>
+        </div>
       </div>
       {% endfor %}
       <div class="btn-row">
@@ -452,6 +544,28 @@ function loadLogs(){
     document.getElementById('log-content').innerHTML=h;
   });
 }
+function uploadImg(intentKey, input){
+  const file = input.files[0];
+  if(!file) return;
+  const fd = new FormData();
+  fd.append('file', file);
+  fd.append('intent_key', intentKey);
+  fetch('/admin/'+PLATFORM+'/upload-image?key='+KEY, {method:'POST', body:fd})
+    .then(r=>r.json()).then(d=>{
+      if(d.url){
+        const prev = document.getElementById('img-preview-'+intentKey);
+        const thumb = document.getElementById('img-thumb-'+intentKey);
+        if(thumb) thumb.src = d.url;
+        prev.style.display = 'block';
+        document.getElementById('img-url-'+intentKey).value = d.url;
+      } else alert('上傳失敗：'+(d.error||''));
+    });
+}
+function clearImage(intentKey){
+  document.getElementById('img-url-'+intentKey).value='';
+  const prev=document.getElementById('img-preview-'+intentKey);
+  prev.style.display='none';
+}
 function delIntent(key){
   if(!confirm('確定刪除「'+key+'」這個類別？'))return;
   document.getElementById('del-key').value=key;
@@ -558,9 +672,13 @@ def platform_save(platform):
         abort(403)
     cfg = platforms[platform]
     for k in cfg["labels"]:
-        field = f"reply_{k}"
-        if field in request.form:
-            cfg["replies"][k] = request.form[field]
+        if f"reply_{k}" in request.form:
+            cfg["replies"][k] = request.form[f"reply_{k}"]
+        img_val = request.form.get(f"img_{k}", "")
+        if img_val:
+            cfg["image_urls"][k] = img_val
+        elif f"img_{k}" in request.form and not img_val:
+            cfg["image_urls"].pop(k, None)
     if request.form.get("action") == "deploy" and GITHUB_TOKEN:
         success, msg = commit_to_github()
         _flash["msg"] = msg
@@ -684,6 +802,8 @@ def build_knowledge_base_py() -> str:
     out.append("FB_REPLIES = {\n" + dict_to_py(fp["replies"]) + "}\n\n")
     out.append("LINE_KEYWORDS = {\n" + dict_to_py(lp["keywords"]) + "}\n\n")
     out.append("FB_KEYWORDS = {\n" + dict_to_py(fp["keywords"]) + "}\n\n")
+    out.append("LINE_IMAGE_URLS = {\n" + dict_to_py(lp["image_urls"]) + "}\n\n")
+    out.append("FB_IMAGE_URLS = {\n" + dict_to_py(fp["image_urls"]) + "}\n\n")
     out.append("_BASE_REPLIES = LINE_REPLIES\n")
     out.append("_BASE_KEYWORDS = LINE_KEYWORDS\n")
     return "".join(out)
