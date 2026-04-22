@@ -20,7 +20,8 @@ from linebot.v3.messaging import (
 from linebot.v3.webhooks import MessageEvent, TextMessageContent
 from knowledge_base import (
     BRAND_INFO, LINE_ENABLED, FB_ENABLED, INTENT_LABELS,
-    LINE_REPLIES, FB_REPLIES, LINE_KEYWORDS, FB_KEYWORDS
+    LINE_REPLIES, FB_REPLIES, LINE_KEYWORDS, FB_KEYWORDS,
+    LINE_IMAGE_URLS, FB_IMAGE_URLS
 )
 
 app = Flask(__name__)
@@ -47,14 +48,14 @@ platforms = {
         "replies":    dict(LINE_REPLIES),
         "keywords":   {k: list(v) for k, v in LINE_KEYWORDS.items()},
         "labels":     dict(INTENT_LABELS),
-        "image_urls": {},
+        "image_urls": dict(LINE_IMAGE_URLS),
     },
     "fb": {
         "enabled":    FB_ENABLED,
         "replies":    dict(FB_REPLIES),
         "keywords":   {k: list(v) for k, v in FB_KEYWORDS.items()},
         "labels":     dict(INTENT_LABELS),
-        "image_urls": {},
+        "image_urls": dict(FB_IMAGE_URLS),
     },
 }
 
