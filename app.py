@@ -1,8 +1,9 @@
 """
-J SIMPLE 高架床 LINE Bot
-- Flask webhook 伺服器
-- 關鍵字自動回覆
-- /admin?key=密碼 後台可線上編輯回覆文案
+J SIMPLE 高架床 Bot
+- LINE + FB Messenger Webhook
+- 關鍵字自動回覆 + 5 分鐘冷卻
+- /admin?key=密碼  LINE/FB 共用後台
+- /fb-admin?key=密碼  FB 專屬後台（同內容）
 """
 
 import os
@@ -24,6 +25,8 @@ app = Flask(__name__)
 
 LINE_CHANNEL_SECRET       = os.getenv("LINE_CHANNEL_SECRET", "ed4319138fed1c6db548b60327e2d69d")
 LINE_CHANNEL_ACCESS_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN", "S/R1BB9ByxtJ5CXr4kbbj51Xkz7S9kfxYIjzYsqDvjzAYHXLc6aOJQq6eDO5j7Me3SVGrkkpPeX0OH5tUHYnjGyO/S4WDRYlOWoIPIJplSUUCNX0FmeCnPhizFaUSnPNIw2uyvV016cyuO1jtO5dZQdB04t89/1O/w1cDnyilFU=")
+FB_PAGE_ACCESS_TOKEN      = os.getenv("FB_PAGE_ACCESS_TOKEN", "")
+FB_VERIFY_TOKEN           = "jsimple2024"
 ADMIN_PASSWORD            = os.getenv("ADMIN_PASSWORD", "jsimple2024")
 GITHUB_TOKEN              = os.getenv("GITHUB_TOKEN", "")
 GITHUB_REPO               = "true555132-svg/jsimple-linebot"
@@ -34,9 +37,9 @@ handler = WebhookHandler(LINE_CHANNEL_SECRET)
 
 custom_replies = dict(DEFAULT_REPLIES)
 
-COOLDOWN_SECONDS = 300  # 5 分鐘內同一 intent 只回一次
-# {user_id: {intent: last_reply_timestamp}}
-user_cooldown: dict = {}
+COOLDOWN_SECONDS = 300  # 5 分鐘
+line_cooldown: dict = {}  # LINE 冷卻 {user_id: {intent: timestamp}}
+fb_cooldown: dict = {}    # FB 冷卻  {psid:    {intent: timestamp}}
 
 REPLY_LABELS = {
     "greeting": "打招呼",
@@ -53,7 +56,7 @@ REPLY_LABELS = {
     "default":  "預設回覆",
 }
 
-# ── 關鍵字分類 ────────────────────────────────────────────
+# ── 共用邏輯 ─────────────────────────────────────────────
 
 def classify_intent(text: str) -> str:
     keywords = {
@@ -75,13 +78,12 @@ def classify_intent(text: str) -> str:
             return intent
     return "default"
 
-def get_reply(user_message: str, user_id: str = "") -> str | None:
-    intent = classify_intent(user_message)
+def get_reply(text: str, user_id: str, cooldown_store: dict) -> str | None:
+    intent = classify_intent(text)
     now = time.time()
-    user_times = user_cooldown.setdefault(user_id, {})
-    last_time = user_times.get(intent, 0)
-    if now - last_time < COOLDOWN_SECONDS:
-        return None  # 冷卻中，不回覆
+    user_times = cooldown_store.setdefault(user_id, {})
+    if now - user_times.get(intent, 0) < COOLDOWN_SECONDS:
+        return None
     user_times[intent] = now
     return custom_replies.get(intent, custom_replies["default"])
 
@@ -98,19 +100,52 @@ def callback():
     return "OK"
 
 @handler.add(MessageEvent, message=TextMessageContent)
-def handle_message(event):
-    user_text = event.message.text.strip()
-    reply_text = get_reply(user_text, event.source.user_id)
+def handle_line_message(event):
+    reply_text = get_reply(event.message.text.strip(), event.source.user_id, line_cooldown)
     if reply_text is None:
-        return  # 冷卻中，略過
+        return
     with ApiClient(configuration) as api_client:
-        line_bot_api = MessagingApi(api_client)
-        line_bot_api.reply_message_with_http_info(
+        MessagingApi(api_client).reply_message_with_http_info(
             ReplyMessageRequest(
                 reply_token=event.reply_token,
                 messages=[TextMessage(text=reply_text)]
             )
         )
+
+# ── FB Messenger Webhook ──────────────────────────────────
+
+@app.route("/fb-webhook", methods=["GET"])
+def fb_verify():
+    if (request.args.get("hub.mode") == "subscribe" and
+            request.args.get("hub.verify_token") == FB_VERIFY_TOKEN):
+        return request.args.get("hub.challenge", ""), 200
+    abort(403)
+
+@app.route("/fb-webhook", methods=["POST"])
+def fb_webhook():
+    data = request.get_json(silent=True) or {}
+    if data.get("object") == "page":
+        for entry in data.get("entry", []):
+            for event in entry.get("messaging", []):
+                sender_id = event.get("sender", {}).get("id", "")
+                msg = event.get("message", {})
+                if sender_id and "text" in msg:
+                    reply_text = get_reply(msg["text"].strip(), sender_id, fb_cooldown)
+                    if reply_text:
+                        fb_send(sender_id, reply_text)
+    return "OK", 200
+
+def fb_send(psid: str, text: str):
+    if not FB_PAGE_ACCESS_TOKEN:
+        return
+    url = f"https://graph.facebook.com/v19.0/me/messages?access_token={FB_PAGE_ACCESS_TOKEN}"
+    payload = json.dumps({"recipient": {"id": psid}, "message": {"text": text}}).encode()
+    req = urllib.request.Request(url, data=payload,
+                                 headers={"Content-Type": "application/json"})
+    try:
+        urllib.request.urlopen(req)
+    except Exception:
+        pass
 
 # ── Admin 後台 ────────────────────────────────────────────
 
@@ -123,9 +158,12 @@ ADMIN_HTML = """<!DOCTYPE html>
 <style>
 * { box-sizing: border-box; margin: 0; padding: 0; }
 body { font-family: -apple-system, sans-serif; background: #f5f5f5; color: #333; }
-.header { background: #1a1a1a; color: #fff; padding: 16px 24px; display: flex; align-items: center; justify-content: space-between; }
+.header { background: #1a1a1a; color: #fff; padding: 16px 24px; display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px; }
 .header h1 { font-size: 18px; }
-.badge { background: #00c300; color: #fff; font-size: 12px; padding: 3px 10px; border-radius: 12px; }
+.badges { display: flex; gap: 8px; }
+.badge { font-size: 12px; padding: 3px 10px; border-radius: 12px; font-weight: 600; }
+.badge-line { background: #00c300; color: #fff; }
+.badge-fb   { background: #1877f2; color: #fff; }
 .container { max-width: 900px; margin: 24px auto; padding: 0 16px 100px; }
 .card { background: #fff; border-radius: 12px; padding: 20px; margin-bottom: 16px; box-shadow: 0 1px 4px rgba(0,0,0,.08); }
 .card-label { font-size: 12px; color: #aaa; margin-bottom: 4px; }
@@ -151,8 +189,7 @@ textarea:focus { outline: none; border-color: #00c300; }
 {% if not auth %}
 <div class="login-wrap">
   <h2>🔐 J SIMPLE 後台</h2>
-  <form method="POST" action="/admin/login">
-    <input type="hidden" name="next" value="{{ next }}">
+  <form method="POST" action="{{ login_action }}">
     <input type="password" name="password" placeholder="請輸入密碼" autofocus>
     <button class="btn" type="submit">登入</button>
   </form>
@@ -161,11 +198,14 @@ textarea:focus { outline: none; border-color: #00c300; }
 {% else %}
 <div class="header">
   <h1>Bot 回覆管理</h1>
-  <span class="badge">@jsimple</span>
+  <div class="badges">
+    <span class="badge badge-line">LINE @jsimple</span>
+    <span class="badge badge-fb">FB Messenger</span>
+  </div>
 </div>
 <div class="container">
   {% if flash %}<div class="flash {{ flash_type }}">{{ flash }}</div>{% endif %}
-  <form method="POST" action="/admin/save?key={{ key }}">
+  <form method="POST" action="{{ save_action }}">
     {% for id, label in labels.items() %}
     <div class="card">
       <div class="card-label">{{ id }}</div>
@@ -185,9 +225,7 @@ textarea:focus { outline: none; border-color: #00c300; }
 
 _flash_store = {}
 
-@app.route("/admin", methods=["GET"])
-def admin():
-    key = request.args.get("key", "")
+def render_admin(key, login_action, save_action, error=None):
     auth = (key == ADMIN_PASSWORD)
     flash_data = _flash_store.pop("msg", "")
     flash_type = _flash_store.pop("type", "ok")
@@ -197,34 +235,56 @@ def admin():
         labels=REPLY_LABELS,
         flash=flash_data,
         flash_type=flash_type,
-        error=None, next=key)
+        error=error,
+        login_action=login_action,
+        save_action=save_action)
+
+@app.route("/admin")
+def admin():
+    key = request.args.get("key", "")
+    return render_admin(key, "/admin/login", f"/admin/save?key={key}")
+
+@app.route("/fb-admin")
+def fb_admin():
+    key = request.args.get("key", "")
+    return render_admin(key, "/fb-admin/login", f"/fb-admin/save?key={key}")
 
 @app.route("/admin/login", methods=["POST"])
 def admin_login():
     pw = request.form.get("password", "")
     if pw == ADMIN_PASSWORD:
         return redirect(f"/admin?key={pw}")
-    return render_template_string(ADMIN_HTML,
-        auth=False, key="", replies={}, labels={},
-        flash="", flash_type="", error="密碼錯誤", next="")
+    return render_admin("", "/admin/login", "/admin/save", error="密碼錯誤")
 
-@app.route("/admin/save", methods=["POST"])
-def admin_save():
-    key = request.args.get("key", "")
+@app.route("/fb-admin/login", methods=["POST"])
+def fb_admin_login():
+    pw = request.form.get("password", "")
+    if pw == ADMIN_PASSWORD:
+        return redirect(f"/fb-admin?key={pw}")
+    return render_admin("", "/fb-admin/login", "/fb-admin/save", error="密碼錯誤")
+
+def do_save(key, redirect_base):
     if key != ADMIN_PASSWORD:
-        return redirect("/admin")
+        return redirect(f"/{redirect_base}")
     for k in REPLY_LABELS:
         if k in request.form:
             custom_replies[k] = request.form[k]
-    action = request.form.get("action", "save")
-    if action == "deploy" and GITHUB_TOKEN:
+    if request.form.get("action") == "deploy" and GITHUB_TOKEN:
         ok, msg = commit_to_github()
         _flash_store["msg"] = msg
         _flash_store["type"] = "ok" if ok else "err"
     else:
         _flash_store["msg"] = "✅ 已儲存，立即生效（重啟後還原，請用「🚀 儲存並部署」永久生效）"
         _flash_store["type"] = "ok"
-    return redirect(f"/admin?key={key}")
+    return redirect(f"/{redirect_base}?key={key}")
+
+@app.route("/admin/save", methods=["POST"])
+def admin_save():
+    return do_save(request.args.get("key", ""), "admin")
+
+@app.route("/fb-admin/save", methods=["POST"])
+def fb_admin_save():
+    return do_save(request.args.get("key", ""), "fb-admin")
 
 def commit_to_github():
     try:
@@ -252,7 +312,7 @@ def commit_to_github():
         return False, f"❌ 部署失敗：{e}"
 
 def build_knowledge_base_py() -> str:
-    lines = ['"""\nJ SIMPLE 高架床 LINE Bot 知識庫\n"""\n\n']
+    lines = ['"""\nJ SIMPLE 高架床 Bot 知識庫\n"""\n\n']
     lines.append("BRAND_INFO = {\n")
     for k, v in BRAND_INFO.items():
         lines.append(f'    "{k}": "{v}",\n')
