@@ -2,15 +2,14 @@
 J SIMPLE 高架床 LINE Bot
 - Flask webhook 伺服器
 - 關鍵字自動回覆
-- /admin 後台可線上編輯回覆文案
+- /admin?key=密碼 後台可線上編輯回覆文案
 """
 
 import os
 import json
 import base64
 import urllib.request
-import urllib.parse
-from flask import Flask, request, abort, render_template_string, redirect, url_for, session
+from flask import Flask, request, abort, render_template_string, redirect
 from linebot.v3 import WebhookHandler
 from linebot.v3.exceptions import InvalidSignatureError
 from linebot.v3.messaging import (
@@ -21,7 +20,6 @@ from linebot.v3.webhooks import MessageEvent, TextMessageContent
 from knowledge_base import REPLIES as DEFAULT_REPLIES, BRAND_INFO
 
 app = Flask(__name__)
-app.secret_key = os.getenv("FLASK_SECRET", "jsimple-admin-2024")
 
 LINE_CHANNEL_SECRET       = os.getenv("LINE_CHANNEL_SECRET", "ed4319138fed1c6db548b60327e2d69d")
 LINE_CHANNEL_ACCESS_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN", "S/R1BB9ByxtJ5CXr4kbbj51Xkz7S9kfxYIjzYsqDvjzAYHXLc6aOJQq6eDO5j7Me3SVGrkkpPeX0OH5tUHYnjGyO/S4WDRYlOWoIPIJplSUUCNX0FmeCnPhizFaUSnPNIw2uyvV016cyuO1jtO5dZQdB04t89/1O/w1cDnyilFU=")
@@ -33,7 +31,6 @@ GITHUB_FILE               = "knowledge_base.py"
 configuration = Configuration(access_token=LINE_CHANNEL_ACCESS_TOKEN)
 handler = WebhookHandler(LINE_CHANNEL_SECRET)
 
-# 執行期間可覆寫的回覆字典（重啟後還原，除非已 commit 到 GitHub）
 custom_replies = dict(DEFAULT_REPLIES)
 
 REPLY_LABELS = {
@@ -104,114 +101,119 @@ def handle_message(event):
 
 # ── Admin 後台 ────────────────────────────────────────────
 
-ADMIN_HTML = """
-<!DOCTYPE html>
+ADMIN_HTML = """<!DOCTYPE html>
 <html lang="zh-TW">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>J SIMPLE Bot 後台</title>
 <style>
-  * { box-sizing: border-box; margin: 0; padding: 0; }
-  body { font-family: -apple-system, sans-serif; background: #f5f5f5; color: #333; }
-  .header { background: #1a1a1a; color: #fff; padding: 16px 24px; display: flex; align-items: center; justify-content: space-between; }
-  .header h1 { font-size: 18px; }
-  .badge { background: #00c300; color: #fff; font-size: 12px; padding: 3px 10px; border-radius: 12px; }
-  .container { max-width: 900px; margin: 24px auto; padding: 0 16px; }
-  .card { background: #fff; border-radius: 12px; padding: 20px; margin-bottom: 16px; box-shadow: 0 1px 4px rgba(0,0,0,.08); }
-  .card-label { font-size: 13px; color: #888; margin-bottom: 6px; }
-  .card-title { font-size: 16px; font-weight: 600; margin-bottom: 12px; }
-  textarea { width: 100%; border: 1px solid #ddd; border-radius: 8px; padding: 12px; font-size: 14px; line-height: 1.6; resize: vertical; min-height: 120px; font-family: inherit; }
-  textarea:focus { outline: none; border-color: #00c300; }
-  .btn-row { position: sticky; bottom: 0; background: #fff; border-top: 1px solid #eee; padding: 16px; text-align: center; }
-  .btn { padding: 12px 32px; border: none; border-radius: 8px; font-size: 16px; font-weight: 600; cursor: pointer; }
-  .btn-save { background: #00c300; color: #fff; margin-right: 12px; }
-  .btn-deploy { background: #1a1a1a; color: #fff; }
-  .btn:hover { opacity: .85; }
-  .flash { padding: 12px 20px; border-radius: 8px; margin-bottom: 16px; font-size: 14px; }
-  .flash.ok  { background: #e8f5e9; color: #2e7d32; }
-  .flash.err { background: #fdecea; color: #c62828; }
-  .login-wrap { max-width: 360px; margin: 80px auto; background: #fff; border-radius: 16px; padding: 40px; box-shadow: 0 2px 16px rgba(0,0,0,.1); text-align: center; }
-  .login-wrap h2 { margin-bottom: 24px; }
-  .login-wrap input { width: 100%; padding: 12px; border: 1px solid #ddd; border-radius: 8px; font-size: 15px; margin-bottom: 16px; }
-  .login-wrap .btn { width: 100%; background: #00c300; color: #fff; }
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { font-family: -apple-system, sans-serif; background: #f5f5f5; color: #333; }
+.header { background: #1a1a1a; color: #fff; padding: 16px 24px; display: flex; align-items: center; justify-content: space-between; }
+.header h1 { font-size: 18px; }
+.badge { background: #00c300; color: #fff; font-size: 12px; padding: 3px 10px; border-radius: 12px; }
+.container { max-width: 900px; margin: 24px auto; padding: 0 16px 100px; }
+.card { background: #fff; border-radius: 12px; padding: 20px; margin-bottom: 16px; box-shadow: 0 1px 4px rgba(0,0,0,.08); }
+.card-label { font-size: 12px; color: #aaa; margin-bottom: 4px; }
+.card-title { font-size: 15px; font-weight: 700; margin-bottom: 10px; }
+textarea { width: 100%; border: 1px solid #ddd; border-radius: 8px; padding: 12px; font-size: 14px; line-height: 1.7; resize: vertical; min-height: 110px; font-family: inherit; }
+textarea:focus { outline: none; border-color: #00c300; }
+.btn-row { position: fixed; bottom: 0; left: 0; right: 0; background: #fff; border-top: 1px solid #eee; padding: 12px 16px; display: flex; gap: 12px; justify-content: center; }
+.btn { padding: 12px 28px; border: none; border-radius: 8px; font-size: 15px; font-weight: 600; cursor: pointer; }
+.btn-save { background: #00c300; color: #fff; }
+.btn-deploy { background: #1a1a1a; color: #fff; }
+.btn:hover { opacity: .85; }
+.flash { padding: 12px 20px; border-radius: 8px; margin-bottom: 16px; font-size: 14px; }
+.ok  { background: #e8f5e9; color: #2e7d32; }
+.err { background: #fdecea; color: #c62828; }
+.login-wrap { max-width: 360px; margin: 80px auto; background: #fff; border-radius: 16px; padding: 40px; box-shadow: 0 2px 16px rgba(0,0,0,.1); text-align: center; }
+.login-wrap h2 { margin-bottom: 24px; font-size: 20px; }
+.login-wrap input { width: 100%; padding: 12px; border: 1px solid #ddd; border-radius: 8px; font-size: 15px; margin-bottom: 16px; }
+.login-wrap .btn { width: 100%; background: #00c300; color: #fff; }
+.err-msg { color: red; margin-top: 12px; font-size: 14px; }
 </style>
 </head>
 <body>
-{% if not logged_in %}
+{% if not auth %}
 <div class="login-wrap">
-  <h2>🔐 J SIMPLE 後台登入</h2>
+  <h2>🔐 J SIMPLE 後台</h2>
   <form method="POST" action="/admin/login">
+    <input type="hidden" name="next" value="{{ next }}">
     <input type="password" name="password" placeholder="請輸入密碼" autofocus>
     <button class="btn" type="submit">登入</button>
   </form>
-  {% if error %}<p style="color:red;margin-top:12px">{{ error }}</p>{% endif %}
+  {% if error %}<p class="err-msg">{{ error }}</p>{% endif %}
 </div>
 {% else %}
 <div class="header">
-  <h1>J SIMPLE Bot 回覆管理</h1>
-  <span class="badge">LINE @jsimple</span>
+  <h1>Bot 回覆管理</h1>
+  <span class="badge">@jsimple</span>
 </div>
 <div class="container">
   {% if flash %}<div class="flash {{ flash_type }}">{{ flash }}</div>{% endif %}
-  <form method="POST" action="/admin/save">
-    {% for key, label in labels.items() %}
+  <form method="POST" action="/admin/save?key={{ key }}">
+    {% for id, label in labels.items() %}
     <div class="card">
-      <div class="card-label">{{ key }}</div>
+      <div class="card-label">{{ id }}</div>
       <div class="card-title">{{ label }}</div>
-      <textarea name="{{ key }}">{{ replies[key] }}</textarea>
+      <textarea name="{{ id }}">{{ replies[id] }}</textarea>
     </div>
     {% endfor %}
     <div class="btn-row">
-      <button class="btn btn-save" type="submit" name="action" value="save">💾 儲存（本次生效）</button>
-      <button class="btn btn-deploy" type="submit" name="action" value="deploy">🚀 儲存並部署（永久生效）</button>
+      <button class="btn btn-save" type="submit" name="action" value="save">💾 儲存</button>
+      <button class="btn btn-deploy" type="submit" name="action" value="deploy">🚀 儲存並部署</button>
     </div>
   </form>
 </div>
 {% endif %}
 </body>
-</html>
-"""
+</html>"""
 
-@app.route("/admin")
+_flash_store = {}
+
+@app.route("/admin", methods=["GET"])
 def admin():
-    logged_in = session.get("admin")
-    flash = session.pop("flash", "")
-    flash_type = session.pop("flash_type", "ok")
+    key = request.args.get("key", "")
+    auth = (key == ADMIN_PASSWORD)
+    flash_data = _flash_store.pop("msg", "")
+    flash_type = _flash_store.pop("type", "ok")
     return render_template_string(ADMIN_HTML,
-        logged_in=logged_in,
+        auth=auth, key=key,
         replies=custom_replies,
         labels=REPLY_LABELS,
-        flash=flash,
+        flash=flash_data,
         flash_type=flash_type,
-        error=None)
+        error=None, next=key)
 
 @app.route("/admin/login", methods=["POST"])
 def admin_login():
-    if request.form.get("password") == ADMIN_PASSWORD:
-        session["admin"] = True
-        return redirect("/admin")
+    pw = request.form.get("password", "")
+    if pw == ADMIN_PASSWORD:
+        return redirect(f"/admin?key={pw}")
     return render_template_string(ADMIN_HTML,
-        logged_in=False, error="密碼錯誤", replies={}, labels={}, flash="", flash_type="")
+        auth=False, key="", replies={}, labels={},
+        flash="", flash_type="", error="密碼錯誤", next="")
 
 @app.route("/admin/save", methods=["POST"])
 def admin_save():
-    if not session.get("admin"):
+    key = request.args.get("key", "")
+    if key != ADMIN_PASSWORD:
         return redirect("/admin")
-    for key in REPLY_LABELS:
-        if key in request.form:
-            custom_replies[key] = request.form[key]
+    for k in REPLY_LABELS:
+        if k in request.form:
+            custom_replies[k] = request.form[k]
     action = request.form.get("action", "save")
     if action == "deploy" and GITHUB_TOKEN:
         ok, msg = commit_to_github()
-        session["flash"] = msg
-        session["flash_type"] = "ok" if ok else "err"
+        _flash_store["msg"] = msg
+        _flash_store["type"] = "ok" if ok else "err"
     else:
-        session["flash"] = "✅ 已儲存，立即生效（重啟後還原，請用「儲存並部署」永久生效）"
-        session["flash_type"] = "ok"
-    return redirect("/admin")
+        _flash_store["msg"] = "✅ 已儲存，立即生效（重啟後還原，請用「🚀 儲存並部署」永久生效）"
+        _flash_store["type"] = "ok"
+    return redirect(f"/admin?key={key}")
 
-def commit_to_github() -> tuple:
+def commit_to_github():
     try:
         content = build_knowledge_base_py()
         url = f"https://api.github.com/repos/{GITHUB_REPO}/contents/{GITHUB_FILE}"
@@ -232,7 +234,7 @@ def commit_to_github() -> tuple:
             "Accept": "application/vnd.github.v3+json",
         })
         urllib.request.urlopen(req2)
-        return True, "🚀 已部署！Render 重新部署中（約 2 分鐘後生效）"
+        return True, "🚀 已送出部署！Render 重新部署中（約 2 分鐘後生效）"
     except Exception as e:
         return False, f"❌ 部署失敗：{e}"
 
