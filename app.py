@@ -14,7 +14,6 @@ from linebot.v3.messaging import (
     ReplyMessageRequest, TextMessage
 )
 from linebot.v3.webhooks import MessageEvent, TextMessageContent
-from anthropic import Anthropic
 from knowledge_base import REPLIES, BRAND_INFO
 
 app = Flask(__name__)
@@ -24,60 +23,29 @@ LINE_CHANNEL_ACCESS_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN", "S/R1BB9ByxtJ
 
 configuration = Configuration(access_token=LINE_CHANNEL_ACCESS_TOKEN)
 handler = WebhookHandler(LINE_CHANNEL_SECRET)
-anthropic_client = Anthropic()
-
-SYSTEM_PROMPT = f"""你是 J SIMPLE 高架床品牌的客服助理，專門回答高架床相關問題。
-
-品牌資訊：
-- LINE ID：{BRAND_INFO['line_id']}
-- 官網：{BRAND_INFO['website']}
-- 價格範圍：{BRAND_INFO['price_range']}
-- 保固：{BRAND_INFO['warranty']}
-- 現貨交期：{BRAND_INFO['delivery_stock']}
-- 訂製交期：{BRAND_INFO['delivery_custom']}
-
-回覆原則：
-1. 繁體中文，語氣親切但專業
-2. 盡量在 150 字以內
-3. 複雜問題（尺寸規劃、訂製報價）引導加 LINE @JSIMPLE
-4. 不知道的問題不要亂猜，引導加 LINE
-5. 結尾適時附上官網或 LINE 連結
-
-可回答範圍：價格、尺寸、材質、運費、出貨、保固、訂製說明。
-"""
 
 def classify_intent(text: str) -> str:
     keywords = {
-        "price":    ["價格", "多少錢", "費用", "報價", "貴不貴", "預算"],
-        "custom":   ["訂製", "客製", "客製化", "尺寸訂做", "特殊尺寸"],
-        "shipping": ["運費", "運送", "安裝", "搬運", "配送", "送貨"],
-        "size":     ["尺寸", "幾尺", "多大", "寬度", "長度", "高度", "天花板"],
-        "delivery": ["幾天", "出貨", "交期", "到貨", "多久"],
-        "warranty": ["保固", "保證", "壞掉", "維修"],
-        "greeting": ["你好", "您好", "hi", "hello", "詢問", "想問"],
+        "price":    ["價格", "多少錢", "費用", "報價", "貴不貴", "預算", "幾千", "便宜", "優惠", "折扣", "特價"],
+        "custom":   ["訂製", "客製", "客製化", "尺寸訂做", "特殊尺寸", "訂做", "可以改", "能不能改", "調整"],
+        "shipping": ["運費", "運送", "安裝費", "搬運", "配送", "送貨", "怎麼安裝", "自己裝", "組裝", "師傅"],
+        "size":     ["尺寸", "幾尺", "多大", "寬度", "長度", "高度", "天花板", "幾公分", "cm", "幾米", "空間", "放得下"],
+        "delivery": ["幾天", "出貨", "交期", "到貨", "多久", "等多久", "快嗎", "現貨"],
+        "warranty": ["保固", "保證", "壞掉", "維修", "故障", "生鏽", "鏽", "螺絲鬆"],
+        "material": ["材質", "鋼管", "鐵", "木", "板材", "幾mm", "厚度", "堅固", "穩", "晃", "承重", "幾公斤", "kg", "重量限制", "安全"],
+        "color":    ["顏色", "黑色", "白色", "什麼色", "有哪些色", "款式", "外觀", "樣式", "型號"],
+        "payment":  ["付款", "匯款", "刷卡", "信用卡", "轉帳", "分期", "Line Pay", "linepay", "pay", "怎麼付"],
+        "return":   ["退貨", "換貨", "退款", "不喜歡", "不符合", "取消", "退"],
+        "greeting": ["你好", "您好", "hi", "hello", "詢問", "想問", "請問", "想了解", "看一下", "查詢"],
     }
     text_lower = text.lower()
     for intent, words in keywords.items():
         if any(w in text_lower for w in words):
             return intent
-    return "ai"
-
-def get_ai_reply(user_message: str) -> str:
-    try:
-        response = anthropic_client.messages.create(
-            model="claude-haiku-4-5-20251001",
-            max_tokens=300,
-            system=SYSTEM_PROMPT,
-            messages=[{"role": "user", "content": user_message}]
-        )
-        return response.content[0].text
-    except Exception:
-        return REPLIES["default"]
+    return "default"
 
 def get_reply(user_message: str) -> str:
     intent = classify_intent(user_message)
-    if intent == "ai":
-        return get_ai_reply(user_message)
     return REPLIES.get(intent, REPLIES["default"])
 
 @app.route("/callback", methods=["POST"])
