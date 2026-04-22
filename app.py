@@ -9,6 +9,7 @@ import os
 import json
 import base64
 import urllib.request
+import time
 from flask import Flask, request, abort, render_template_string, redirect
 from linebot.v3 import WebhookHandler
 from linebot.v3.exceptions import InvalidSignatureError
@@ -33,15 +34,9 @@ handler = WebhookHandler(LINE_CHANNEL_SECRET)
 
 custom_replies = dict(DEFAULT_REPLIES)
 
-# 記錄每位用戶上一次的 intent，避免重複回同樣模板
-user_last_intent: dict = {}
-
-FOLLOW_UP_REPLY = (
-    "您的問題我們都很樂意詳細說明 😊\n\n"
-    "建議直接加 LINE，我們一對一幫您解答更快：\n"
-    "👉 LINE@：@JSIMPLE\n"
-    "👉 https://www.jsimple.tw/collections/loft-bed"
-)
+COOLDOWN_SECONDS = 300  # 5 分鐘內同一 intent 只回一次
+# {user_id: {intent: last_reply_timestamp}}
+user_cooldown: dict = {}
 
 REPLY_LABELS = {
     "greeting": "打招呼",
@@ -80,13 +75,14 @@ def classify_intent(text: str) -> str:
             return intent
     return "default"
 
-def get_reply(user_message: str, user_id: str = "") -> str:
+def get_reply(user_message: str, user_id: str = "") -> str | None:
     intent = classify_intent(user_message)
-    last = user_last_intent.get(user_id)
-    user_last_intent[user_id] = intent
-    # 同一用戶連續同 intent（非 default/greeting），改引導加 LINE
-    if intent == last and intent not in ("default", "greeting"):
-        return FOLLOW_UP_REPLY
+    now = time.time()
+    user_times = user_cooldown.setdefault(user_id, {})
+    last_time = user_times.get(intent, 0)
+    if now - last_time < COOLDOWN_SECONDS:
+        return None  # 冷卻中，不回覆
+    user_times[intent] = now
     return custom_replies.get(intent, custom_replies["default"])
 
 # ── LINE Webhook ──────────────────────────────────────────
@@ -105,6 +101,8 @@ def callback():
 def handle_message(event):
     user_text = event.message.text.strip()
     reply_text = get_reply(user_text, event.source.user_id)
+    if reply_text is None:
+        return  # 冷卻中，略過
     with ApiClient(configuration) as api_client:
         line_bot_api = MessagingApi(api_client)
         line_bot_api.reply_message_with_http_info(
