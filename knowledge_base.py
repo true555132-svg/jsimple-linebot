@@ -32,20 +32,20 @@ INTENT_LABELS = {
 }
 
 LINE_REPLIES = {
-    "greeting": """您好～感謝詢問高架床 😊
-我們有多種款式與訂製配置，
+    "greeting": """您好！感謝您聯繫 J Simple 🙌
 
-🔹 價格：NT$7,000～$15,000
-🔹 結構：加厚鋼材結構
-🔹 保固：三年
-🔹 交期：現貨 2～5 天 / 訂製 4～6 週
+我們專注於：
+🛏️ 高架床 / 架高床
+🪑 辦公傢俱 / 書桌椅
+📦 系統收納 / 訂製傢俱
 
-請問您的需求是：
-1️⃣ 現貨款
-2️⃣ 訂製款（客製尺寸）
-3️⃣ 想先看款式
+請問您想了解哪個品項呢？
+1️⃣ 高架床（現貨 / 訂製）
+2️⃣ 辦公桌椅
+3️⃣ 其他傢俱
 
-👉 款式頁面：https://www.jsimple.tw/collections/loft-bed""",
+👉 直接告訴我需求，我們幫您找最適合的方案！
+""",
     "price": """高架床價格範圍：NT$7,000～$15,000 😊
 
 依尺寸與配置不同：
@@ -329,7 +329,7 @@ FB_IMAGE_URLS = {
 }
 
 LINE_ENABLED_INTENTS = {
-    "greeting": False,
+    "greeting": True,
     "price": False,
     "custom": False,
     "shipping": False,
