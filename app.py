@@ -372,36 +372,48 @@ input:checked+.slider:before{transform:translateX(20px)}
 .tab-content{display:none}
 .tab-content.active{display:block}
 .container{max-width:860px;margin:18px auto;padding:0 14px 90px}
-.card{background:#fff;border-radius:12px;padding:16px;margin-bottom:12px;box-shadow:0 1px 4px rgba(0,0,0,.07)}
-.card-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:10px}
-.card-title{font-size:15px;font-weight:700}
-.card-meta{display:flex;align-items:center;gap:8px}
-.badge{font-size:11px;color:#bbb;background:#f5f5f5;padding:2px 8px;border-radius:8px}
-.del-btn{border:none;background:none;color:#e57373;cursor:pointer;font-size:18px;padding:2px 6px;border-radius:6px}
-.del-btn:hover{background:#fdecea}
-textarea{width:100%;border:1px solid #e0e0e0;border-radius:8px;padding:10px;font-size:14px;line-height:1.75;resize:vertical;min-height:90px;font-family:inherit}
+.badge{font-size:11px;color:#999;background:#f0f0f0;padding:2px 8px;border-radius:8px;font-weight:600}
+textarea{width:100%;border:1px solid #e0e0e0;border-radius:8px;padding:10px;font-size:14px;line-height:1.75;resize:vertical;font-family:inherit}
 textarea:focus{outline:none;border-color:var(--ac);box-shadow:0 0 0 3px rgba(var(--ac-rgb),.08)}
-.kw-input,input[type=text]{width:100%;border:1px solid #e0e0e0;border-radius:8px;padding:9px 11px;font-size:14px;font-family:inherit}
-.kw-input:focus,input[type=text]:focus{outline:none;border-color:var(--ac)}
+input[type=text]{width:100%;border:1px solid #e0e0e0;border-radius:8px;padding:9px 11px;font-size:14px;font-family:inherit}
+input[type=text]:focus{outline:none;border-color:var(--ac)}
 .hint{font-size:12px;color:#bbb;margin-top:5px}
+/* ── 意圖卡片（雙欄） ── */
+.intent-card{background:#fff;border-radius:12px;margin-bottom:10px;box-shadow:0 1px 4px rgba(0,0,0,.07);overflow:hidden;transition:opacity .2s}
+.intent-card.disabled{opacity:.38}
+.ic-head{display:flex;align-items:center;justify-content:space-between;padding:10px 14px;background:#fafafa;border-bottom:1px solid #efefef}
+.ic-name{display:flex;align-items:center;gap:7px;font-size:14px;font-weight:700}
+.ic-body{display:grid;grid-template-columns:1fr 1.7fr}
+.ic-left{padding:14px;border-right:1px solid #f0f0f0;display:flex;flex-direction:column;gap:12px}
+.ic-right{padding:14px;display:flex;flex-direction:column;gap:8px}
+.col-label{font-size:11px;color:#aaa;font-weight:700;letter-spacing:.5px;text-transform:uppercase;margin-bottom:5px}
+.ic-del{display:flex;justify-content:flex-end;margin-top:4px}
+.del-btn{border:none;background:none;color:#e57373;cursor:pointer;font-size:12px;padding:4px 8px;border-radius:6px}
+.del-btn:hover{background:#fdecea}
+/* ── 기타 카드 (테스트/로그) ── */
+.card{background:#fff;border-radius:12px;padding:16px;margin-bottom:12px;box-shadow:0 1px 4px rgba(0,0,0,.07)}
+.card-title{font-size:15px;font-weight:700;margin-bottom:10px}
+/* ── 新增 ── */
 .add-card{border:2px dashed #e0e0e0;border-radius:12px;padding:18px;margin-bottom:12px;background:none}
 .add-card:hover{border-color:var(--ac)}
 .add-title{font-size:14px;font-weight:700;color:#888;margin-bottom:12px}
 .field{margin-bottom:10px}
 .field label{font-size:13px;color:#888;display:block;margin-bottom:4px}
+.btn-add{width:100%;padding:11px;background:var(--ac);color:#fff;border:none;border-radius:8px;font-size:14px;font-weight:600;cursor:pointer;margin-top:4px}
+.btn-add:hover{opacity:.85}
+/* ── 底部按鈕 ── */
 .btn-row{position:fixed;bottom:0;left:0;right:0;background:#fff;border-top:1px solid #eee;padding:10px 14px;display:flex;gap:10px;justify-content:center;z-index:100}
 .btn{padding:10px 22px;border:none;border-radius:8px;font-size:14px;font-weight:600;cursor:pointer}
 .btn:hover{opacity:.85}
 .btn-save{background:var(--ac);color:#fff}
-.btn-back{background:#f0f0f0;color:#555}
-.btn-add{width:100%;padding:11px;background:var(--ac);color:#fff;border:none;border-radius:8px;font-size:14px;font-weight:600;cursor:pointer;margin-top:4px}
-.btn-add:hover{opacity:.85}
+/* ── 測試 ── */
 .test-input{width:100%;border:1px solid #ddd;border-radius:8px;padding:11px;font-size:15px;font-family:inherit}
 .test-input:focus{outline:none;border-color:var(--ac)}
 .btn-test{width:100%;margin-top:10px;padding:11px;background:var(--ac);color:#fff;border:none;border-radius:8px;font-size:14px;font-weight:600;cursor:pointer}
 .test-result{margin-top:14px;display:none}
 .intent-badge{display:inline-block;padding:3px 10px;border-radius:10px;font-size:12px;font-weight:600;margin-bottom:8px;background:rgba(var(--ac-rgb),.12);color:var(--ac)}
 .reply-pre{background:#f5f5f5;border-radius:8px;padding:12px;font-size:14px;line-height:1.7;white-space:pre-wrap}
+/* ── 紀錄 ── */
 .log-table{width:100%;border-collapse:collapse;font-size:13px}
 .log-table th{text-align:left;padding:8px 10px;background:#f9f9f9;color:#888;font-weight:600;border-bottom:2px solid #eee}
 .log-table td{padding:8px 10px;border-bottom:1px solid #f0f0f0;vertical-align:top}
@@ -412,14 +424,19 @@ textarea:focus{outline:none;border-color:var(--ac);box-shadow:0 0 0 3px rgba(var
 .flash{padding:10px 16px;border-radius:8px;margin-bottom:12px;font-size:14px}
 .ok{background:#e8f5e9;color:#2e7d32}
 .err{background:#fdecea;color:#c62828}
-.mini-toggle{position:relative;width:36px;height:20px;flex-shrink:0}
+/* ── 開關 ── */
+.mini-toggle{position:relative;width:38px;height:22px;flex-shrink:0}
 .mini-toggle input{opacity:0;width:0;height:0;position:absolute}
-.m-slider{position:absolute;inset:0;border-radius:20px;background:#ddd;cursor:pointer;transition:.3s}
-.m-slider:before{content:"";position:absolute;width:14px;height:14px;left:3px;bottom:3px;background:#fff;border-radius:50%;transition:.3s}
+.m-slider{position:absolute;inset:0;border-radius:22px;background:#ccc;cursor:pointer;transition:.25s}
+.m-slider:before{content:"";position:absolute;width:16px;height:16px;left:3px;bottom:3px;background:#fff;border-radius:50%;transition:.25s;box-shadow:0 1px 3px rgba(0,0,0,.2)}
 .mini-toggle input:checked+.m-slider{background:var(--ac)}
 .mini-toggle input:checked+.m-slider:before{transform:translateX(16px)}
-.card.disabled{opacity:.45}
-@media(max-width:600px){.tab{padding:9px 12px;font-size:13px}.btn{padding:9px 14px;font-size:13px}}
+@media(max-width:640px){
+  .ic-body{grid-template-columns:1fr}
+  .ic-left{border-right:none;border-bottom:1px solid #f0f0f0}
+  .tab{padding:9px 12px;font-size:13px}
+  .btn{padding:9px 14px;font-size:13px}
+}
 </style>
 </head>
 <body style="--ac:{{ ac }};--ac-rgb:{{ ac_rgb }}">
@@ -438,8 +455,7 @@ textarea:focus{outline:none;border-color:var(--ac);box-shadow:0 0 0 3px rgba(var
 </div>
 
 <div class="tabs">
-  <div class="tab active" onclick="switchTab('replies',this)">💬 回覆內容</div>
-  <div class="tab" onclick="switchTab('keywords',this)">🏷️ 關鍵字</div>
+  <div class="tab active" onclick="switchTab('replies',this)">💬 回覆管理</div>
   <div class="tab" onclick="switchTab('add',this)">➕ 新增</div>
   <div class="tab" onclick="switchTab('test',this)">🧪 測試</div>
   <div class="tab" onclick="switchTab('logs',this)">📋 紀錄</div>
@@ -448,74 +464,75 @@ textarea:focus{outline:none;border-color:var(--ac);box-shadow:0 0 0 3px rgba(var
 <div class="container">
   {% if flash %}<div class="flash {{ flash_type }}">{{ flash }}</div>{% endif %}
 
-  <!-- 回覆內容 -->
+  <!-- 回覆管理（雙欄） -->
   <div id="tab-replies" class="tab-content active">
     <form method="POST" action="/admin/{{ platform }}/save?key={{ key }}">
       {% for id, label in cfg.labels.items() %}
       {% set intent_on = cfg.enabled_intents.get(id, True) %}
-      <div class="card{{ '' if intent_on else ' disabled' }}" id="card-{{ id }}">
-        <div class="card-head">
-          <div style="display:flex;align-items:center;gap:8px">
-            <label class="mini-toggle" title="{{ '關閉此類別' if intent_on else '開啟此類別' }}">
-              <input type="checkbox" name="enabled_{{ id }}" {{ 'checked' if intent_on }} onchange="toggleCard('{{ id }}',this)">
-              <span class="m-slider"></span>
-            </label>
-            <div class="card-title">{{ label }}</div>
-          </div>
-          <div class="card-meta">
+      {% set img = cfg.image_urls.get(id,'') %}
+      <div class="intent-card{{ '' if intent_on else ' disabled' }}" id="card-{{ id }}">
+        <!-- 標題列 -->
+        <div class="ic-head">
+          <div class="ic-name">
             <span class="badge">{{ id }}</span>
+            {{ label }}
+          </div>
+          <label class="mini-toggle">
+            <input type="checkbox" name="enabled_{{ id }}" {{ 'checked' if intent_on }} onchange="toggleCard('{{ id }}',this)">
+            <span class="m-slider"></span>
+          </label>
+        </div>
+        <!-- 左右欄 -->
+        <div class="ic-body">
+          <!-- 左：關鍵字 + 圖片 -->
+          <div class="ic-left">
+            <div>
+              <div class="col-label">觸發關鍵字</div>
+              {% if id != 'default' %}
+              <input type="text" name="kw_{{ id }}" value="{{ cfg.keywords.get(id,[])|join(', ') }}" placeholder="關鍵字1, 關鍵字2, ...">
+              <div class="hint">逗號分隔，不分大小寫</div>
+              {% else %}
+              <div style="font-size:13px;color:#bbb;padding:6px 0">無關鍵字命中時自動觸發</div>
+              {% endif %}
+            </div>
+            <div>
+              <div class="col-label">圖片回覆（選填）</div>
+              {% if img %}
+              <div id="img-preview-{{ id }}" style="margin-bottom:8px">
+                <img src="{{ img }}" style="max-width:90px;max-height:64px;border-radius:6px;border:1px solid #eee;display:block;margin-bottom:5px">
+                <button type="button" onclick="clearImage('{{ id }}')" style="border:none;background:none;color:#e57373;cursor:pointer;font-size:12px">✕ 移除圖片</button>
+              </div>
+              {% else %}
+              <div id="img-preview-{{ id }}" style="display:none;margin-bottom:8px">
+                <img id="img-thumb-{{ id }}" src="" style="max-width:90px;max-height:64px;border-radius:6px;border:1px solid #eee;display:block;margin-bottom:5px">
+                <button type="button" onclick="clearImage('{{ id }}')" style="border:none;background:none;color:#e57373;cursor:pointer;font-size:12px">✕ 移除圖片</button>
+              </div>
+              {% endif %}
+              <input type="hidden" name="img_{{ id }}" id="img-url-{{ id }}" value="{{ img }}">
+              <label style="display:inline-flex;align-items:center;gap:5px;background:#f5f5f5;border:1px solid #ddd;border-radius:7px;padding:6px 11px;cursor:pointer;font-size:12px;color:#555">
+                📷 上傳圖片
+                <input type="file" accept="image/*" style="display:none" onchange="uploadImg('{{ id }}',this)">
+              </label>
+            </div>
+          </div>
+          <!-- 右：回覆內容 -->
+          <div class="ic-right">
+            <div>
+              <div class="col-label">自動回覆內容</div>
+              <textarea name="reply_{{ id }}" style="min-height:160px">{{ cfg.replies.get(id,'') }}</textarea>
+            </div>
             {% if id not in builtin_intents %}
-            <button type="button" class="del-btn" onclick="delIntent('{{ id }}')">×</button>
+            <div class="ic-del">
+              <button type="button" class="del-btn" onclick="delIntent('{{ id }}')">✕ 刪除類別</button>
+            </div>
             {% endif %}
           </div>
-        </div>
-        <textarea name="reply_{{ id }}">{{ cfg.replies.get(id,'') }}</textarea>
-        <div style="margin-top:10px">
-          <div style="font-size:12px;color:#aaa;margin-bottom:6px">圖片回覆（選填）</div>
-          {% set img = cfg.image_urls.get(id,'') %}
-          {% if img %}
-          <div id="img-preview-{{ id }}" style="margin-bottom:8px">
-            <img src="{{ img }}" style="max-width:120px;max-height:80px;border-radius:6px;border:1px solid #eee">
-            <button type="button" onclick="clearImage('{{ id }}')" style="margin-left:8px;border:none;background:none;color:#e57373;cursor:pointer;font-size:13px">✕ 移除</button>
-          </div>
-          {% else %}
-          <div id="img-preview-{{ id }}" style="display:none;margin-bottom:8px">
-            <img id="img-thumb-{{ id }}" src="" style="max-width:120px;max-height:80px;border-radius:6px;border:1px solid #eee">
-            <button type="button" onclick="clearImage('{{ id }}')" style="margin-left:8px;border:none;background:none;color:#e57373;cursor:pointer;font-size:13px">✕ 移除</button>
-          </div>
-          {% endif %}
-          <input type="hidden" name="img_{{ id }}" id="img-url-{{ id }}" value="{{ img }}">
-          <label style="display:inline-flex;align-items:center;gap:6px;background:#f5f5f5;border:1px solid #ddd;border-radius:8px;padding:7px 12px;cursor:pointer;font-size:13px">
-            📷 上傳圖片
-            <input type="file" accept="image/*" style="display:none" onchange="uploadImg('{{ id }}',this)">
-          </label>
         </div>
       </div>
       {% endfor %}
       <div class="btn-row">
         <button class="btn btn-save" type="submit" name="action" value="save">💾 儲存</button>
         <button class="btn btn-save" type="submit" name="action" value="deploy" style="background:#1a1a1a">🚀 部署</button>
-      </div>
-    </form>
-  </div>
-
-  <!-- 關鍵字 -->
-  <div id="tab-keywords" class="tab-content">
-    <form method="POST" action="/admin/{{ platform }}/kw-save?key={{ key }}">
-      {% for id, label in cfg.labels.items() %}
-      {% if id != 'default' %}
-      <div class="card">
-        <div class="card-head">
-          <div class="card-title">{{ label }}</div>
-          <span class="badge">{{ id }}</span>
-        </div>
-        <input class="kw-input" type="text" name="kw_{{ id }}" value="{{ cfg.keywords.get(id,[])|join(', ') }}" placeholder="關鍵字1, 關鍵字2, ...">
-        <div class="hint">逗號分隔，不分大小寫</div>
-      </div>
-      {% endif %}
-      {% endfor %}
-      <div class="btn-row">
-        <button class="btn btn-save" type="submit">💾 儲存關鍵字</button>
       </div>
     </form>
   </div>
@@ -743,6 +760,8 @@ def platform_save(platform):
         elif f"img_{k}" in request.form and not img_val:
             cfg["image_urls"].pop(k, None)
         cfg["enabled_intents"][k] = f"enabled_{k}" in request.form
+        if k != "default" and f"kw_{k}" in request.form:
+            cfg["keywords"][k] = [w.strip() for w in request.form[f"kw_{k}"].split(",") if w.strip()]
     if request.form.get("action") == "deploy" and GITHUB_TOKEN:
         success, msg = commit_to_github()
         _flash["msg"] = msg
