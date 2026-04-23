@@ -35,6 +35,7 @@ ADMIN_PASSWORD            = os.getenv("ADMIN_PASSWORD", "jsimple2024")
 GITHUB_TOKEN              = os.getenv("GITHUB_TOKEN", "")
 GITHUB_REPO               = "true555132-svg/jsimple-linebot"
 GITHUB_FILE               = "knowledge_base.py"
+RENDER_DEPLOY_HOOK        = os.getenv("RENDER_DEPLOY_HOOK", "https://api.render.com/deploy/srv-d7k3ri9j2pic73dpbe10?key=08mC1cciu1E")
 
 configuration = Configuration(access_token=LINE_CHANNEL_ACCESS_TOKEN)
 handler = WebhookHandler(LINE_CHANNEL_SECRET)
@@ -282,6 +283,19 @@ def upload_image(platform):
     if intent_key:
         platforms[platform]["image_urls"][intent_key] = image_url
     return jsonify({"url": image_url})
+
+@app.route("/api/render-deploy", methods=["POST"])
+def api_render_deploy():
+    ok, _ = auth_required()
+    if not ok:
+        return jsonify({"error": "unauthorized"}), 403
+    if not RENDER_DEPLOY_HOOK:
+        return jsonify({"error": "no hook"}), 500
+    try:
+        urllib.request.urlopen(urllib.request.Request(RENDER_DEPLOY_HOOK, method="POST"))
+        return jsonify({"ok": True})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 @app.route("/api/logs")
 def api_logs():
@@ -852,6 +866,11 @@ def commit_to_github():
             "Accept": "application/vnd.github.v3+json",
         })
         urllib.request.urlopen(req2)
+        if RENDER_DEPLOY_HOOK:
+            try:
+                urllib.request.urlopen(urllib.request.Request(RENDER_DEPLOY_HOOK, method="POST"))
+            except Exception:
+                pass
         return True, "🚀 已送出部署！Render 重新部署中（約 2 分鐘後生效）"
     except Exception as e:
         return False, f"❌ 部署失敗：{e}"
