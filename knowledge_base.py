@@ -175,7 +175,8 @@ FB_REPLIES = {
 1️⃣ 現貨款
 2️⃣ 訂製款（客製尺寸）
 3️⃣ 想先看款式
-
+👉 LINE@：@JSIMPLE
+（加 LINE 後傳房間尺寸或照片即可）
 👉 款式頁面：https://www.jsimple.tw/collections/loft-bed""",
     "price": """高架床價格範圍：NT$7,000～$15,000 😊
 
@@ -196,7 +197,7 @@ FB_REPLIES = {
 因為訂製需要確認房間尺寸與動線，
 建議直接加 LINE 傳照片＋尺寸，
 我們一次幫您評估與初估報價 👍
-
+👉 LINE@：@JSIMPLE
 👉 https://www.jsimple.tw/collections/loft-bed""",
     "shipping": """運費與安裝費用說明：
 
@@ -210,7 +211,10 @@ FB_REPLIES = {
 
 如需精確報價，請提供：
 ➤ 安裝地址與樓層
-➤ 是否有電梯""",
+➤ 是否有電梯
+
+👉 LINE@：@JSIMPLE
+👉 https://www.jsimple.tw/collections/loft-bed """,
     "size": """高架床尺寸說明 📐
 
 標準尺寸：
@@ -222,16 +226,24 @@ FB_REPLIES = {
 ✅ 全系列支援客製長寬，空間不夠也能訂做！
 
 建議提供天花板高度 + 房間尺寸，
-我們幫您規劃最適合的配置 😊""",
+我們幫您規劃最適合的配置 😊
+建議直接加我們的「高架床訂製 LINE」，
+可以一次幫您評估是否合適 👍
+
+👉 LINE@：@JSIMPLE
+（加 LINE 後傳房間尺寸或照片即可）
+👉 https://www.jsimple.tw/collections/loft-bed """,
     "delivery": """出貨時間說明 📦
 
 ・現貨款：付款後 2～5 個工作天出貨
 ・訂製款：4～6 週（依規格複雜度）
 
 如需確認特定款式是否有現貨，
-歡迎加 LINE 詢問 😊
-
-👉 LINE@：@JSIMPLE""",
+建議直接加我們的「高架床訂製 LINE」，
+可以一次幫您評估是否合適 👍
+👉 LINE@：@JSIMPLE
+（加 LINE 後傳房間尺寸或照片即可）
+👉 https://www.jsimple.tw/collections/loft-bed """,
     "warranty": """保固說明 🛡️
 
 全系列高架床提供 3 年結構保固。
@@ -242,7 +254,10 @@ FB_REPLIES = {
 
 不含：人為損壞、超重使用
 
-有其他問題歡迎詢問 😊""",
+有其他問題歡迎詢問 😊
+👉 LINE@：@JSIMPLE
+（加 LINE 後傳房間尺寸或照片即可）
+👉 https://www.jsimple.tw/collections/loft-bed """,
     "material": """材質與結構說明 🔩
 
 ・主體：加厚方管鋼材（50x50mm）
@@ -252,7 +267,10 @@ FB_REPLIES = {
 
 結構穩固，不會晃動 💪
 
-想了解更多細節歡迎加 LINE：""",
+
+👉 LINE@：@JSIMPLE
+（加 LINE 後傳房間尺寸或照片即可）
+👉 https://www.jsimple.tw/collections/loft-bed """,
     "color": """目前款式顏色 🎨
 
 主力款式：
@@ -326,6 +344,7 @@ LINE_IMAGE_URLS = {
 }
 
 FB_IMAGE_URLS = {
+    "custom": """https://raw.githubusercontent.com/true555132-svg/jsimple-linebot/main/images/1776919927_unnamed.png""",
 }
 
 LINE_ENABLED_INTENTS = {
@@ -344,14 +363,14 @@ LINE_ENABLED_INTENTS = {
 }
 
 FB_ENABLED_INTENTS = {
-    "greeting": False,
+    "greeting": True,
     "price": False,
-    "custom": False,
-    "shipping": False,
-    "size": False,
-    "delivery": False,
-    "warranty": False,
-    "material": False,
+    "custom": True,
+    "shipping": True,
+    "size": True,
+    "delivery": True,
+    "warranty": True,
+    "material": True,
     "color": False,
     "payment": True,
     "return": True,
