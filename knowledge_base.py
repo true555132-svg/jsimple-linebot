@@ -328,5 +328,17 @@ LINE_IMAGE_URLS = {
 FB_IMAGE_URLS = {
 }
 
+LINE_ENABLED_INTENTS = {
+    "greeting": True, "price": True, "custom": True, "shipping": True,
+    "size": True, "delivery": True, "warranty": True, "material": True,
+    "color": True, "payment": True, "return": True, "default": True,
+}
+
+FB_ENABLED_INTENTS = {
+    "greeting": True, "price": True, "custom": True, "shipping": True,
+    "size": True, "delivery": True, "warranty": True, "material": True,
+    "color": True, "payment": True, "return": True, "default": True,
+}
+
 _BASE_REPLIES = LINE_REPLIES
 _BASE_KEYWORDS = LINE_KEYWORDS

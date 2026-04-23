@@ -8,7 +8,7 @@ J SIMPLE 高架床 Bot
 - /admin/fb     FB 管理
 """
 
-import os, json, base64, urllib.request, time
+import os, json, base64, urllib.request, time, threading
 from collections import deque
 from flask import Flask, request, abort, render_template_string, redirect, jsonify
 from linebot.v3 import WebhookHandler
@@ -21,7 +21,8 @@ from linebot.v3.webhooks import MessageEvent, TextMessageContent
 from knowledge_base import (
     BRAND_INFO, LINE_ENABLED, FB_ENABLED, INTENT_LABELS,
     LINE_REPLIES, FB_REPLIES, LINE_KEYWORDS, FB_KEYWORDS,
-    LINE_IMAGE_URLS, FB_IMAGE_URLS
+    LINE_IMAGE_URLS, FB_IMAGE_URLS,
+    LINE_ENABLED_INTENTS, FB_ENABLED_INTENTS
 )
 
 app = Flask(__name__)
@@ -39,23 +40,67 @@ configuration = Configuration(access_token=LINE_CHANNEL_ACCESS_TOKEN)
 handler = WebhookHandler(LINE_CHANNEL_SECRET)
 
 COOLDOWN_SECONDS = 300
-message_log = deque(maxlen=100)
+LOGS_FILE = "logs.json"
+GOOGLE_SHEET_ID = os.getenv("GOOGLE_SHEET_ID", "")
+GOOGLE_SERVICE_ACCOUNT_JSON = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON", "")
+
+def _load_logs():
+    try:
+        with open(LOGS_FILE, "r", encoding="utf-8") as f:
+            return deque(json.load(f), maxlen=500)
+    except Exception:
+        return deque(maxlen=500)
+
+message_log = _load_logs()
+
+def _save_logs():
+    try:
+        with open(LOGS_FILE, "w", encoding="utf-8") as f:
+            json.dump(list(message_log), f, ensure_ascii=False)
+    except Exception:
+        pass
+
+def _append_to_sheets(entry):
+    if not GOOGLE_SHEET_ID or not GOOGLE_SERVICE_ACCOUNT_JSON:
+        return
+    try:
+        import gspread
+        from google.oauth2.service_account import Credentials
+        creds = Credentials.from_service_account_info(
+            json.loads(GOOGLE_SERVICE_ACCOUNT_JSON),
+            scopes=["https://www.googleapis.com/auth/spreadsheets"]
+        )
+        ws = gspread.authorize(creds).open_by_key(GOOGLE_SHEET_ID).sheet1
+        ws.append_row([
+            entry["time"], entry["platform"], entry["msg"],
+            entry["intent"], "已回覆" if entry["replied"] else "冷卻中"
+        ])
+    except Exception:
+        pass
+
+def log_message(entry):
+    message_log.appendleft(entry)
+    _save_logs()
+    if GOOGLE_SHEET_ID:
+        threading.Thread(target=_append_to_sheets, args=(entry,), daemon=True).start()
 
 # 各平台獨立狀態
 platforms = {
     "line": {
-        "enabled":    LINE_ENABLED,
-        "replies":    dict(LINE_REPLIES),
-        "keywords":   {k: list(v) for k, v in LINE_KEYWORDS.items()},
-        "labels":     dict(INTENT_LABELS),
-        "image_urls": dict(LINE_IMAGE_URLS),
+        "enabled":         LINE_ENABLED,
+        "replies":         dict(LINE_REPLIES),
+        "keywords":        {k: list(v) for k, v in LINE_KEYWORDS.items()},
+        "labels":          dict(INTENT_LABELS),
+        "image_urls":      dict(LINE_IMAGE_URLS),
+        "enabled_intents": dict(LINE_ENABLED_INTENTS),
     },
     "fb": {
-        "enabled":    FB_ENABLED,
-        "replies":    dict(FB_REPLIES),
-        "keywords":   {k: list(v) for k, v in FB_KEYWORDS.items()},
-        "labels":     dict(INTENT_LABELS),
-        "image_urls": dict(FB_IMAGE_URLS),
+        "enabled":         FB_ENABLED,
+        "replies":         dict(FB_REPLIES),
+        "keywords":        {k: list(v) for k, v in FB_KEYWORDS.items()},
+        "labels":          dict(INTENT_LABELS),
+        "image_urls":      dict(FB_IMAGE_URLS),
+        "enabled_intents": dict(FB_ENABLED_INTENTS),
     },
 }
 
@@ -71,28 +116,27 @@ def classify_intent(text: str, platform: str) -> str:
             return intent
     return "default"
 
-def get_reply(text: str, user_id: str, platform: str) -> str | None:
+def get_reply(text: str, user_id: str, platform: str) -> tuple:
     cfg = platforms[platform]
-    if not cfg["enabled"]:
-        return None
     intent = classify_intent(text, platform)
+    intent_on = cfg["enabled_intents"].get(intent, True)
     now = time.time()
     store = cooldowns[platform]
     user_times = store.setdefault(user_id, {})
     cooled = now - user_times.get(intent, 0) < COOLDOWN_SECONDS
-    message_log.appendleft({
+    log_message({
         "time": time.strftime("%m/%d %H:%M", time.localtime(now)),
         "platform": platform.upper(),
         "msg": text[:40],
         "intent": intent,
-        "replied": not cooled,
+        "replied": not cooled and cfg["enabled"] and intent_on,
     })
-    if cooled:
+    if not cfg["enabled"] or cooled or not intent_on:
         return None, None
     user_times[intent] = now
-    text = cfg["replies"].get(intent, cfg["replies"].get("default", ""))
+    reply_text = cfg["replies"].get(intent, cfg["replies"].get("default", ""))
     image_url = cfg["image_urls"].get(intent, "")
-    return text, image_url
+    return reply_text, image_url
 
 # ── LINE Webhook ──────────────────────────────────────────
 
@@ -368,6 +412,13 @@ textarea:focus{outline:none;border-color:var(--ac);box-shadow:0 0 0 3px rgba(var
 .flash{padding:10px 16px;border-radius:8px;margin-bottom:12px;font-size:14px}
 .ok{background:#e8f5e9;color:#2e7d32}
 .err{background:#fdecea;color:#c62828}
+.mini-toggle{position:relative;width:36px;height:20px;flex-shrink:0}
+.mini-toggle input{opacity:0;width:0;height:0;position:absolute}
+.m-slider{position:absolute;inset:0;border-radius:20px;background:#ddd;cursor:pointer;transition:.3s}
+.m-slider:before{content:"";position:absolute;width:14px;height:14px;left:3px;bottom:3px;background:#fff;border-radius:50%;transition:.3s}
+.mini-toggle input:checked+.m-slider{background:var(--ac)}
+.mini-toggle input:checked+.m-slider:before{transform:translateX(16px)}
+.card.disabled{opacity:.45}
 @media(max-width:600px){.tab{padding:9px 12px;font-size:13px}.btn{padding:9px 14px;font-size:13px}}
 </style>
 </head>
@@ -401,9 +452,16 @@ textarea:focus{outline:none;border-color:var(--ac);box-shadow:0 0 0 3px rgba(var
   <div id="tab-replies" class="tab-content active">
     <form method="POST" action="/admin/{{ platform }}/save?key={{ key }}">
       {% for id, label in cfg.labels.items() %}
-      <div class="card">
+      {% set intent_on = cfg.enabled_intents.get(id, True) %}
+      <div class="card{{ '' if intent_on else ' disabled' }}" id="card-{{ id }}">
         <div class="card-head">
-          <div class="card-title">{{ label }}</div>
+          <div style="display:flex;align-items:center;gap:8px">
+            <label class="mini-toggle" title="{{ '關閉此類別' if intent_on else '開啟此類別' }}">
+              <input type="checkbox" name="enabled_{{ id }}" {{ 'checked' if intent_on }} onchange="toggleCard('{{ id }}',this)">
+              <span class="m-slider"></span>
+            </label>
+            <div class="card-title">{{ label }}</div>
+          </div>
           <div class="card-meta">
             <span class="badge">{{ id }}</span>
             {% if id not in builtin_intents %}
@@ -572,6 +630,10 @@ function delIntent(key){
   document.getElementById('del-key').value=key;
   document.getElementById('del-form').submit();
 }
+function toggleCard(id,cb){
+  const card=document.getElementById('card-'+id);
+  if(card){card.classList.toggle('disabled',!cb.checked);}
+}
 </script>
 </body></html>"""
 
@@ -680,6 +742,7 @@ def platform_save(platform):
             cfg["image_urls"][k] = img_val
         elif f"img_{k}" in request.form and not img_val:
             cfg["image_urls"].pop(k, None)
+        cfg["enabled_intents"][k] = f"enabled_{k}" in request.form
     if request.form.get("action") == "deploy" and GITHUB_TOKEN:
         success, msg = commit_to_github()
         _flash["msg"] = msg
@@ -805,6 +868,16 @@ def build_knowledge_base_py() -> str:
     out.append("FB_KEYWORDS = {\n" + dict_to_py(fp["keywords"]) + "}\n\n")
     out.append("LINE_IMAGE_URLS = {\n" + dict_to_py(lp["image_urls"]) + "}\n\n")
     out.append("FB_IMAGE_URLS = {\n" + dict_to_py(fp["image_urls"]) + "}\n\n")
+
+    def bool_dict_to_py(d, indent=4):
+        sp = " " * indent
+        lines = []
+        for k, v in d.items():
+            lines.append(f'{sp}"{k}": {v},\n')
+        return "".join(lines)
+
+    out.append("LINE_ENABLED_INTENTS = {\n" + bool_dict_to_py(lp["enabled_intents"]) + "}\n\n")
+    out.append("FB_ENABLED_INTENTS = {\n" + bool_dict_to_py(fp["enabled_intents"]) + "}\n\n")
     out.append("_BASE_REPLIES = LINE_REPLIES\n")
     out.append("_BASE_KEYWORDS = LINE_KEYWORDS\n")
     return "".join(out)
