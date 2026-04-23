@@ -324,6 +324,7 @@ FB_KEYWORDS = {
 
 LINE_IMAGE_URLS = {
     "material": """https://raw.githubusercontent.com/true555132-svg/jsimple-linebot/main/images/1776878828_5__0.png""",
+    "custom": """https://raw.githubusercontent.com/true555132-svg/jsimple-linebot/main/images/1776906711_1.3.png""",
 }
 
 FB_IMAGE_URLS = {
