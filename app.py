@@ -29,7 +29,7 @@ app = Flask(__name__)
 
 LINE_CHANNEL_SECRET       = os.getenv("LINE_CHANNEL_SECRET", "ed4319138fed1c6db548b60327e2d69d")
 LINE_CHANNEL_ACCESS_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN", "S/R1BB9ByxtJ5CXr4kbbj51Xkz7S9kfxYIjzYsqDvjzAYHXLc6aOJQq6eDO5j7Me3SVGrkkpPeX0OH5tUHYnjGyO/S4WDRYlOWoIPIJplSUUCNX0FmeCnPhizFaUSnPNIw2uyvV016cyuO1jtO5dZQdB04t89/1O/w1cDnyilFU=")
-FB_PAGE_ACCESS_TOKEN      = os.getenv("FB_PAGE_ACCESS_TOKEN", "")
+FB_PAGE_ACCESS_TOKEN      = os.getenv("FB_PAGE_ACCESS_TOKEN", "EAALpgIiggJkBRQRZCRKJVGJr8y6gqvoOjiZAVdqBnXwf5ebL3EwdC0S02dB11KZBOtPigUYsvm9KgDgtB3ndo97Vc9h82g4yZCyRzEm9SSHg34CAzY9ZBuEuD0F8Ben3RIp6EI8ogXANcV4nVcmnzzmv2b13XiY6gvffykwgbrydDs7ouZAdgPX8xUVuoLSZBoWNB6f")
 FB_VERIFY_TOKEN           = "jsimple2024"
 ADMIN_PASSWORD            = os.getenv("ADMIN_PASSWORD", "jsimple2024")
 GITHUB_TOKEN              = os.getenv("GITHUB_TOKEN", "")
@@ -180,6 +180,7 @@ def fb_webhook():
     data = request.get_json(silent=True) or {}
     if data.get("object") == "page":
         for entry in data.get("entry", []):
+            # Messenger 私訊
             for event in entry.get("messaging", []):
                 sid = event.get("sender", {}).get("id", "")
                 msg = event.get("message", {})
@@ -189,7 +190,48 @@ def fb_webhook():
                         fb_send(sid, text)
                     if image_url:
                         fb_send_image(sid, image_url)
+            # 貼文留言
+            for change in entry.get("changes", []):
+                if change.get("field") == "feed":
+                    val = change.get("value", {})
+                    if val.get("item") == "comment" and val.get("verb") == "add":
+                        if "parent_id" not in val:  # 只回頂層留言，不回留言的留言
+                            fb_handle_comment(val)
     return "OK", 200
+
+def fb_handle_comment(val):
+    comment_id = val.get("comment_id", "")
+    user_id = val.get("from", {}).get("id", "")
+    text = val.get("message", "").strip()
+    if not comment_id or not text:
+        return
+    reply_text, _ = get_reply(text, user_id, "fb")
+    if not reply_text:
+        return
+    fb_reply_comment(comment_id, reply_text)
+    fb_private_reply(comment_id, f"您好！感謝留言，詳細說明已私訊您 😊")
+
+def fb_reply_comment(comment_id: str, text: str):
+    if not FB_PAGE_ACCESS_TOKEN:
+        return
+    url = f"https://graph.facebook.com/v19.0/{comment_id}/comments?access_token={FB_PAGE_ACCESS_TOKEN}"
+    payload = json.dumps({"message": text}).encode()
+    req = urllib.request.Request(url, data=payload, headers={"Content-Type": "application/json"})
+    try:
+        urllib.request.urlopen(req)
+    except Exception:
+        pass
+
+def fb_private_reply(comment_id: str, text: str):
+    if not FB_PAGE_ACCESS_TOKEN:
+        return
+    url = f"https://graph.facebook.com/v19.0/{comment_id}/private_replies?access_token={FB_PAGE_ACCESS_TOKEN}"
+    payload = json.dumps({"message": text}).encode()
+    req = urllib.request.Request(url, data=payload, headers={"Content-Type": "application/json"})
+    try:
+        urllib.request.urlopen(req)
+    except Exception:
+        pass
 
 def fb_send(psid: str, text: str):
     if not FB_PAGE_ACCESS_TOKEN:
