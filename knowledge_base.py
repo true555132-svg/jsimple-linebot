@@ -339,6 +339,7 @@ LINE_IMAGE_URLS = {
 }
 
 FB_IMAGE_URLS = {
+    "custom": """https://raw.githubusercontent.com/true555132-svg/jsimple-linebot/main/images/1776994911_ChatGPT_Image_2026_4_24____09_40_16.png""",
 }
 
 LINE_ENABLED_INTENTS = {
