@@ -23,7 +23,8 @@ from knowledge_base import (
     LINE_REPLIES, FB_REPLIES, LINE_KEYWORDS, FB_KEYWORDS,
     LINE_IMAGE_URLS, FB_IMAGE_URLS,
     LINE_ENABLED_INTENTS, FB_ENABLED_INTENTS,
-    FB_COMMENT_REPLIES, FB_COMMENT_KEYWORDS, FB_COMMENT_ENABLED_INTENTS
+    FB_COMMENT_REPLIES, FB_COMMENT_KEYWORDS, FB_COMMENT_ENABLED_INTENTS,
+    FB_COMMENT_PRIVATE_REPLIES
 )
 
 app = Flask(__name__)
@@ -106,11 +107,12 @@ platforms = {
     },
     "fb_comment": {
         "enabled":         True,
-        "replies":         dict(FB_COMMENT_REPLIES),
-        "keywords":        {k: list(v) for k, v in FB_COMMENT_KEYWORDS.items()},
-        "labels":          dict(INTENT_LABELS),
-        "image_urls":      {},
-        "enabled_intents": dict(FB_COMMENT_ENABLED_INTENTS),
+        "replies":          dict(FB_COMMENT_REPLIES),
+        "private_replies":  dict(FB_COMMENT_PRIVATE_REPLIES),
+        "keywords":         {k: list(v) for k, v in FB_COMMENT_KEYWORDS.items()},
+        "labels":           dict(INTENT_LABELS),
+        "image_urls":       {},
+        "enabled_intents":  dict(FB_COMMENT_ENABLED_INTENTS),
     },
 }
 
@@ -232,8 +234,10 @@ def fb_handle_comment(val):
         intent = classify_intent(text, "fb_comment")
         image_url = platforms["fb_comment"]["image_urls"].get(intent, "")
     fb_reply_comment(comment_id, reply_text, image_url)
-    private_msg = platforms["fb_comment"]["replies"].get("default", "您好！感謝留言，詳細說明已私訊您 😊")
-    fb_private_reply(comment_id, private_msg, image_url)
+    intent = classify_intent(text, "fb_comment")
+    private_msg = platforms["fb_comment"]["private_replies"].get(intent, platforms["fb_comment"]["private_replies"].get("default", ""))
+    if private_msg:
+        fb_private_reply(comment_id, private_msg, image_url)
 
 def fb_reply_comment(comment_id: str, text: str, image_url: str = ""):
     if not FB_PAGE_ACCESS_TOKEN:
@@ -627,10 +631,21 @@ input[type=text]:focus{outline:none;border-color:var(--ac)}
           </div>
           <!-- 右：回覆內容 -->
           <div class="ic-right">
+            {% if platform == 'fb_comment' %}
+            <div>
+              <div class="col-label">公開回覆（所有人看得到）</div>
+              <textarea name="reply_{{ id }}" style="min-height:90px">{{ cfg.replies.get(id,'') }}</textarea>
+            </div>
+            <div>
+              <div class="col-label">私訊內容（只有留言者收到）</div>
+              <textarea name="private_reply_{{ id }}" style="min-height:110px">{{ cfg.get('private_replies', {}).get(id,'') }}</textarea>
+            </div>
+            {% else %}
             <div>
               <div class="col-label">自動回覆內容</div>
               <textarea name="reply_{{ id }}" style="min-height:160px">{{ cfg.replies.get(id,'') }}</textarea>
             </div>
+            {% endif %}
             {% if id not in builtin_intents %}
             <div class="ic-del">
               <button type="button" class="del-btn" onclick="delIntent('{{ id }}')">✕ 刪除類別</button>
@@ -976,6 +991,8 @@ def platform_save(platform):
         cfg["enabled_intents"][k] = f"enabled_{k}" in request.form
         if k != "default" and f"kw_{k}" in request.form:
             cfg["keywords"][k] = [w.strip() for w in request.form[f"kw_{k}"].split(",") if w.strip()]
+        if "private_replies" in cfg and f"private_reply_{k}" in request.form:
+            cfg["private_replies"][k] = request.form[f"private_reply_{k}"]
     if request.form.get("action") == "deploy" and GITHUB_TOKEN:
         success, msg = commit_to_github()
         _flash["msg"] = msg
@@ -1162,6 +1179,11 @@ def build_knowledge_base_py() -> str:
 
     out.append("LINE_ENABLED_INTENTS = {\n" + bool_dict_to_py(lp["enabled_intents"]) + "}\n\n")
     out.append("FB_ENABLED_INTENTS = {\n" + bool_dict_to_py(fp["enabled_intents"]) + "}\n\n")
+    cp = platforms["fb_comment"]
+    out.append("FB_COMMENT_REPLIES = {\n" + dict_to_py(cp["replies"]) + "}\n\n")
+    out.append("FB_COMMENT_PRIVATE_REPLIES = {\n" + dict_to_py(cp["private_replies"]) + "}\n\n")
+    out.append("FB_COMMENT_KEYWORDS = {\n" + dict_to_py(cp["keywords"]) + "}\n\n")
+    out.append("FB_COMMENT_ENABLED_INTENTS = {\n" + bool_dict_to_py(cp["enabled_intents"]) + "}\n\n")
     out.append("_BASE_REPLIES = LINE_REPLIES\n")
     out.append("_BASE_KEYWORDS = LINE_KEYWORDS\n")
     return "".join(out)
