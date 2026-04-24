@@ -476,9 +476,18 @@ FB_COMMENT_KEYWORDS = {
 }
 
 FB_COMMENT_ENABLED_INTENTS = {
-    "greeting": True, "price": True, "custom": True, "shipping": True,
-    "size": True, "delivery": True, "warranty": True, "material": True,
-    "color": True, "payment": True, "return": True, "default": True,
+    "greeting": True,
+    "price": True,
+    "custom": True,
+    "shipping": True,
+    "size": True,
+    "delivery": True,
+    "warranty": True,
+    "material": True,
+    "color": True,
+    "payment": True,
+    "return": True,
+    "default": True,
 }
 
 _BASE_REPLIES = LINE_REPLIES
