@@ -219,9 +219,11 @@ def fb_handle_comment(val):
     reply_text, _ = get_reply(text, user_id, "fb_comment")
     if not reply_text:
         return
+    intent = classify_intent(text, "fb_comment")
+    image_url = platforms["fb_comment"]["image_urls"].get(intent, "")
     fb_reply_comment(comment_id, reply_text)
     private_msg = platforms["fb_comment"]["replies"].get("default", "您好！感謝留言，詳細說明已私訊您 😊")
-    fb_private_reply(comment_id, private_msg)
+    fb_private_reply(comment_id, private_msg, image_url)
 
 def fb_reply_comment(comment_id: str, text: str):
     if not FB_PAGE_ACCESS_TOKEN:
@@ -234,12 +236,14 @@ def fb_reply_comment(comment_id: str, text: str):
     except Exception:
         pass
 
-def fb_private_reply(comment_id: str, text: str):
+def fb_private_reply(comment_id: str, text: str, image_url: str = ""):
     if not FB_PAGE_ACCESS_TOKEN:
         return
     url = f"https://graph.facebook.com/v19.0/{comment_id}/private_replies?access_token={FB_PAGE_ACCESS_TOKEN}"
-    payload = json.dumps({"message": text}).encode()
-    req = urllib.request.Request(url, data=payload, headers={"Content-Type": "application/json"})
+    body: dict = {"message": text}
+    if image_url:
+        body["attachment"] = {"type": "image", "payload": {"url": image_url, "is_reusable": True}}
+    req = urllib.request.Request(url, data=json.dumps(body).encode(), headers={"Content-Type": "application/json"})
     try:
         urllib.request.urlopen(req)
     except Exception:
