@@ -335,11 +335,10 @@ FB_KEYWORDS = {
 }
 
 LINE_IMAGE_URLS = {
-    "custom": """https://raw.githubusercontent.com/true555132-svg/jsimple-linebot/main/images/1776994352_unnamed.png""",
+    "custom": """https://raw.githubusercontent.com/true555132-svg/jsimple-linebot/main/images/1776994832_ChatGPT_Image_2026_4_24____09_40_16.png""",
 }
 
 FB_IMAGE_URLS = {
-    "custom": """https://raw.githubusercontent.com/true555132-svg/jsimple-linebot/main/images/1776919927_unnamed.png""",
 }
 
 LINE_ENABLED_INTENTS = {
