@@ -22,7 +22,8 @@ from knowledge_base import (
     BRAND_INFO, LINE_ENABLED, FB_ENABLED, INTENT_LABELS,
     LINE_REPLIES, FB_REPLIES, LINE_KEYWORDS, FB_KEYWORDS,
     LINE_IMAGE_URLS, FB_IMAGE_URLS,
-    LINE_ENABLED_INTENTS, FB_ENABLED_INTENTS
+    LINE_ENABLED_INTENTS, FB_ENABLED_INTENTS,
+    FB_COMMENT_REPLIES, FB_COMMENT_KEYWORDS, FB_COMMENT_ENABLED_INTENTS
 )
 
 app = Flask(__name__)
@@ -102,6 +103,14 @@ platforms = {
         "labels":          dict(INTENT_LABELS),
         "image_urls":      dict(FB_IMAGE_URLS),
         "enabled_intents": dict(FB_ENABLED_INTENTS),
+    },
+    "fb_comment": {
+        "enabled":         True,
+        "replies":         dict(FB_COMMENT_REPLIES),
+        "keywords":        {k: list(v) for k, v in FB_COMMENT_KEYWORDS.items()},
+        "labels":          dict(INTENT_LABELS),
+        "image_urls":      {},
+        "enabled_intents": dict(FB_COMMENT_ENABLED_INTENTS),
     },
 }
 
@@ -205,11 +214,14 @@ def fb_handle_comment(val):
     text = val.get("message", "").strip()
     if not comment_id or not text:
         return
-    reply_text, _ = get_reply(text, user_id, "fb")
+    if not platforms["fb_comment"]["enabled"]:
+        return
+    reply_text, _ = get_reply(text, user_id, "fb_comment")
     if not reply_text:
         return
     fb_reply_comment(comment_id, reply_text)
-    fb_private_reply(comment_id, f"您好！感謝留言，詳細說明已私訊您 😊")
+    private_msg = platforms["fb_comment"]["replies"].get("default", "您好！感謝留言，詳細說明已私訊您 😊")
+    fb_private_reply(comment_id, private_msg)
 
 def fb_reply_comment(comment_id: str, text: str):
     if not FB_PAGE_ACCESS_TOKEN:
@@ -397,6 +409,19 @@ body{font-family:-apple-system,sans-serif;background:#f5f5f5;color:#333}
     </div>
     <div style="display:flex;align-items:center;gap:10px">
       <span class="status {{ 'on' if fb_on else 'off' }}">{{ '開啟' if fb_on else '關閉' }}</span>
+      <span class="arrow">›</span>
+    </div>
+  </a>
+  <a class="card" href="/admin/fb_comment?key={{ key }}">
+    <div class="card-left">
+      <div class="icon" style="background:#fce4ec">💬</div>
+      <div>
+        <div class="card-title">FB 留言自動回覆</div>
+        <div class="card-sub">逸雅傢俱貼文留言</div>
+      </div>
+    </div>
+    <div style="display:flex;align-items:center;gap:10px">
+      <span class="status on">開啟</span>
       <span class="arrow">›</span>
     </div>
   </a>
@@ -738,8 +763,9 @@ _flash = {}
 BUILTIN_INTENTS = {"greeting","price","custom","shipping","size","delivery","warranty","material","color","payment","return","default"}
 
 PLATFORM_META = {
-    "line": {"name": "LINE Bot 管理", "ac": "#00c300", "ac_rgb": "0,195,0"},
-    "fb":   {"name": "FB Messenger 管理", "ac": "#1877f2", "ac_rgb": "24,119,242"},
+    "line":       {"name": "LINE Bot 管理",       "ac": "#00c300", "ac_rgb": "0,195,0"},
+    "fb":         {"name": "FB Messenger 管理",   "ac": "#1877f2", "ac_rgb": "24,119,242"},
+    "fb_comment": {"name": "FB 留言自動回覆",      "ac": "#e91e63", "ac_rgb": "233,30,99"},
 }
 
 def check_auth():
