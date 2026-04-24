@@ -114,7 +114,10 @@ platforms = {
     },
 }
 
-cooldowns = {"line": {}, "fb": {}}
+cooldowns = {"line": {}, "fb": {}, "fb_comment": {}}
+
+# 貼文指定回覆 {post_id: {"reply": str, "image_url": str, "enabled": bool}}
+fb_post_replies: dict = {}
 
 # ── 核心邏輯 ─────────────────────────────────────────────
 
@@ -210,17 +213,24 @@ def fb_webhook():
 
 def fb_handle_comment(val):
     comment_id = val.get("comment_id", "")
+    post_id = val.get("post_id", "").split("_")[-1]  # 取純數字 post_id
     user_id = val.get("from", {}).get("id", "")
     text = val.get("message", "").strip()
     if not comment_id or not text:
         return
     if not platforms["fb_comment"]["enabled"]:
         return
-    reply_text, _ = get_reply(text, user_id, "fb_comment")
-    if not reply_text:
-        return
-    intent = classify_intent(text, "fb_comment")
-    image_url = platforms["fb_comment"]["image_urls"].get(intent, "")
+    # 先查貼文指定回覆
+    post_cfg = fb_post_replies.get(post_id, {})
+    if post_cfg and post_cfg.get("enabled", True):
+        reply_text = post_cfg.get("reply", "")
+        image_url = post_cfg.get("image_url", "")
+    else:
+        reply_text, _ = get_reply(text, user_id, "fb_comment")
+        if not reply_text:
+            return
+        intent = classify_intent(text, "fb_comment")
+        image_url = platforms["fb_comment"]["image_urls"].get(intent, "")
     fb_reply_comment(comment_id, reply_text, image_url)
     private_msg = platforms["fb_comment"]["replies"].get("default", "您好！感謝留言，詳細說明已私訊您 😊")
     fb_private_reply(comment_id, private_msg, image_url)
@@ -424,11 +434,23 @@ body{font-family:-apple-system,sans-serif;background:#f5f5f5;color:#333}
       <div class="icon" style="background:#fce4ec">💬</div>
       <div>
         <div class="card-title">FB 留言自動回覆</div>
-        <div class="card-sub">逸雅傢俱貼文留言</div>
+        <div class="card-sub">關鍵字比對回覆</div>
       </div>
     </div>
     <div style="display:flex;align-items:center;gap:10px">
       <span class="status on">開啟</span>
+      <span class="arrow">›</span>
+    </div>
+  </a>
+  <a class="card" href="/admin/fb-posts?key={{ key }}">
+    <div class="card-left">
+      <div class="icon" style="background:#fce4ec">📌</div>
+      <div>
+        <div class="card-title">FB 貼文指定回覆</div>
+        <div class="card-sub">針對特定貼文設定回覆</div>
+      </div>
+    </div>
+    <div style="display:flex;align-items:center;gap:10px">
       <span class="arrow">›</span>
     </div>
   </a>
@@ -742,6 +764,109 @@ function toggleCard(id,cb){
 </script>
 </body></html>"""
 
+FB_POSTS_HTML = """<!DOCTYPE html>
+<html lang="zh-TW"><head><meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>FB 貼文指定回覆</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:-apple-system,sans-serif;background:#f5f5f5;color:#333;font-size:15px}
+.header{background:#1a1a1a;color:#fff;padding:13px 18px;display:flex;align-items:center;gap:12px}
+.back{color:#aaa;text-decoration:none;font-size:20px}
+.header h1{font-size:16px;font-weight:700}
+.container{max-width:700px;margin:20px auto;padding:0 14px 100px}
+.card{background:#fff;border-radius:12px;padding:16px;margin-bottom:12px;box-shadow:0 1px 4px rgba(0,0,0,.07)}
+.card-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:12px}
+.card-title{font-size:14px;font-weight:700}
+.badge{font-size:11px;color:#999;background:#f0f0f0;padding:2px 8px;border-radius:8px;font-family:monospace}
+label{font-size:12px;color:#888;display:block;margin-bottom:4px;margin-top:10px}
+textarea,input[type=text]{width:100%;border:1px solid #e0e0e0;border-radius:8px;padding:9px 11px;font-size:14px;font-family:inherit}
+textarea{min-height:80px;resize:vertical;line-height:1.7}
+textarea:focus,input[type=text]:focus{outline:none;border-color:#e91e63}
+.hint{font-size:12px;color:#bbb;margin-top:4px}
+.del-btn{border:none;background:none;color:#e57373;cursor:pointer;font-size:12px;padding:4px 8px;border-radius:6px}
+.del-btn:hover{background:#fdecea}
+.add-card{border:2px dashed #e0e0e0;border-radius:12px;padding:18px;margin-bottom:12px}
+.add-card:hover{border-color:#e91e63}
+.add-title{font-size:14px;font-weight:700;color:#888;margin-bottom:12px}
+.btn-row{position:fixed;bottom:0;left:0;right:0;background:#fff;border-top:1px solid #eee;padding:10px 14px;display:flex;gap:10px;justify-content:center;z-index:100}
+.btn{padding:10px 22px;border:none;border-radius:8px;font-size:14px;font-weight:600;cursor:pointer}
+.btn-save{background:#e91e63;color:#fff}
+.btn-add{width:100%;padding:11px;background:#e91e63;color:#fff;border:none;border-radius:8px;font-size:14px;font-weight:600;cursor:pointer;margin-top:8px}
+.flash{padding:10px 16px;border-radius:8px;margin-bottom:12px;font-size:14px}
+.ok{background:#e8f5e9;color:#2e7d32}
+.err{background:#fdecea;color:#c62828}
+.toggle{position:relative;width:40px;height:22px}
+.toggle input{opacity:0;width:0;height:0;position:absolute}
+.t-slider{position:absolute;inset:0;border-radius:22px;background:#ccc;cursor:pointer;transition:.25s}
+.t-slider:before{content:"";position:absolute;width:16px;height:16px;left:3px;bottom:3px;background:#fff;border-radius:50%;transition:.25s}
+.toggle input:checked+.t-slider{background:#e91e63}
+.toggle input:checked+.t-slider:before{transform:translateX(18px)}
+.row{display:flex;align-items:center;gap:8px}
+</style></head>
+<body>
+<div class="header">
+  <a class="back" href="/admin?key={{ key }}">‹</a>
+  <h1>📌 FB 貼文指定回覆</h1>
+</div>
+<div class="container">
+  {% if flash %}<div class="flash ok">{{ flash }}</div>{% endif %}
+
+  {% for pid, cfg in posts.items() %}
+  <form method="POST" action="/admin/fb-posts/save?key={{ key }}">
+    <input type="hidden" name="post_id" value="{{ pid }}">
+    <div class="card">
+      <div class="card-head">
+        <div>
+          <div class="card-title">貼文 ID</div>
+          <span class="badge">{{ pid }}</span>
+        </div>
+        <div class="row">
+          <label class="toggle" style="margin:0">
+            <input type="checkbox" name="enabled" {{ 'checked' if cfg.enabled }}>
+            <span class="t-slider"></span>
+          </label>
+          <button type="button" class="del-btn" onclick="delPost('{{ pid }}')">✕ 刪除</button>
+        </div>
+      </div>
+      <label>公開回覆內容（所有人看得到）</label>
+      <textarea name="reply">{{ cfg.reply }}</textarea>
+      <label>圖片網址（選填，公開回覆和私訊都會附上）</label>
+      <input type="text" name="image_url" value="{{ cfg.image_url }}" placeholder="https://...">
+      <div class="hint">貼文網址範例：facebook.com/逸雅傢俱/posts/<b>貼文ID</b></div>
+      <button type="submit" class="btn btn-add" style="margin-top:12px">💾 儲存此貼文</button>
+    </div>
+  </form>
+  {% else %}
+  <div style="text-align:center;color:#bbb;padding:40px;font-size:14px">尚未設定任何貼文，新增後即可指定回覆</div>
+  {% endfor %}
+
+  <!-- 新增貼文 -->
+  <form method="POST" action="/admin/fb-posts/add?key={{ key }}">
+    <div class="add-card">
+      <div class="add-title">➕ 新增貼文指定回覆</div>
+      <label>貼文 ID（從貼文網址最後一串數字）</label>
+      <input type="text" name="post_id" placeholder="例如：1234567890123456" required>
+      <label>公開回覆內容</label>
+      <textarea name="reply" placeholder="有人留言此貼文時自動回覆..." required></textarea>
+      <label>圖片網址（選填）</label>
+      <input type="text" name="image_url" placeholder="https://...">
+      <button type="submit" class="btn-add">新增</button>
+    </div>
+  </form>
+</div>
+<form id="del-form" method="POST" action="/admin/fb-posts/del?key={{ key }}">
+  <input type="hidden" name="post_id" id="del-pid">
+</form>
+<script>
+function delPost(pid){
+  if(!confirm('確定刪除此貼文設定？'))return;
+  document.getElementById('del-pid').value=pid;
+  document.getElementById('del-form').submit();
+}
+</script>
+</body></html>"""
+
 LOGIN_HTML = """<!DOCTYPE html>
 <html lang="zh-TW"><head><meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
@@ -917,6 +1042,52 @@ def platform_del_intent(platform):
         _flash["msg"] = f"✅ 已刪除「{k}」類別"
         _flash["type"] = "ok"
     return redirect(f"/admin/{platform}?key={key}")
+
+# ── FB 貼文指定回覆 ───────────────────────────────────────
+
+@app.route("/admin/fb-posts")
+def fb_posts_admin():
+    ok, key = check_auth()
+    if not ok:
+        return render_template_string(LOGIN_HTML, next="/admin/fb-posts", error=None)
+    flash_msg = _flash.pop("msg", "")
+    return render_template_string(FB_POSTS_HTML, key=key, posts=fb_post_replies, flash=flash_msg)
+
+@app.route("/admin/fb-posts/add", methods=["POST"])
+def fb_posts_add():
+    ok, key = check_auth()
+    if not ok:
+        abort(403)
+    pid = request.form.get("post_id", "").strip()
+    reply = request.form.get("reply", "").strip()
+    image_url = request.form.get("image_url", "").strip()
+    if pid and reply:
+        fb_post_replies[pid] = {"reply": reply, "image_url": image_url, "enabled": True}
+        _flash["msg"] = f"✅ 已新增貼文 {pid}"
+    return redirect(f"/admin/fb-posts?key={key}")
+
+@app.route("/admin/fb-posts/save", methods=["POST"])
+def fb_posts_save():
+    ok, key = check_auth()
+    if not ok:
+        abort(403)
+    pid = request.form.get("post_id", "").strip()
+    if pid and pid in fb_post_replies:
+        fb_post_replies[pid]["reply"] = request.form.get("reply", "")
+        fb_post_replies[pid]["image_url"] = request.form.get("image_url", "")
+        fb_post_replies[pid]["enabled"] = "enabled" in request.form
+        _flash["msg"] = "✅ 已儲存"
+    return redirect(f"/admin/fb-posts?key={key}")
+
+@app.route("/admin/fb-posts/del", methods=["POST"])
+def fb_posts_del():
+    ok, key = check_auth()
+    if not ok:
+        abort(403)
+    pid = request.form.get("post_id", "").strip()
+    fb_post_replies.pop(pid, None)
+    _flash["msg"] = f"✅ 已刪除"
+    return redirect(f"/admin/fb-posts?key={key}")
 
 # ── GitHub Deploy ─────────────────────────────────────────
 
