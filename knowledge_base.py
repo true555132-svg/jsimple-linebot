@@ -372,41 +372,5 @@ FB_ENABLED_INTENTS = {
     "default": True,
 }
 
-FB_COMMENT_REPLIES = {
-    "greeting": """感謝您的留言！歡迎私訊我們或加 LINE 了解更多 😊
-👉 LINE@：@JSIMPLE""",
-    "price": """高架床價格 NT$7,000 起，詳細報價已私訊您 😊""",
-    "custom": """可以訂製唷！詳細說明已私訊您 👍""",
-    "shipping": """運費與安裝費說明已私訊您，請查看私訊 😊""",
-    "size": """尺寸說明已私訊您，請查看私訊 📐""",
-    "delivery": """出貨時間說明已私訊您 📦""",
-    "warranty": """保固說明已私訊您 🛡️""",
-    "material": """材質與結構說明已私訊您 🔩""",
-    "color": """顏色款式說明已私訊您 🎨""",
-    "payment": """付款方式說明已私訊您 💳""",
-    "return": """退換貨說明已私訊您 📋""",
-    "default": """感謝您的留言！詳細說明已私訊您，請查看私訊 😊""",
-}
-
-FB_COMMENT_KEYWORDS = {
-    "price": ["價格", "多少錢", "費用", "報價", "貴不貴", "預算", "幾千", "便宜", "優惠", "折扣", "特價"],
-    "custom": ["訂製", "客製", "客製化", "尺寸訂做", "特殊尺寸", "訂做", "可以改", "能不能改", "調整"],
-    "shipping": ["運費", "運送", "安裝費", "搬運", "配送", "送貨", "怎麼安裝", "自己裝", "組裝", "師傅"],
-    "size": ["尺寸", "幾尺", "多大", "寬度", "長度", "高度", "天花板", "幾公分", "cm", "幾米", "空間", "放得下"],
-    "delivery": ["幾天", "出貨", "交期", "到貨", "多久", "等多久", "快嗎", "現貨", "庫存", "有貨", "現在有"],
-    "warranty": ["保固", "保證", "壞掉", "維修", "故障", "生鏽", "鏽", "螺絲鬆"],
-    "material": ["材質", "鋼管", "鐵", "木", "板材", "幾mm", "厚度", "堅固", "穩", "晃", "承重", "幾公斤", "kg", "重量限制", "安全"],
-    "color": ["顏色", "黑色", "白色", "什麼色", "有哪些色", "款式", "外觀", "樣式", "型號"],
-    "payment": ["付款", "匯款", "刷卡", "信用卡", "轉帳", "分期", "Line Pay", "linepay", "pay", "怎麼付"],
-    "return": ["退貨", "換貨", "退款", "不喜歡", "不符合", "取消", "退"],
-    "greeting": ["你好", "您好", "hi", "hello", "詢問", "想問", "請問", "想了解", "看一下", "查詢"],
-}
-
-FB_COMMENT_ENABLED_INTENTS = {
-    "greeting": True, "price": True, "custom": True, "shipping": True,
-    "size": True, "delivery": True, "warranty": True, "material": True,
-    "color": True, "payment": True, "return": True, "default": True,
-}
-
 _BASE_REPLIES = LINE_REPLIES
 _BASE_KEYWORDS = LINE_KEYWORDS
