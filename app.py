@@ -1045,6 +1045,20 @@ body{font-family:-apple-system,sans-serif;background:#f5f5f5;color:#333}
       <span class="arrow">›</span>
     </div>
   </a>
+  <div style="margin:8px 0 4px;font-size:12px;color:#aaa;font-weight:700;letter-spacing:.5px">工具</div>
+  <a class="card" href="https://image-processor-t1gd.onrender.com" target="_blank">
+    <div class="card-left">
+      <div class="icon" style="background:#f3e5f5">🖼️</div>
+      <div>
+        <div class="card-title">商品圖片處理</div>
+        <div class="card-sub">去背 ＋ 白底 ＋ AI 標題建議</div>
+      </div>
+    </div>
+    <div style="display:flex;align-items:center;gap:10px">
+      <span style="font-size:11px;background:#f3e5f5;color:#7b1fa2;padding:3px 8px;border-radius:8px;font-weight:700">外部工具</span>
+      <span class="arrow">›</span>
+    </div>
+  </a>
 </div>
 </body></html>"""
 
