@@ -500,6 +500,17 @@ def _load_from_sheets():
         print(f"[Sheets Read Error] {e}", file=sys.stderr)
         return []
 
+def _preload_from_sheets():
+    if not GOOGLE_SHEET_ID or not GOOGLE_SERVICE_ACCOUNT_JSON:
+        return
+    if len(message_log) > 0:
+        return
+    logs = _load_from_sheets()
+    for entry in reversed(logs):
+        message_log.appendleft(entry)
+
+threading.Thread(target=_preload_from_sheets, daemon=True).start()
+
 @app.route("/api/logs")
 def api_logs():
     ok, _ = auth_required()
@@ -721,11 +732,13 @@ const KEY="{{ key }}";
 let currentConv=null, convData={};
 
 async function loadConversations(){
+  const list=document.getElementById('conv-list');
+  try{
   const res=await fetch('/api/conversations?key='+KEY);
+  if(!res.ok){list.innerHTML='<div style="padding:30px;text-align:center;color:#e53935;font-size:13px">載入失敗（'+res.status+'）<br><a href="" style="color:#1877f2">重新整理</a></div>';return;}
   const data=await res.json();
   convData=data;
-  const list=document.getElementById('conv-list');
-  if(!data.length){list.innerHTML='<div style="padding:30px;text-align:center;color:#ccc;font-size:13px">尚無對話記錄</div>';return;}
+  if(!Array.isArray(data)||!data.length){list.innerHTML='<div style="padding:30px;text-align:center;color:#ccc;font-size:13px">尚無對話記錄</div>';return;}
   list.innerHTML=data.map((c,i)=>{
     const pfClass=c.platform==='LINE'?'pf-line':c.platform==='FB'?'pf-fb':'pf-fb_comment';
     const pfIcon=c.platform==='LINE'?'💬':c.platform==='FB'?'📘':'💬';
@@ -750,6 +763,7 @@ async function loadConversations(){
       </div>
     </div>`;
   }).join('');
+  }catch(e){list.innerHTML='<div style="padding:30px;text-align:center;color:#e53935;font-size:13px">載入錯誤：'+e.message+'<br><a href="" style="color:#1877f2">重新整理</a></div>';}
 }
 
 function openConv(i){
@@ -1785,8 +1799,6 @@ def api_conversations():
     if not ok:
         return jsonify({"error": "unauthorized"}), 403
     logs = list(message_log)
-    if not logs and GOOGLE_SHEET_ID:
-        logs = _load_from_sheets()
     convs = {}
     for l in reversed(logs):
         uid = l.get("user_id", "")
