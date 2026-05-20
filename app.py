@@ -150,7 +150,7 @@ def get_reply(text: str, user_id: str, platform: str) -> tuple:
     reply_text = cfg["replies"].get(intent, cfg["replies"].get("default", "")) if replied else ""
     image_url = cfg["image_urls"].get(intent, "") if replied else ""
     log_message({
-        "time": time.strftime("%Y/%m/%d %H:%M:%S", time.localtime(now)),
+        "time": time.strftime("%Y/%m/%d %H:%M:%S", time.gmtime(now + 8 * 3600)),
         "platform": platform.upper(),
         "user_id": user_id,
         "msg": text,
