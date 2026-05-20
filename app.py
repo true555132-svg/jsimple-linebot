@@ -150,6 +150,41 @@ def _save_notes():
 # 貼文指定回覆 {post_id: {"reply": str, "image_url": str, "enabled": bool}}
 fb_post_replies: dict = {}
 
+# 快速回覆模板 [{id, title, text, image_url, price}]
+TEMPLATES_FILE = "templates.json"
+def _load_templates():
+    try:
+        with open(TEMPLATES_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return []
+quick_reply_templates = _load_templates()
+def _save_templates():
+    try:
+        with open(TEMPLATES_FILE, "w", encoding="utf-8") as f:
+            json.dump(quick_reply_templates, f, ensure_ascii=False)
+    except Exception:
+        pass
+
+# 對話標籤 {"platform:user_id": ["待跟進", "已成交", ...]}
+TAGS_FILE = "conv_tags.json"
+def _load_tags():
+    try:
+        with open(TAGS_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {}
+conv_tags = _load_tags()
+def _save_tags():
+    try:
+        with open(TAGS_FILE, "w", encoding="utf-8") as f:
+            json.dump(conv_tags, f, ensure_ascii=False)
+    except Exception:
+        pass
+
+# 最後查看時間 {"platform:user_id": timestamp}
+last_seen = {}
+
 # ── 核心邏輯 ─────────────────────────────────────────────
 
 def classify_intent(text: str, platform: str) -> str:
@@ -553,6 +588,42 @@ body{font-family:-apple-system,sans-serif;background:#f0f2f5;height:100vh;displa
 .note-save-btn{padding:6px 14px;background:#f5a623;color:#fff;border:none;border-radius:8px;font-size:12px;font-weight:700;cursor:pointer;white-space:nowrap}
 .user-avatar{width:38px;height:38px;border-radius:50%;object-fit:cover;flex-shrink:0}
 .user-avatar-fallback{width:38px;height:38px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:17px;flex-shrink:0}
+/* 標籤 */
+.tag{display:inline-block;font-size:11px;font-weight:700;padding:2px 8px;border-radius:10px;cursor:pointer;user-select:none}
+.tag-待跟進{background:#fff3e0;color:#e65100}
+.tag-已報價{background:#e3f2fd;color:#1565c0}
+.tag-已成交{background:#e8f5e9;color:#2e7d32}
+.tag-VIP{background:#f3e5f5;color:#7b1fa2}
+.tag-問題客{background:#fdecea;color:#c62828}
+.tag-inactive{opacity:.35}
+/* 未讀紅點 */
+.unread-dot{display:inline-flex;align-items:center;justify-content:center;background:#e53935;color:#fff;font-size:10px;font-weight:700;border-radius:10px;min-width:18px;height:18px;padding:0 4px;margin-left:4px}
+/* 模板面板 */
+.tpl-panel{position:absolute;bottom:140px;left:0;right:0;background:#fff;border-top:2px solid #e0e0e0;max-height:340px;overflow-y:auto;z-index:50;display:none;flex-direction:column}
+.tpl-panel.open{display:flex}
+.tpl-head{padding:10px 16px;display:flex;align-items:center;justify-content:space-between;border-bottom:1px solid #f0f0f0;flex-shrink:0}
+.tpl-head-title{font-size:13px;font-weight:700;color:#555}
+.tpl-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:10px;padding:12px 16px}
+.tpl-card{border:1px solid #e8e8e8;border-radius:10px;overflow:hidden;cursor:pointer;transition:box-shadow .2s}
+.tpl-card:hover{box-shadow:0 3px 12px rgba(0,0,0,.12)}
+.tpl-img{width:100%;height:100px;object-fit:cover;background:#f5f5f5;display:block}
+.tpl-img-empty{width:100%;height:100px;background:#f5f5f5;display:flex;align-items:center;justify-content:center;color:#ccc;font-size:24px}
+.tpl-body{padding:8px 10px}
+.tpl-title{font-size:13px;font-weight:700;color:#333;margin-bottom:2px}
+.tpl-price{font-size:12px;color:#e53935;font-weight:700}
+.tpl-actions{display:flex;gap:6px;margin-top:6px}
+.tpl-use-btn{flex:1;padding:5px;background:#1a1a1a;color:#fff;border:none;border-radius:6px;font-size:11px;cursor:pointer;font-weight:600}
+.tpl-del-btn{padding:5px 8px;background:#fdecea;color:#c62828;border:none;border-radius:6px;font-size:11px;cursor:pointer}
+.tpl-add-card{border:2px dashed #e0e0e0;border-radius:10px;display:flex;align-items:center;justify-content:center;min-height:160px;cursor:pointer;color:#bbb;font-size:13px;font-weight:600;gap:6px}
+.tpl-add-card:hover{border-color:#1a1a1a;color:#333}
+/* 新增模板表單 */
+.tpl-form{padding:14px 16px;border-top:1px solid #f0f0f0;display:none;flex-direction:column;gap:8px}
+.tpl-form.open{display:flex}
+.tpl-form input,.tpl-form textarea{border:1px solid #e0e0e0;border-radius:8px;padding:8px 10px;font-size:13px;font-family:inherit}
+.tpl-form textarea{min-height:70px;resize:vertical}
+.tpl-btn-row{display:flex;gap:8px}
+.tpl-confirm-btn{flex:1;padding:8px;background:#1a1a1a;color:#fff;border:none;border-radius:8px;font-size:13px;font-weight:600;cursor:pointer}
+.tpl-cancel-btn{padding:8px 16px;background:#f5f5f5;color:#555;border:none;border-radius:8px;font-size:13px;cursor:pointer}
 @media(max-width:640px){.sidebar{width:100%;display:none}.sidebar.show{display:flex}.chat{display:none}.chat.show{display:flex}}
 </style></head>
 <body>
@@ -569,9 +640,10 @@ body{font-family:-apple-system,sans-serif;background:#f0f2f5;height:100vh;displa
     <div class="empty-chat" id="empty-chat">← 選擇一個對話開始</div>
     <div id="chat-main" style="display:none;flex:1;flex-direction:column;overflow:hidden;display:none">
       <div class="chat-head">
-        <div>
+        <div style="flex:1;min-width:0">
           <div class="chat-title" id="chat-title">—</div>
           <div style="font-size:11px;color:#aaa;margin-top:2px" id="chat-uid">—</div>
+          <div id="tag-bar" style="display:flex;gap:5px;flex-wrap:wrap;margin-top:6px"></div>
         </div>
         <button class="takeover-btn takeover-off" id="takeover-btn" onclick="toggleTakeover()">自動回覆中</button>
       </div>
@@ -581,7 +653,30 @@ body{font-family:-apple-system,sans-serif;background:#f0f2f5;height:100vh;displa
         <input type="text" id="note-input" placeholder="輸入客戶備註（例如：已報價、等回覆）">
         <button class="note-save-btn" onclick="saveNote()">儲存</button>
       </div>
+      <div style="position:relative">
+        <div class="tpl-panel" id="tpl-panel">
+          <div class="tpl-head">
+            <span class="tpl-head-title">⚡ 快速回覆模板</span>
+            <div style="display:flex;gap:8px">
+              <button onclick="showTplForm()" style="font-size:12px;padding:4px 10px;background:#1a1a1a;color:#fff;border:none;border-radius:6px;cursor:pointer">＋ 新增</button>
+              <button onclick="toggleTpl()" style="font-size:18px;background:none;border:none;cursor:pointer;color:#aaa">×</button>
+            </div>
+          </div>
+          <div class="tpl-form" id="tpl-form">
+            <input type="text" id="tpl-title" placeholder="模板名稱（例如：加購床墊）">
+            <input type="text" id="tpl-price" placeholder="價格（例如：NT$2,999）">
+            <input type="text" id="tpl-image" placeholder="圖片網址（選填）">
+            <textarea id="tpl-text" placeholder="回覆文字內容"></textarea>
+            <div class="tpl-btn-row">
+              <button class="tpl-confirm-btn" onclick="addTemplate()">新增模板</button>
+              <button class="tpl-cancel-btn" onclick="hideTplForm()">取消</button>
+            </div>
+          </div>
+          <div class="tpl-grid" id="tpl-grid"></div>
+        </div>
+      </div>
       <div class="chat-input">
+        <button onclick="toggleTpl()" style="padding:0 12px;background:#f5f5f5;border:1px solid #e0e0e0;border-radius:10px;font-size:13px;cursor:pointer;white-space:nowrap" title="快速回覆模板">⚡ 模板</button>
         <textarea id="reply-input" placeholder="輸入回覆訊息... (Ctrl+Enter 送出)" onkeydown="if(event.ctrlKey&&event.key==='Enter')sendReply()"></textarea>
         <button class="send-btn" id="send-btn" onclick="sendReply()">送出</button>
       </div>
@@ -607,14 +702,17 @@ async function loadConversations(){
     const avatar=c.avatar?`<img class="user-avatar" src="${c.avatar}" onerror="this.style.display='none'">`:
       `<div class="user-avatar-fallback" style="background:${avatarBg}">${pfIcon}</div>`;
     const notePreview=c.note?`<div class="conv-note">📝 ${c.note}</div>`:'';
+    const unreadBadge=c.unread>0?`<span class="unread-dot">${c.unread}</span>`:'';
+    const tagPills=(c.tags||[]).map(t=>`<span class="tag tag-${t}">${t}</span>`).join('');
     return `<div class="conv-item" id="conv-${i}" onclick="openConv(${i})">
       ${avatar}
       <div class="conv-info">
         <div class="conv-top">
-          <div class="conv-name"><span class="pf-badge ${pfClass}">${c.platform}</span>${displayName}${manualBadge}</div>
+          <div class="conv-name"><span class="pf-badge ${pfClass}">${c.platform}</span>${displayName}${manualBadge}${unreadBadge}</div>
           <div class="conv-time">${c.last_time.slice(5,16)}</div>
         </div>
         <div class="conv-preview">${c.last_msg}</div>
+        ${tagPills?`<div style="margin-top:4px;display:flex;gap:4px;flex-wrap:wrap">${tagPills}</div>`:''}
         ${notePreview}
       </div>
     </div>`;
@@ -632,6 +730,9 @@ function openConv(i){
   document.getElementById('chat-title').textContent=currentConv.name||currentConv.user_id;
   document.getElementById('chat-uid').textContent=currentConv.platform+' · '+currentConv.user_id;
   document.getElementById('note-input').value=currentConv.note||'';
+  renderTags(currentConv.tags||[]);
+  fetch('/api/seen?key='+KEY,{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({platform:currentConv.platform,user_id:currentConv.user_id})});
   const btn=document.getElementById('takeover-btn');
   if(currentConv.manual){btn.textContent='人工接手中';btn.className='takeover-btn takeover-on';}
   else{btn.textContent='自動回覆中';btn.className='takeover-btn takeover-off';}
@@ -675,6 +776,103 @@ async function sendReply(){
     renderMessages(currentConv.messages);
   } else alert('發送失敗：'+(d.error||''));
   btn.disabled=false;
+}
+
+const ALL_TAGS=['待跟進','已報價','已成交','VIP','問題客'];
+function renderTags(active){
+  const bar=document.getElementById('tag-bar');
+  bar.innerHTML=ALL_TAGS.map(t=>{
+    const on=active.includes(t);
+    return `<span class="tag tag-${t}${on?'':' tag-inactive'}" onclick="toggleTag('${t}')">${t}</span>`;
+  }).join('');
+}
+async function toggleTag(tag){
+  if(!currentConv)return;
+  const tags=currentConv.tags||[];
+  const idx=tags.indexOf(tag);
+  if(idx>=0)tags.splice(idx,1);else tags.push(tag);
+  currentConv.tags=tags;
+  renderTags(tags);
+  await fetch('/api/tags?key='+KEY,{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({platform:currentConv.platform,user_id:currentConv.user_id,tags})});
+  await loadConversations();
+}
+
+let templates=[];
+async function loadTemplates(){
+  const res=await fetch('/api/templates?key='+KEY);
+  templates=await res.json();
+  renderTplGrid();
+}
+function renderTplGrid(){
+  const grid=document.getElementById('tpl-grid');
+  if(!grid)return;
+  grid.innerHTML=templates.map(t=>{
+    const img=t.image_url?`<img class="tpl-img" src="${t.image_url}" onerror="this.style.display='none'">`:
+      `<div class="tpl-img-empty">🖼️</div>`;
+    return `<div class="tpl-card">
+      ${img}
+      <div class="tpl-body">
+        <div class="tpl-title">${t.title}</div>
+        ${t.price?`<div class="tpl-price">${t.price}</div>`:''}
+        <div class="tpl-actions">
+          <button class="tpl-use-btn" onclick="useTpl('${t.id}')">插入</button>
+          <button class="tpl-use-btn" style="background:#00c300" onclick="sendTpl('${t.id}')">發送</button>
+          <button class="tpl-del-btn" onclick="delTpl('${t.id}')">✕</button>
+        </div>
+      </div>
+    </div>`;
+  }).join('');
+}
+function toggleTpl(){
+  const p=document.getElementById('tpl-panel');
+  p.classList.toggle('open');
+  if(p.classList.contains('open'))loadTemplates();
+}
+function showTplForm(){document.getElementById('tpl-form').classList.add('open');}
+function hideTplForm(){document.getElementById('tpl-form').classList.remove('open');}
+async function addTemplate(){
+  const title=document.getElementById('tpl-title').value.trim();
+  const text=document.getElementById('tpl-text').value.trim();
+  const price=document.getElementById('tpl-price').value.trim();
+  const image_url=document.getElementById('tpl-image').value.trim();
+  if(!title||!text){alert('請填寫名稱和內容');return;}
+  await fetch('/api/templates?key='+KEY,{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({action:'add',title,text,price,image_url})});
+  document.getElementById('tpl-title').value='';
+  document.getElementById('tpl-text').value='';
+  document.getElementById('tpl-price').value='';
+  document.getElementById('tpl-image').value='';
+  hideTplForm();
+  loadTemplates();
+}
+async function delTpl(id){
+  if(!confirm('刪除這個模板？'))return;
+  await fetch('/api/templates?key='+KEY,{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({action:'delete',id})});
+  loadTemplates();
+}
+function useTpl(id){
+  const t=templates.find(x=>x.id===id);
+  if(!t)return;
+  let msg=t.text;
+  if(t.price)msg+='\n\n💰 '+t.price;
+  document.getElementById('reply-input').value=msg;
+  document.getElementById('tpl-panel').classList.remove('open');
+  document.getElementById('reply-input').focus();
+}
+async function sendTpl(id){
+  const t=templates.find(x=>x.id===id);
+  if(!t||!currentConv)return;
+  let msg=t.text;
+  if(t.price)msg+='\n\n💰 '+t.price;
+  document.getElementById('reply-input').value=msg;
+  document.getElementById('tpl-panel').classList.remove('open');
+  await sendReply();
+  if(t.image_url){
+    await fetch('/api/reply?key='+KEY,{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({platform:currentConv.platform,user_id:currentConv.user_id,text:t.image_url,type:'image'})});
+  }
 }
 
 async function saveNote(){
@@ -1548,10 +1746,19 @@ def api_conversations():
                           "manual": key in manual_takeover,
                           "name": profile.get("name",""),
                           "avatar": profile.get("avatar",""),
-                          "note": user_notes.get(key,"")}
+                          "note": user_notes.get(key,""),
+                          "tags": conv_tags.get(key,[]),
+                          "unread": 0}
         convs[key]["messages"].append(l)
         convs[key]["last_time"] = l.get("time","")
         convs[key]["last_msg"] = l.get("msg","")
+        seen_ts = last_seen.get(key, 0)
+        try:
+            msg_ts = time.mktime(time.strptime(l.get("time",""), "%Y/%m/%d %H:%M:%S"))
+            if msg_ts > seen_ts and l.get("user_id","") != "ADMIN":
+                convs[key]["unread"] += 1
+        except Exception:
+            pass
     result = sorted(convs.values(), key=lambda x: x["last_time"], reverse=True)
     return jsonify(result)
 
@@ -1611,6 +1818,76 @@ def api_takeover():
     else:
         manual_takeover.discard(key)
     return jsonify({"ok": True, "active": active})
+
+# ── 快速回覆模板 API ──────────────────────────────────────
+
+@app.route("/api/templates", methods=["GET"])
+def api_templates_get():
+    ok, _ = auth_required()
+    if not ok:
+        return jsonify({"error": "unauthorized"}), 403
+    return jsonify(quick_reply_templates)
+
+@app.route("/api/templates", methods=["POST"])
+def api_templates_post():
+    ok, _ = auth_required()
+    if not ok:
+        return jsonify({"error": "unauthorized"}), 403
+    data = request.get_json(silent=True) or {}
+    action = data.get("action", "add")
+    if action == "add":
+        import uuid
+        tpl = {
+            "id": str(uuid.uuid4())[:8],
+            "title": data.get("title", "").strip(),
+            "text": data.get("text", "").strip(),
+            "image_url": data.get("image_url", "").strip(),
+            "price": data.get("price", "").strip(),
+        }
+        if not tpl["title"] or not tpl["text"]:
+            return jsonify({"error": "title and text required"}), 400
+        quick_reply_templates.append(tpl)
+        _save_templates()
+        return jsonify({"ok": True, "tpl": tpl})
+    elif action == "delete":
+        tid = data.get("id", "")
+        for i, t in enumerate(quick_reply_templates):
+            if t["id"] == tid:
+                quick_reply_templates.pop(i)
+                _save_templates()
+                return jsonify({"ok": True})
+        return jsonify({"error": "not found"}), 404
+    return jsonify({"error": "unknown action"}), 400
+
+# ── 標籤 API ─────────────────────────────────────────────
+
+@app.route("/api/tags", methods=["POST"])
+def api_tags():
+    ok, _ = auth_required()
+    if not ok:
+        return jsonify({"error": "unauthorized"}), 403
+    data = request.get_json(silent=True) or {}
+    platform = data.get("platform", "").upper()
+    user_id = data.get("user_id", "")
+    tags = data.get("tags", [])
+    key = f"{platform}:{user_id}"
+    conv_tags[key] = tags
+    _save_tags()
+    return jsonify({"ok": True})
+
+# ── 已讀標記 API ─────────────────────────────────────────
+
+@app.route("/api/seen", methods=["POST"])
+def api_seen():
+    ok, _ = auth_required()
+    if not ok:
+        return jsonify({"error": "unauthorized"}), 403
+    data = request.get_json(silent=True) or {}
+    platform = data.get("platform", "").upper()
+    user_id = data.get("user_id", "")
+    key = f"{platform}:{user_id}"
+    last_seen[key] = time.time()
+    return jsonify({"ok": True})
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
