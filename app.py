@@ -1211,6 +1211,8 @@ def admin_login():
 
 @app.route("/admin/<platform>")
 def platform_admin(platform):
+    if platform == "inbox":
+        return admin_inbox()
     if platform not in platforms:
         abort(404)
     ok, key = check_auth()
