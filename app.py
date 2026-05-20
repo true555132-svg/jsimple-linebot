@@ -50,9 +50,9 @@ GOOGLE_SERVICE_ACCOUNT_JSON = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON", "")
 def _load_logs():
     try:
         with open(LOGS_FILE, "r", encoding="utf-8") as f:
-            return deque(json.load(f), maxlen=500)
+            return deque(json.load(f), maxlen=2000)
     except Exception:
-        return deque(maxlen=500)
+        return deque(maxlen=2000)
 
 message_log = _load_logs()
 
@@ -75,8 +75,13 @@ def _append_to_sheets(entry):
         )
         ws = gspread.authorize(creds).open_by_key(GOOGLE_SHEET_ID).sheet1
         ws.append_row([
-            entry["time"], entry["platform"], entry["msg"],
-            entry["intent"], "已回覆" if entry["replied"] else "冷卻中"
+            entry["time"],
+            entry["platform"],
+            entry.get("user_id", ""),
+            entry["msg"],
+            entry["intent"],
+            entry.get("reply", ""),
+            "已回覆" if entry["replied"] else "冷卻中",
         ])
     except Exception:
         pass
@@ -139,18 +144,21 @@ def get_reply(text: str, user_id: str, platform: str) -> tuple:
     store = cooldowns[platform]
     user_times = store.setdefault(user_id, {})
     cooled = now - user_times.get(intent, 0) < COOLDOWN_SECONDS
+    replied = not cooled and cfg["enabled"] and intent_on
+    reply_text = cfg["replies"].get(intent, cfg["replies"].get("default", "")) if replied else ""
+    image_url = cfg["image_urls"].get(intent, "") if replied else ""
     log_message({
-        "time": time.strftime("%m/%d %H:%M", time.localtime(now)),
+        "time": time.strftime("%Y/%m/%d %H:%M:%S", time.localtime(now)),
         "platform": platform.upper(),
-        "msg": text[:40],
+        "user_id": user_id,
+        "msg": text,
         "intent": intent,
-        "replied": not cooled and cfg["enabled"] and intent_on,
+        "reply": reply_text,
+        "replied": replied,
     })
-    if not cfg["enabled"] or cooled or not intent_on:
+    if not replied:
         return None, None
     user_times[intent] = now
-    reply_text = cfg["replies"].get(intent, cfg["replies"].get("default", ""))
-    image_url = cfg["image_urls"].get(intent, "")
     return reply_text, image_url
 
 # ── LINE Webhook ──────────────────────────────────────────
@@ -378,7 +386,22 @@ def api_logs():
     if not ok:
         return jsonify({"error": "unauthorized"}), 403
     platform = request.args.get("platform", "all")
+    fmt = request.args.get("format", "json")
     logs = [l for l in message_log if platform == "all" or l["platform"] == platform.upper()]
+    if fmt == "csv":
+        import io, csv
+        out = io.StringIO()
+        w = csv.writer(out)
+        w.writerow(["時間", "平台", "用戶ID", "用戶訊息", "意圖", "Bot回覆", "狀態"])
+        for l in logs:
+            w.writerow([
+                l.get("time", ""), l.get("platform", ""), l.get("user_id", ""),
+                l.get("msg", ""), l.get("intent", ""), l.get("reply", ""),
+                "已回覆" if l.get("replied") else "冷卻中"
+            ])
+        from flask import Response
+        return Response(out.getvalue(), mimetype="text/csv; charset=utf-8",
+                        headers={"Content-Disposition": "attachment; filename=logs.csv"})
     return jsonify(logs)
 
 # ── Admin HTML ────────────────────────────────────────────
@@ -528,12 +551,14 @@ input[type=text]:focus{outline:none;border-color:var(--ac)}
 .intent-badge{display:inline-block;padding:3px 10px;border-radius:10px;font-size:12px;font-weight:600;margin-bottom:8px;background:rgba(var(--ac-rgb),.12);color:var(--ac)}
 .reply-pre{background:#f5f5f5;border-radius:8px;padding:12px;font-size:14px;line-height:1.7;white-space:pre-wrap}
 /* ── 紀錄 ── */
-.log-table{width:100%;border-collapse:collapse;font-size:13px}
-.log-table th{text-align:left;padding:8px 10px;background:#f9f9f9;color:#888;font-weight:600;border-bottom:2px solid #eee}
-.log-table td{padding:8px 10px;border-bottom:1px solid #f0f0f0;vertical-align:top}
+.log-table{width:100%;border-collapse:collapse;font-size:12px}
+.log-table th{text-align:left;padding:8px 10px;background:#f9f9f9;color:#888;font-weight:600;border-bottom:2px solid #eee;white-space:nowrap}
+.log-table td{padding:8px 10px;border-bottom:1px solid #f0f0f0;vertical-align:top;word-break:break-all}
 .log-table tr:last-child td{border-bottom:none}
 .replied-yes{color:#00b050;font-weight:600;font-size:12px}
 .replied-no{color:#bbb;font-size:12px}
+.log-reply{color:#555;font-size:11px;background:#f7f7f7;padding:4px 6px;border-radius:4px;margin-top:3px;max-height:60px;overflow:hidden;white-space:pre-wrap}
+.log-uid{font-size:10px;color:#bbb;font-family:monospace}
 .empty{text-align:center;color:#ccc;padding:40px;font-size:14px}
 .flash{padding:10px 16px;border-radius:8px;margin-bottom:12px;font-size:14px}
 .ok{background:#e8f5e9;color:#2e7d32}
@@ -736,10 +761,12 @@ function runTest(){
 function loadLogs(){
   fetch('/api/logs?key='+KEY+'&platform='+PLATFORM).then(r=>r.json()).then(logs=>{
     if(!logs.length){document.getElementById('log-content').innerHTML='<div class="empty">尚無訊息紀錄</div>';return;}
-    let h='<table class="log-table"><thead><tr><th>時間</th><th>訊息</th><th>意圖</th><th>狀態</th></tr></thead><tbody>';
+    let h='<table class="log-table"><thead><tr><th>時間</th><th>用戶</th><th>用戶訊息</th><th>意圖</th><th>Bot 回覆</th><th>狀態</th></tr></thead><tbody>';
     logs.forEach(l=>{
       const rep=l.replied?'<span class="replied-yes">✓ 已回覆</span>':'<span class="replied-no">冷卻中</span>';
-      h+=`<tr><td>${l.time}</td><td>${l.msg}</td><td>${l.intent}</td><td>${rep}</td></tr>`;
+      const uid=l.user_id?`<div class="log-uid">${l.user_id.slice(0,12)}...</div>`:'';
+      const reply=l.reply?`<div class="log-reply">${l.reply.slice(0,80)}${l.reply.length>80?'…':''}</div>`:'<span style="color:#ddd">—</span>';
+      h+=`<tr><td style="white-space:nowrap">${l.time}</td><td>${uid}</td><td>${l.msg}</td><td>${l.intent}</td><td>${reply}</td><td>${rep}</td></tr>`;
     });
     h+='</tbody></table>';
     document.getElementById('log-content').innerHTML=h;
