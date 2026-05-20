@@ -925,7 +925,7 @@ function useTpl(id){
   const t=templates.find(x=>x.id===id);
   if(!t)return;
   let msg=t.text;
-  if(t.price)msg+='\n\n💰 '+t.price;
+  if(t.price)msg+='\\n\\n💰 '+t.price;
   document.getElementById('reply-input').value=msg;
   document.getElementById('tpl-panel').classList.remove('open');
   document.getElementById('reply-input').focus();
@@ -934,7 +934,7 @@ async function sendTpl(id){
   const t=templates.find(x=>x.id===id);
   if(!t||!currentConv)return;
   let msg=t.text;
-  if(t.price)msg+='\n\n💰 '+t.price;
+  if(t.price)msg+='\\n\\n💰 '+t.price;
   document.getElementById('reply-input').value=msg;
   document.getElementById('tpl-panel').classList.remove('open');
   await sendReply();
