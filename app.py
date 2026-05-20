@@ -125,6 +125,9 @@ platforms = {
 
 cooldowns = {"line": {}, "fb": {}, "fb_comment": {}}
 
+# 人工接手：儲存 "platform:user_id"，接手中的用戶不觸發自動回覆
+manual_takeover = set()
+
 # 貼文指定回覆 {post_id: {"reply": str, "image_url": str, "enabled": bool}}
 fb_post_replies: dict = {}
 
@@ -158,7 +161,7 @@ def get_reply(text: str, user_id: str, platform: str) -> tuple:
         "reply": reply_text,
         "replied": replied,
     })
-    if not replied:
+    if not replied or f"{platform}:{user_id}" in manual_takeover:
         return None, None
     user_times[intent] = now
     return reply_text, image_url
@@ -295,6 +298,18 @@ def fb_send_image(psid: str, image_url: str):
         "attachment": {"type": "image", "payload": {"url": image_url, "is_reusable": True}}
     }}).encode()
     req = urllib.request.Request(url, data=payload, headers={"Content-Type": "application/json"})
+    try:
+        urllib.request.urlopen(req)
+    except Exception:
+        pass
+
+def line_push(user_id: str, text: str):
+    url = "https://api.line.me/v2/bot/message/push"
+    payload = json.dumps({"to": user_id, "messages": [{"type": "text", "text": text}]}).encode()
+    req = urllib.request.Request(url, data=payload, headers={
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {LINE_CHANNEL_ACCESS_TOKEN}"
+    })
     try:
         urllib.request.urlopen(req)
     except Exception:
@@ -439,6 +454,175 @@ def api_logs():
 
 # ── Admin HTML ────────────────────────────────────────────
 
+INBOX_HTML = """<!DOCTYPE html>
+<html lang="zh-TW"><head><meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>訊息收件匣</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:-apple-system,sans-serif;background:#f0f2f5;height:100vh;display:flex;flex-direction:column}
+.header{background:#1a1a1a;color:#fff;padding:13px 18px;display:flex;align-items:center;gap:12px;flex-shrink:0}
+.back{color:#aaa;text-decoration:none;font-size:20px}
+.header h1{font-size:16px;font-weight:700;flex:1}
+.main{display:flex;flex:1;overflow:hidden}
+/* 左側對話列表 */
+.sidebar{width:320px;background:#fff;border-right:1px solid #e0e0e0;display:flex;flex-direction:column;flex-shrink:0}
+.sidebar-head{padding:12px 14px;border-bottom:1px solid #f0f0f0;font-size:13px;font-weight:700;color:#888}
+.conv-list{overflow-y:auto;flex:1}
+.conv-item{padding:12px 14px;border-bottom:1px solid #f7f7f7;cursor:pointer;display:flex;gap:10px;align-items:flex-start}
+.conv-item:hover{background:#f7f9fc}
+.conv-item.active{background:#e8f4fd}
+.conv-avatar{width:40px;height:40px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:18px;flex-shrink:0}
+.conv-info{flex:1;min-width:0}
+.conv-top{display:flex;justify-content:space-between;align-items:center;margin-bottom:3px}
+.conv-name{font-size:13px;font-weight:700;color:#333;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.conv-time{font-size:11px;color:#bbb;flex-shrink:0}
+.conv-preview{font-size:12px;color:#888;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.pf-badge{font-size:10px;font-weight:700;padding:1px 6px;border-radius:6px;margin-right:4px}
+.pf-line{background:#e8f5e9;color:#00a000}
+.pf-fb{background:#e3f2fd;color:#1877f2}
+.pf-fb_comment{background:#fce4ec;color:#e91e63}
+.manual-badge{font-size:10px;background:#fff3e0;color:#e65100;padding:1px 6px;border-radius:6px;margin-left:4px}
+/* 右側聊天區 */
+.chat{flex:1;display:flex;flex-direction:column;min-width:0}
+.chat-head{padding:12px 16px;background:#fff;border-bottom:1px solid #e0e0e0;display:flex;align-items:center;justify-content:space-between}
+.chat-title{font-size:14px;font-weight:700}
+.takeover-btn{padding:6px 14px;border:none;border-radius:8px;font-size:12px;font-weight:700;cursor:pointer}
+.takeover-on{background:#fff3e0;color:#e65100}
+.takeover-off{background:#e8f5e9;color:#2e7d32}
+.chat-messages{flex:1;overflow-y:auto;padding:16px;display:flex;flex-direction:column;gap:10px}
+.msg-row{display:flex;gap:8px;max-width:75%}
+.msg-row.user{align-self:flex-start}
+.msg-row.bot{align-self:flex-end;flex-direction:row-reverse}
+.bubble{padding:10px 14px;border-radius:16px;font-size:14px;line-height:1.6;white-space:pre-wrap;word-break:break-word}
+.msg-row.user .bubble{background:#fff;border:1px solid #e0e0e0;color:#333;border-top-left-radius:4px}
+.msg-row.bot .bubble{background:#1a1a1a;color:#fff;border-top-right-radius:4px}
+.msg-time{font-size:10px;color:#bbb;margin-top:4px;text-align:center;align-self:flex-end}
+.empty-chat{flex:1;display:flex;align-items:center;justify-content:center;color:#ccc;font-size:14px}
+.chat-input{padding:12px 16px;background:#fff;border-top:1px solid #e0e0e0;display:flex;gap:10px}
+.chat-input textarea{flex:1;border:1px solid #e0e0e0;border-radius:10px;padding:10px 14px;font-size:14px;font-family:inherit;resize:none;height:60px;line-height:1.5}
+.chat-input textarea:focus{outline:none;border-color:#1a1a1a}
+.send-btn{padding:0 20px;background:#1a1a1a;color:#fff;border:none;border-radius:10px;font-size:14px;font-weight:700;cursor:pointer;flex-shrink:0}
+.send-btn:hover{opacity:.85}
+.send-btn:disabled{opacity:.4;cursor:not-allowed}
+@media(max-width:640px){.sidebar{width:100%;display:none}.sidebar.show{display:flex}.chat{display:none}.chat.show{display:flex}}
+</style></head>
+<body>
+<div class="header">
+  <a class="back" href="/admin?key={{ key }}">‹</a>
+  <h1>📬 訊息收件匣</h1>
+</div>
+<div class="main">
+  <div class="sidebar">
+    <div class="sidebar-head">所有對話</div>
+    <div class="conv-list" id="conv-list"><div style="padding:30px;text-align:center;color:#ccc;font-size:13px">載入中...</div></div>
+  </div>
+  <div class="chat" id="chat-panel">
+    <div class="empty-chat" id="empty-chat">← 選擇一個對話開始</div>
+    <div id="chat-main" style="display:none;flex:1;flex-direction:column;overflow:hidden;display:none">
+      <div class="chat-head">
+        <div>
+          <div class="chat-title" id="chat-title">—</div>
+          <div style="font-size:11px;color:#aaa;margin-top:2px" id="chat-uid">—</div>
+        </div>
+        <button class="takeover-btn takeover-off" id="takeover-btn" onclick="toggleTakeover()">自動回覆中</button>
+      </div>
+      <div class="chat-messages" id="chat-messages"></div>
+      <div class="chat-input">
+        <textarea id="reply-input" placeholder="輸入回覆訊息..." onkeydown="if(event.ctrlKey&&event.key==='Enter')sendReply()"></textarea>
+        <button class="send-btn" id="send-btn" onclick="sendReply()">送出</button>
+      </div>
+    </div>
+  </div>
+</div>
+<script>
+const KEY="{{ key }}";
+let currentConv=null, convData={};
+
+async function loadConversations(){
+  const res=await fetch('/api/conversations?key='+KEY);
+  const data=await res.json();
+  convData=data;
+  const list=document.getElementById('conv-list');
+  if(!data.length){list.innerHTML='<div style="padding:30px;text-align:center;color:#ccc;font-size:13px">尚無對話記錄</div>';return;}
+  list.innerHTML=data.map((c,i)=>{
+    const pfClass=c.platform==='LINE'?'pf-line':c.platform==='FB'?'pf-fb':'pf-fb_comment';
+    const pfIcon=c.platform==='LINE'?'💬':c.platform==='FB'?'📘':'💬';
+    const avatarBg=c.platform==='LINE'?'#e8f5e9':c.platform==='FB'?'#e3f2fd':'#fce4ec';
+    const manualBadge=c.manual?'<span class="manual-badge">人工</span>':'';
+    return `<div class="conv-item" id="conv-${i}" onclick="openConv(${i})">
+      <div class="conv-avatar" style="background:${avatarBg}">${pfIcon}</div>
+      <div class="conv-info">
+        <div class="conv-top">
+          <div class="conv-name"><span class="pf-badge ${pfClass}">${c.platform}</span>${c.user_id.slice(0,10)}...${manualBadge}</div>
+          <div class="conv-time">${c.last_time}</div>
+        </div>
+        <div class="conv-preview">${c.last_msg}</div>
+      </div>
+    </div>`;
+  }).join('');
+}
+
+function openConv(i){
+  document.querySelectorAll('.conv-item').forEach(e=>e.classList.remove('active'));
+  document.getElementById('conv-'+i).classList.add('active');
+  currentConv=convData[i];
+  document.getElementById('empty-chat').style.display='none';
+  const main=document.getElementById('chat-main');
+  main.style.display='flex';
+  main.style.flexDirection='column';
+  document.getElementById('chat-title').textContent=currentConv.platform+' 對話';
+  document.getElementById('chat-uid').textContent='用戶 ID：'+currentConv.user_id;
+  const btn=document.getElementById('takeover-btn');
+  if(currentConv.manual){btn.textContent='人工接手中';btn.className='takeover-btn takeover-on';}
+  else{btn.textContent='自動回覆中';btn.className='takeover-btn takeover-off';}
+  renderMessages(currentConv.messages);
+}
+
+function renderMessages(msgs){
+  const el=document.getElementById('chat-messages');
+  el.innerHTML=msgs.map(m=>{
+    const userRow=`<div class="msg-row user"><div><div class="bubble">${m.msg}</div><div class="msg-time">${m.time}</div></div></div>`;
+    const botRow=m.reply?`<div class="msg-row bot"><div><div class="bubble">${m.reply}</div></div></div>`:'';
+    return userRow+botRow;
+  }).join('');
+  el.scrollTop=el.scrollHeight;
+}
+
+async function toggleTakeover(){
+  if(!currentConv)return;
+  const res=await fetch('/api/takeover?key='+KEY,{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({platform:currentConv.platform,user_id:currentConv.user_id,active:!currentConv.manual})});
+  const d=await res.json();
+  currentConv.manual=d.active;
+  const btn=document.getElementById('takeover-btn');
+  if(d.active){btn.textContent='人工接手中';btn.className='takeover-btn takeover-on';}
+  else{btn.textContent='自動回覆中';btn.className='takeover-btn takeover-off';}
+  await loadConversations();
+}
+
+async function sendReply(){
+  if(!currentConv)return;
+  const text=document.getElementById('reply-input').value.trim();
+  if(!text)return;
+  const btn=document.getElementById('send-btn');
+  btn.disabled=true;
+  const res=await fetch('/api/reply?key='+KEY,{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({platform:currentConv.platform,user_id:currentConv.user_id,text})});
+  const d=await res.json();
+  if(d.ok){
+    document.getElementById('reply-input').value='';
+    currentConv.messages.push({time:new Date().toLocaleTimeString('zh-TW'),msg:'（你）'+text,reply:''});
+    renderMessages(currentConv.messages);
+  } else alert('發送失敗：'+(d.error||''));
+  btn.disabled=false;
+}
+
+loadConversations();
+setInterval(loadConversations, 15000);
+</script>
+</body></html>"""
+
 DASH_HTML = """<!DOCTYPE html>
 <html lang="zh-TW"><head><meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
@@ -463,6 +647,18 @@ body{font-family:-apple-system,sans-serif;background:#f5f5f5;color:#333}
 </style></head><body>
 <div class="header">⚡ J SIMPLE Bot 後台總覽</div>
 <div class="container">
+  <a class="card" href="/admin/inbox?key={{ key }}">
+    <div class="card-left">
+      <div class="icon" style="background:#e8f0fe">📬</div>
+      <div>
+        <div class="card-title">訊息收件匣</div>
+        <div class="card-sub">LINE + FB 統一回覆</div>
+      </div>
+    </div>
+    <div style="display:flex;align-items:center;gap:10px">
+      <span class="arrow">›</span>
+    </div>
+  </a>
   <a class="card" href="/admin/line?key={{ key }}">
     <div class="card-left">
       <div class="icon icon-line">💬</div>
@@ -1250,6 +1446,81 @@ def build_knowledge_base_py() -> str:
     out.append("_BASE_REPLIES = LINE_REPLIES\n")
     out.append("_BASE_KEYWORDS = LINE_KEYWORDS\n")
     return "".join(out)
+
+# ── 收件匣 ───────────────────────────────────────────────
+
+@app.route("/admin/inbox")
+def admin_inbox():
+    ok, key = check_auth()
+    if not ok:
+        return render_template_string(LOGIN_HTML, next="/admin/inbox", error=None)
+    return render_template_string(INBOX_HTML, key=key)
+
+@app.route("/api/conversations")
+def api_conversations():
+    ok, _ = auth_required()
+    if not ok:
+        return jsonify({"error": "unauthorized"}), 403
+    logs = list(message_log)
+    if not logs and GOOGLE_SHEET_ID:
+        logs = _load_from_sheets()
+    convs = {}
+    for l in reversed(logs):
+        uid = l.get("user_id", "")
+        pf = l.get("platform", "")
+        if not uid or not pf or pf == "FB_COMMENT":
+            continue
+        key = f"{pf}:{uid}"
+        if key not in convs:
+            convs[key] = {"platform": pf, "user_id": uid, "messages": [],
+                          "last_time": l.get("time",""), "last_msg": l.get("msg",""),
+                          "manual": key in manual_takeover}
+        convs[key]["messages"].append(l)
+        convs[key]["last_time"] = l.get("time","")
+        convs[key]["last_msg"] = l.get("msg","")
+    result = sorted(convs.values(), key=lambda x: x["last_time"], reverse=True)
+    return jsonify(result)
+
+@app.route("/api/reply", methods=["POST"])
+def api_reply():
+    ok, _ = auth_required()
+    if not ok:
+        return jsonify({"error": "unauthorized"}), 403
+    data = request.get_json(silent=True) or {}
+    platform = data.get("platform","").upper()
+    user_id = data.get("user_id","")
+    text = data.get("text","").strip()
+    if not user_id or not text:
+        return jsonify({"error": "missing fields"}), 400
+    try:
+        if platform == "LINE":
+            line_push(user_id, text)
+        elif platform == "FB":
+            fb_send(user_id, text)
+        else:
+            return jsonify({"error": "unsupported platform"}), 400
+        now = time.strftime("%Y/%m/%d %H:%M:%S", time.gmtime(time.time() + 8*3600))
+        log_message({"time": now, "platform": platform, "user_id": "ADMIN",
+                     "msg": f"[手動] {text}", "intent": "manual", "reply": "", "replied": True})
+        return jsonify({"ok": True})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route("/api/takeover", methods=["POST"])
+def api_takeover():
+    ok, _ = auth_required()
+    if not ok:
+        return jsonify({"error": "unauthorized"}), 403
+    data = request.get_json(silent=True) or {}
+    platform = data.get("platform","").upper()
+    user_id = data.get("user_id","")
+    active = data.get("active", True)
+    key = f"{platform}:{user_id}"
+    if active:
+        manual_takeover.add(key)
+    else:
+        manual_takeover.discard(key)
+    return jsonify({"ok": True, "active": active})
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
