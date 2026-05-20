@@ -633,11 +633,44 @@ body{font-family:-apple-system,sans-serif;background:#f0f2f5;height:100vh;displa
 </div>
 <div class="main">
   <div class="sidebar">
-    <div class="sidebar-head">所有對話</div>
+    <div class="sidebar-head" style="display:flex;align-items:center;justify-content:space-between">
+      <span>所有對話</span>
+      <button onclick="showTemplateManager()" style="font-size:12px;padding:4px 10px;background:#1a1a1a;color:#fff;border:none;border-radius:6px;cursor:pointer">⚡ 管理模板</button>
+    </div>
     <div class="conv-list" id="conv-list"><div style="padding:30px;text-align:center;color:#ccc;font-size:13px">載入中...</div></div>
   </div>
   <div class="chat" id="chat-panel">
     <div class="empty-chat" id="empty-chat">← 選擇一個對話開始</div>
+
+    <!-- 模板管理頁面 -->
+    <div id="tpl-manager" style="display:none;flex:1;flex-direction:column;overflow:hidden">
+      <div class="chat-head">
+        <div><div class="chat-title">⚡ 快速回覆模板</div><div style="font-size:11px;color:#aaa;margin-top:2px">點「新增」建立模板，發送時一鍵帶入</div></div>
+      </div>
+      <div style="padding:16px;overflow-y:auto;flex:1">
+        <!-- 新增按鈕列 -->
+        <div style="display:flex;gap:8px;margin-bottom:16px">
+          <button onclick="showAddForm('image')" style="flex:1;padding:10px;background:#1a1a1a;color:#fff;border:none;border-radius:8px;font-size:13px;font-weight:700;cursor:pointer">🖼️ 圖片＋文字</button>
+          <button onclick="showAddForm('text')" style="flex:1;padding:10px;background:#444;color:#fff;border:none;border-radius:8px;font-size:13px;font-weight:700;cursor:pointer">💬 純文字</button>
+        </div>
+        <!-- 新增表單 -->
+        <div id="mgr-form" style="display:none;background:#f9f9f9;border-radius:10px;padding:14px;margin-bottom:16px;border:1px solid #e0e0e0">
+          <div id="mgr-form-title" style="font-size:13px;font-weight:700;margin-bottom:10px;color:#333"></div>
+          <div style="display:flex;flex-direction:column;gap:8px">
+            <input type="text" id="mgr-title" placeholder="模板名稱（例如：加購床墊）" style="border:1px solid #e0e0e0;border-radius:8px;padding:8px 10px;font-size:13px">
+            <input type="text" id="mgr-price" placeholder="價格標示（選填，例如：NT$2,999）" style="border:1px solid #e0e0e0;border-radius:8px;padding:8px 10px;font-size:13px">
+            <input type="text" id="mgr-image" placeholder="圖片網址（選填）" style="border:1px solid #e0e0e0;border-radius:8px;padding:8px 10px;font-size:13px" id="mgr-image-field">
+            <textarea id="mgr-text" placeholder="回覆文字內容" style="border:1px solid #e0e0e0;border-radius:8px;padding:8px 10px;font-size:13px;min-height:80px;resize:vertical;font-family:inherit"></textarea>
+            <div style="display:flex;gap:8px">
+              <button onclick="submitAddTemplate()" style="flex:1;padding:9px;background:#00c300;color:#fff;border:none;border-radius:8px;font-size:13px;font-weight:700;cursor:pointer">✓ 儲存模板</button>
+              <button onclick="document.getElementById('mgr-form').style.display='none'" style="padding:9px 16px;background:#f0f0f0;border:none;border-radius:8px;font-size:13px;cursor:pointer">取消</button>
+            </div>
+          </div>
+        </div>
+        <!-- 模板列表 -->
+        <div id="mgr-grid" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:10px"></div>
+      </div>
+    </div>
     <div id="chat-main" style="display:none;flex:1;flex-direction:column;overflow:hidden;display:none">
       <div class="chat-head">
         <div style="flex:1;min-width:0">
@@ -798,52 +831,69 @@ async function toggleTag(tag){
   await loadConversations();
 }
 
-let templates=[];
+let templates=[], mgrMode='text';
 async function loadTemplates(){
   const res=await fetch('/api/templates?key='+KEY);
   templates=await res.json();
   renderTplGrid();
+  renderMgrGrid();
 }
 function renderTplGrid(){
   const grid=document.getElementById('tpl-grid');
   if(!grid)return;
   grid.innerHTML=templates.map(t=>{
-    const img=t.image_url?`<img class="tpl-img" src="${t.image_url}" onerror="this.style.display='none'">`:
-      `<div class="tpl-img-empty">🖼️</div>`;
+    const img=t.image_url?`<img class="tpl-img" src="${t.image_url}" onerror="this.parentElement.innerHTML='<div class=tpl-img-empty>🖼️</div>'">`:
+      `<div class="tpl-img-empty">💬</div>`;
     return `<div class="tpl-card">
-      ${img}
-      <div class="tpl-body">
+      ${img}<div class="tpl-body">
         <div class="tpl-title">${t.title}</div>
         ${t.price?`<div class="tpl-price">${t.price}</div>`:''}
         <div class="tpl-actions">
           <button class="tpl-use-btn" onclick="useTpl('${t.id}')">插入</button>
           <button class="tpl-use-btn" style="background:#00c300" onclick="sendTpl('${t.id}')">發送</button>
-          <button class="tpl-del-btn" onclick="delTpl('${t.id}')">✕</button>
         </div>
-      </div>
-    </div>`;
+      </div></div>`;
   }).join('');
 }
-function toggleTpl(){
-  const p=document.getElementById('tpl-panel');
-  p.classList.toggle('open');
-  if(p.classList.contains('open'))loadTemplates();
+function renderMgrGrid(){
+  const grid=document.getElementById('mgr-grid');
+  if(!grid)return;
+  if(!templates.length){grid.innerHTML='<div style="grid-column:1/-1;text-align:center;color:#ccc;padding:30px;font-size:13px">尚無模板，點上方按鈕新增</div>';return;}
+  grid.innerHTML=templates.map(t=>{
+    const img=t.image_url?`<img class="tpl-img" src="${t.image_url}" onerror="this.style.display='none'">`:
+      `<div class="tpl-img-empty">💬</div>`;
+    return `<div class="tpl-card">
+      ${img}<div class="tpl-body">
+        <div class="tpl-title">${t.title}</div>
+        ${t.price?`<div class="tpl-price">${t.price}</div>`:''}
+        <div style="font-size:11px;color:#aaa;margin-top:4px;max-height:36px;overflow:hidden">${t.text.slice(0,40)}${t.text.length>40?'…':''}</div>
+        <button class="tpl-del-btn" style="width:100%;margin-top:6px" onclick="delTpl('${t.id}')">✕ 刪除</button>
+      </div></div>`;
+  }).join('');
 }
-function showTplForm(){document.getElementById('tpl-form').classList.add('open');}
-function hideTplForm(){document.getElementById('tpl-form').classList.remove('open');}
-async function addTemplate(){
-  const title=document.getElementById('tpl-title').value.trim();
-  const text=document.getElementById('tpl-text').value.trim();
-  const price=document.getElementById('tpl-price').value.trim();
-  const image_url=document.getElementById('tpl-image').value.trim();
+function showTemplateManager(){
+  document.getElementById('empty-chat').style.display='none';
+  document.getElementById('tpl-manager').style.display='flex';
+  const m=document.getElementById('chat-main');
+  m.style.display='none';
+  loadTemplates();
+}
+function showAddForm(mode){
+  mgrMode=mode;
+  document.getElementById('mgr-form').style.display='block';
+  document.getElementById('mgr-form-title').textContent=mode==='image'?'🖼️ 新增圖片＋文字模板':'💬 新增純文字模板';
+  document.getElementById('mgr-image').style.display=mode==='image'?'block':'none';
+}
+async function submitAddTemplate(){
+  const title=document.getElementById('mgr-title').value.trim();
+  const text=document.getElementById('mgr-text').value.trim();
+  const price=document.getElementById('mgr-price').value.trim();
+  const image_url=mgrMode==='image'?document.getElementById('mgr-image').value.trim():'';
   if(!title||!text){alert('請填寫名稱和內容');return;}
   await fetch('/api/templates?key='+KEY,{method:'POST',headers:{'Content-Type':'application/json'},
     body:JSON.stringify({action:'add',title,text,price,image_url})});
-  document.getElementById('tpl-title').value='';
-  document.getElementById('tpl-text').value='';
-  document.getElementById('tpl-price').value='';
-  document.getElementById('tpl-image').value='';
-  hideTplForm();
+  ['mgr-title','mgr-text','mgr-price','mgr-image'].forEach(id=>document.getElementById(id).value='');
+  document.getElementById('mgr-form').style.display='none';
   loadTemplates();
 }
 async function delTpl(id){
@@ -851,6 +901,11 @@ async function delTpl(id){
   await fetch('/api/templates?key='+KEY,{method:'POST',headers:{'Content-Type':'application/json'},
     body:JSON.stringify({action:'delete',id})});
   loadTemplates();
+}
+function toggleTpl(){
+  const p=document.getElementById('tpl-panel');
+  p.classList.toggle('open');
+  if(p.classList.contains('open'))loadTemplates();
 }
 function useTpl(id){
   const t=templates.find(x=>x.id===id);
