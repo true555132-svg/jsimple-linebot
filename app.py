@@ -382,6 +382,33 @@ def api_render_deploy():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
+def _load_from_sheets():
+    if not GOOGLE_SHEET_ID or not GOOGLE_SERVICE_ACCOUNT_JSON:
+        return []
+    try:
+        import gspread
+        from google.oauth2.service_account import Credentials
+        creds = Credentials.from_service_account_info(
+            json.loads(GOOGLE_SERVICE_ACCOUNT_JSON),
+            scopes=["https://www.googleapis.com/auth/spreadsheets"]
+        )
+        gc = gspread.Client(auth=creds)
+        ws = gc.open_by_key(GOOGLE_SHEET_ID).sheet1
+        rows = ws.get_all_values()
+        logs = []
+        for r in reversed(rows):
+            if len(r) >= 7:
+                logs.append({
+                    "time": r[0], "platform": r[1], "user_id": r[2],
+                    "msg": r[3], "intent": r[4], "reply": r[5],
+                    "replied": r[6] == "已回覆"
+                })
+        return logs[:500]
+    except Exception as e:
+        import sys
+        print(f"[Sheets Read Error] {e}", file=sys.stderr)
+        return []
+
 @app.route("/api/logs")
 def api_logs():
     ok, _ = auth_required()
@@ -389,7 +416,11 @@ def api_logs():
         return jsonify({"error": "unauthorized"}), 403
     platform = request.args.get("platform", "all")
     fmt = request.args.get("format", "json")
-    logs = [l for l in message_log if platform == "all" or l["platform"] == platform.upper()]
+    logs = list(message_log)
+    if not logs and GOOGLE_SHEET_ID:
+        logs = _load_from_sheets()
+    if platform != "all":
+        logs = [l for l in logs if l.get("platform", "") == platform.upper()]
     if fmt == "csv":
         import io, csv
         out = io.StringIO()
