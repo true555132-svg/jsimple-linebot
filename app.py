@@ -1807,7 +1807,9 @@ def api_conversations():
             continue
         key = f"{pf}:{uid}"
         if key not in convs:
-            profile = get_user_profile(pf, uid)
+            profile = user_profiles.get(key, {"name": "", "avatar": ""})
+            if not profile.get("name"):
+                threading.Thread(target=get_user_profile, args=(pf, uid), daemon=True).start()
             convs[key] = {"platform": pf, "user_id": uid, "messages": [],
                           "last_time": l.get("time",""), "last_msg": l.get("msg",""),
                           "manual": key in manual_takeover,
