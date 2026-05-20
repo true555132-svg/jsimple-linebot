@@ -128,6 +128,25 @@ cooldowns = {"line": {}, "fb": {}, "fb_comment": {}}
 # 人工接手：儲存 "platform:user_id"，接手中的用戶不觸發自動回覆
 manual_takeover = set()
 
+# 用戶資料快取 {"platform:user_id": {"name": "", "avatar": ""}}
+user_profiles = {}
+
+# 用戶備註 {"platform:user_id": "備註內容"}
+NOTES_FILE = "notes.json"
+def _load_notes():
+    try:
+        with open(NOTES_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {}
+user_notes = _load_notes()
+def _save_notes():
+    try:
+        with open(NOTES_FILE, "w", encoding="utf-8") as f:
+            json.dump(user_notes, f, ensure_ascii=False)
+    except Exception:
+        pass
+
 # 貼文指定回覆 {post_id: {"reply": str, "image_url": str, "enabled": bool}}
 fb_post_replies: dict = {}
 
@@ -302,6 +321,28 @@ def fb_send_image(psid: str, image_url: str):
         urllib.request.urlopen(req)
     except Exception:
         pass
+
+def get_user_profile(platform: str, user_id: str) -> dict:
+    key = f"{platform}:{user_id}"
+    if key in user_profiles:
+        return user_profiles[key]
+    profile = {"name": "", "avatar": ""}
+    try:
+        if platform == "LINE":
+            url = f"https://api.line.me/v2/bot/profile/{user_id}"
+            req = urllib.request.Request(url, headers={"Authorization": f"Bearer {LINE_CHANNEL_ACCESS_TOKEN}"})
+            with urllib.request.urlopen(req, timeout=5) as r:
+                d = json.loads(r.read())
+                profile = {"name": d.get("displayName",""), "avatar": d.get("pictureUrl","")}
+        elif platform == "FB":
+            url = f"https://graph.facebook.com/v19.0/{user_id}?fields=name,profile_pic&access_token={FB_PAGE_ACCESS_TOKEN}"
+            with urllib.request.urlopen(url, timeout=5) as r:
+                d = json.loads(r.read())
+                profile = {"name": d.get("name",""), "avatar": d.get("profile_pic","")}
+    except Exception:
+        pass
+    user_profiles[key] = profile
+    return profile
 
 def line_push(user_id: str, text: str):
     url = "https://api.line.me/v2/bot/message/push"
@@ -478,6 +519,7 @@ body{font-family:-apple-system,sans-serif;background:#f0f2f5;height:100vh;displa
 .conv-name{font-size:13px;font-weight:700;color:#333;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .conv-time{font-size:11px;color:#bbb;flex-shrink:0}
 .conv-preview{font-size:12px;color:#888;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.conv-note{font-size:11px;color:#f5a623;margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .pf-badge{font-size:10px;font-weight:700;padding:1px 6px;border-radius:6px;margin-right:4px}
 .pf-line{background:#e8f5e9;color:#00a000}
 .pf-fb{background:#e3f2fd;color:#1877f2}
@@ -505,6 +547,12 @@ body{font-family:-apple-system,sans-serif;background:#f0f2f5;height:100vh;displa
 .send-btn{padding:0 20px;background:#1a1a1a;color:#fff;border:none;border-radius:10px;font-size:14px;font-weight:700;cursor:pointer;flex-shrink:0}
 .send-btn:hover{opacity:.85}
 .send-btn:disabled{opacity:.4;cursor:not-allowed}
+.note-bar{padding:8px 16px;background:#fffbf0;border-top:1px solid #ffe082;display:flex;gap:8px;align-items:center}
+.note-bar input{flex:1;border:1px solid #ffe082;border-radius:8px;padding:6px 10px;font-size:13px;font-family:inherit;background:#fff}
+.note-bar input:focus{outline:none;border-color:#f5a623}
+.note-save-btn{padding:6px 14px;background:#f5a623;color:#fff;border:none;border-radius:8px;font-size:12px;font-weight:700;cursor:pointer;white-space:nowrap}
+.user-avatar{width:38px;height:38px;border-radius:50%;object-fit:cover;flex-shrink:0}
+.user-avatar-fallback{width:38px;height:38px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:17px;flex-shrink:0}
 @media(max-width:640px){.sidebar{width:100%;display:none}.sidebar.show{display:flex}.chat{display:none}.chat.show{display:flex}}
 </style></head>
 <body>
@@ -528,8 +576,13 @@ body{font-family:-apple-system,sans-serif;background:#f0f2f5;height:100vh;displa
         <button class="takeover-btn takeover-off" id="takeover-btn" onclick="toggleTakeover()">自動回覆中</button>
       </div>
       <div class="chat-messages" id="chat-messages"></div>
+      <div class="note-bar">
+        <span style="font-size:12px;color:#f5a623;font-weight:700;white-space:nowrap">📝 備註</span>
+        <input type="text" id="note-input" placeholder="輸入客戶備註（例如：已報價、等回覆）">
+        <button class="note-save-btn" onclick="saveNote()">儲存</button>
+      </div>
       <div class="chat-input">
-        <textarea id="reply-input" placeholder="輸入回覆訊息..." onkeydown="if(event.ctrlKey&&event.key==='Enter')sendReply()"></textarea>
+        <textarea id="reply-input" placeholder="輸入回覆訊息... (Ctrl+Enter 送出)" onkeydown="if(event.ctrlKey&&event.key==='Enter')sendReply()"></textarea>
         <button class="send-btn" id="send-btn" onclick="sendReply()">送出</button>
       </div>
     </div>
@@ -550,14 +603,19 @@ async function loadConversations(){
     const pfIcon=c.platform==='LINE'?'💬':c.platform==='FB'?'📘':'💬';
     const avatarBg=c.platform==='LINE'?'#e8f5e9':c.platform==='FB'?'#e3f2fd':'#fce4ec';
     const manualBadge=c.manual?'<span class="manual-badge">人工</span>':'';
+    const displayName=c.name||c.user_id.slice(0,12)+'...';
+    const avatar=c.avatar?`<img class="user-avatar" src="${c.avatar}" onerror="this.style.display='none'">`:
+      `<div class="user-avatar-fallback" style="background:${avatarBg}">${pfIcon}</div>`;
+    const notePreview=c.note?`<div class="conv-note">📝 ${c.note}</div>`:'';
     return `<div class="conv-item" id="conv-${i}" onclick="openConv(${i})">
-      <div class="conv-avatar" style="background:${avatarBg}">${pfIcon}</div>
+      ${avatar}
       <div class="conv-info">
         <div class="conv-top">
-          <div class="conv-name"><span class="pf-badge ${pfClass}">${c.platform}</span>${c.user_id.slice(0,10)}...${manualBadge}</div>
-          <div class="conv-time">${c.last_time}</div>
+          <div class="conv-name"><span class="pf-badge ${pfClass}">${c.platform}</span>${displayName}${manualBadge}</div>
+          <div class="conv-time">${c.last_time.slice(5,16)}</div>
         </div>
         <div class="conv-preview">${c.last_msg}</div>
+        ${notePreview}
       </div>
     </div>`;
   }).join('');
@@ -571,8 +629,9 @@ function openConv(i){
   const main=document.getElementById('chat-main');
   main.style.display='flex';
   main.style.flexDirection='column';
-  document.getElementById('chat-title').textContent=currentConv.platform+' 對話';
-  document.getElementById('chat-uid').textContent='用戶 ID：'+currentConv.user_id;
+  document.getElementById('chat-title').textContent=currentConv.name||currentConv.user_id;
+  document.getElementById('chat-uid').textContent=currentConv.platform+' · '+currentConv.user_id;
+  document.getElementById('note-input').value=currentConv.note||'';
   const btn=document.getElementById('takeover-btn');
   if(currentConv.manual){btn.textContent='人工接手中';btn.className='takeover-btn takeover-on';}
   else{btn.textContent='自動回覆中';btn.className='takeover-btn takeover-off';}
@@ -616,6 +675,15 @@ async function sendReply(){
     renderMessages(currentConv.messages);
   } else alert('發送失敗：'+(d.error||''));
   btn.disabled=false;
+}
+
+async function saveNote(){
+  if(!currentConv)return;
+  const note=document.getElementById('note-input').value.trim();
+  await fetch('/api/note?key='+KEY,{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({platform:currentConv.platform,user_id:currentConv.user_id,note})});
+  currentConv.note=note;
+  await loadConversations();
 }
 
 loadConversations();
@@ -1470,18 +1538,38 @@ def api_conversations():
     for l in reversed(logs):
         uid = l.get("user_id", "")
         pf = l.get("platform", "")
-        if not uid or not pf or pf == "FB_COMMENT":
+        if not uid or not pf or pf == "FB_COMMENT" or uid == "ADMIN":
             continue
         key = f"{pf}:{uid}"
         if key not in convs:
+            profile = get_user_profile(pf, uid)
             convs[key] = {"platform": pf, "user_id": uid, "messages": [],
                           "last_time": l.get("time",""), "last_msg": l.get("msg",""),
-                          "manual": key in manual_takeover}
+                          "manual": key in manual_takeover,
+                          "name": profile.get("name",""),
+                          "avatar": profile.get("avatar",""),
+                          "note": user_notes.get(key,"")}
         convs[key]["messages"].append(l)
         convs[key]["last_time"] = l.get("time","")
         convs[key]["last_msg"] = l.get("msg","")
     result = sorted(convs.values(), key=lambda x: x["last_time"], reverse=True)
     return jsonify(result)
+
+@app.route("/api/note", methods=["POST"])
+def api_note():
+    ok, _ = auth_required()
+    if not ok:
+        return jsonify({"error": "unauthorized"}), 403
+    data = request.get_json(silent=True) or {}
+    platform = data.get("platform","").upper()
+    user_id = data.get("user_id","")
+    note = data.get("note","")
+    if not user_id:
+        return jsonify({"error": "missing user_id"}), 400
+    key = f"{platform}:{user_id}"
+    user_notes[key] = note
+    _save_notes()
+    return jsonify({"ok": True})
 
 @app.route("/api/reply", methods=["POST"])
 def api_reply():
