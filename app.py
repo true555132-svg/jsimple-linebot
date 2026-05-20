@@ -761,12 +761,15 @@ function runTest(){
 function loadLogs(){
   fetch('/api/logs?key='+KEY+'&platform='+PLATFORM).then(r=>r.json()).then(logs=>{
     if(!logs.length){document.getElementById('log-content').innerHTML='<div class="empty">尚無訊息紀錄</div>';return;}
-    let h='<table class="log-table"><thead><tr><th>時間</th><th>用戶</th><th>用戶訊息</th><th>意圖</th><th>Bot 回覆</th><th>狀態</th></tr></thead><tbody>';
+    let h='<table class="log-table"><thead><tr><th>時間</th><th>平台</th><th>用戶</th><th>用戶訊息</th><th>意圖</th><th>Bot 回覆</th><th>狀態</th></tr></thead><tbody>';
     logs.forEach(l=>{
       const rep=l.replied?'<span class="replied-yes">✓ 已回覆</span>':'<span class="replied-no">冷卻中</span>';
       const uid=l.user_id?`<div class="log-uid">${l.user_id.slice(0,12)}...</div>`:'';
       const reply=l.reply?`<div class="log-reply">${l.reply.slice(0,80)}${l.reply.length>80?'…':''}</div>`:'<span style="color:#ddd">—</span>';
-      h+=`<tr><td style="white-space:nowrap">${l.time}</td><td>${uid}</td><td>${l.msg}</td><td>${l.intent}</td><td>${reply}</td><td>${rep}</td></tr>`;
+      const pf=l.platform||'';
+      const pfColor=pf==='LINE'?'#00c300':pf==='FB'?'#1877f2':'#e91e63';
+      const pfBadge=`<span style="font-size:11px;font-weight:700;color:${pfColor}">${pf}</span>`;
+      h+=`<tr><td style="white-space:nowrap">${l.time}</td><td>${pfBadge}</td><td>${uid}</td><td>${l.msg}</td><td>${l.intent}</td><td>${reply}</td><td>${rep}</td></tr>`;
     });
     h+='</tbody></table>';
     document.getElementById('log-content').innerHTML=h;
