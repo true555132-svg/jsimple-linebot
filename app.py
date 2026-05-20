@@ -73,7 +73,8 @@ def _append_to_sheets(entry):
             json.loads(GOOGLE_SERVICE_ACCOUNT_JSON),
             scopes=["https://www.googleapis.com/auth/spreadsheets"]
         )
-        ws = gspread.authorize(creds).open_by_key(GOOGLE_SHEET_ID).sheet1
+        gc = gspread.Client(auth=creds)
+        ws = gc.open_by_key(GOOGLE_SHEET_ID).sheet1
         ws.append_row([
             entry["time"],
             entry["platform"],
@@ -83,8 +84,9 @@ def _append_to_sheets(entry):
             entry.get("reply", ""),
             "已回覆" if entry["replied"] else "冷卻中",
         ])
-    except Exception:
-        pass
+    except Exception as e:
+        import sys
+        print(f"[Sheets Error] {e}", file=sys.stderr)
 
 def log_message(entry):
     message_log.appendleft(entry)
