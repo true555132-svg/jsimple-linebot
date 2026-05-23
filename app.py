@@ -63,30 +63,33 @@ def _save_logs():
     except Exception:
         pass
 
+_sheets_lock = threading.Lock()
+
 def _append_to_sheets(entry):
     if not GOOGLE_SHEET_ID or not GOOGLE_SERVICE_ACCOUNT_JSON:
         return
-    try:
-        import gspread
-        from google.oauth2.service_account import Credentials
-        creds = Credentials.from_service_account_info(
-            json.loads(GOOGLE_SERVICE_ACCOUNT_JSON),
-            scopes=["https://www.googleapis.com/auth/spreadsheets"]
-        )
-        gc = gspread.Client(auth=creds)
-        ws = gc.open_by_key(GOOGLE_SHEET_ID).sheet1
-        ws.append_row([
-            entry["time"],
-            entry["platform"],
-            entry.get("user_id", ""),
-            entry["msg"],
-            entry["intent"],
-            entry.get("reply", ""),
-            "已回覆" if entry["replied"] else "冷卻中",
-        ])
-    except Exception as e:
-        import sys
-        print(f"[Sheets Error] {e}", file=sys.stderr)
+    with _sheets_lock:
+        try:
+            import gspread
+            from google.oauth2.service_account import Credentials
+            creds = Credentials.from_service_account_info(
+                json.loads(GOOGLE_SERVICE_ACCOUNT_JSON),
+                scopes=["https://www.googleapis.com/auth/spreadsheets"]
+            )
+            gc = gspread.Client(auth=creds)
+            ws = gc.open_by_key(GOOGLE_SHEET_ID).sheet1
+            ws.append_row([
+                entry["time"],
+                entry["platform"],
+                entry.get("user_id", ""),
+                entry["msg"],
+                entry["intent"],
+                entry.get("reply", ""),
+                "已回覆" if entry["replied"] else "冷卻中",
+            ])
+        except Exception as e:
+            import sys
+            print(f"[Sheets Error] {e}", file=sys.stderr)
 
 def log_message(entry):
     message_log.appendleft(entry)
@@ -309,7 +312,7 @@ def fb_handle_comment(val):
 def fb_reply_comment(comment_id: str, text: str, image_url: str = ""):
     if not FB_PAGE_ACCESS_TOKEN:
         return
-    url = f"https://graph.facebook.com/v19.0/{comment_id}/comments?access_token={FB_PAGE_ACCESS_TOKEN}"
+    url = f"https://graph.facebook.com/v22.0/{comment_id}/comments?access_token={FB_PAGE_ACCESS_TOKEN}"
     body: dict = {"message": text}
     if image_url:
         body["attachment_url"] = image_url
@@ -323,7 +326,7 @@ def fb_reply_comment(comment_id: str, text: str, image_url: str = ""):
 def fb_private_reply(comment_id: str, text: str, image_url: str = ""):
     if not FB_PAGE_ACCESS_TOKEN:
         return
-    url = f"https://graph.facebook.com/v19.0/{comment_id}/private_replies?access_token={FB_PAGE_ACCESS_TOKEN}"
+    url = f"https://graph.facebook.com/v22.0/{comment_id}/private_replies?access_token={FB_PAGE_ACCESS_TOKEN}"
     body: dict = {"message": text}
     if image_url:
         body["attachment"] = {"type": "image", "payload": {"url": image_url, "is_reusable": True}}
@@ -336,7 +339,7 @@ def fb_private_reply(comment_id: str, text: str, image_url: str = ""):
 def fb_send(psid: str, text: str):
     if not FB_PAGE_ACCESS_TOKEN:
         return
-    url = f"https://graph.facebook.com/v19.0/me/messages?access_token={FB_PAGE_ACCESS_TOKEN}"
+    url = f"https://graph.facebook.com/v22.0/me/messages?access_token={FB_PAGE_ACCESS_TOKEN}"
     payload = json.dumps({"recipient": {"id": psid}, "message": {"text": text}}).encode()
     req = urllib.request.Request(url, data=payload, headers={"Content-Type": "application/json"})
     try:
@@ -347,7 +350,7 @@ def fb_send(psid: str, text: str):
 def fb_send_image(psid: str, image_url: str):
     if not FB_PAGE_ACCESS_TOKEN:
         return
-    url = f"https://graph.facebook.com/v19.0/me/messages?access_token={FB_PAGE_ACCESS_TOKEN}"
+    url = f"https://graph.facebook.com/v22.0/me/messages?access_token={FB_PAGE_ACCESS_TOKEN}"
     payload = json.dumps({"recipient": {"id": psid}, "message": {
         "attachment": {"type": "image", "payload": {"url": image_url, "is_reusable": True}}
     }}).encode()
@@ -370,10 +373,11 @@ def get_user_profile(platform: str, user_id: str) -> dict:
                 d = json.loads(r.read())
                 profile = {"name": d.get("displayName",""), "avatar": d.get("pictureUrl","")}
         elif platform == "FB":
-            url = f"https://graph.facebook.com/v19.0/{user_id}?fields=name,profile_pic&access_token={FB_PAGE_ACCESS_TOKEN}"
+            url = f"https://graph.facebook.com/v22.0/{user_id}?fields=name,picture.type(large)&access_token={FB_PAGE_ACCESS_TOKEN}"
             with urllib.request.urlopen(url, timeout=5) as r:
                 d = json.loads(r.read())
-                profile = {"name": d.get("name",""), "avatar": d.get("profile_pic","")}
+                avatar = (d.get("picture") or {}).get("data", {}).get("url", "")
+                profile = {"name": d.get("name", ""), "avatar": avatar}
     except Exception:
         pass
     user_profiles[key] = profile
