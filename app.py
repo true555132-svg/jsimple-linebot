@@ -922,7 +922,8 @@ async function loadConvs(){
   try{
     const r = await fetch(`/api/conversations?key=${KEY}`);
     const d = await r.json();
-    if(d.conversations) allConvs = d.conversations;
+    if(Array.isArray(d)) allConvs = d;
+    else if(d.conversations) allConvs = d.conversations;
     renderList();
     if(curKey) {
       const cur = allConvs.find(c=>c.key===curKey);
@@ -1785,6 +1786,33 @@ def admin_inbox():
     if not ok:
         return render_template_string(LOGIN_HTML, next="/admin/inbox", error=None)
     return render_template_string(INBOX_HTML, key=key)
+
+@app.route("/api/messages")
+def api_messages():
+    ok, _ = auth_required()
+    if not ok:
+        return jsonify({"error": "unauthorized"}), 403
+    key = request.args.get("key", "")
+    if not key:
+        return jsonify({"messages": []})
+    parts = key.split(":", 1)
+    pf = parts[0] if len(parts) > 1 else ""
+    uid = parts[1] if len(parts) > 1 else key
+    msgs = []
+    for l in reversed(list(message_log)):
+        if l.get("platform", "") != pf or l.get("user_id", "") != uid:
+            continue
+        ts = 0
+        try:
+            ts = int(time.mktime(time.strptime(l.get("time", ""), "%Y/%m/%d %H:%M:%S")))
+        except Exception:
+            pass
+        if l.get("msg"):
+            msgs.append({"role": "user", "content": l["msg"], "ts": ts,
+                         "image_url": l.get("image_url", ""), "sticker_url": l.get("sticker_url", "")})
+        if l.get("reply") and l.get("replied"):
+            msgs.append({"role": "admin", "content": l["reply"], "ts": ts + 1})
+    return jsonify({"messages": msgs})
 
 @app.route("/api/conversations")
 def api_conversations():
