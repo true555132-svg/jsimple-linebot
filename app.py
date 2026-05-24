@@ -476,7 +476,13 @@ def upload_image_to_github(filename: str, data: bytes) -> str:
 # ── API ───────────────────────────────────────────────────
 
 def auth_required():
-    key = request.args.get("key", "")
+    key = request.args.get("key", "") or request.args.get("admin_key", "")
+    if not key:
+        try:
+            body = request.get_json(silent=True, force=True) or {}
+            key = body.get("admin_key", "") or body.get("key", "")
+        except Exception:
+            pass
     return key == ADMIN_PASSWORD, key
 
 @app.route("/api/test", methods=["POST"])
@@ -1563,12 +1569,14 @@ def api_status():
     if not ok:
         return jsonify({"error": "unauthorized"}), 403
     data = request.get_json(silent=True) or {}
-    platform = data.get("platform","").upper()
-    user_id = data.get("user_id","")
+    key = data.get("key","")
+    if not key:
+        pf = data.get("platform","").upper()
+        uid = data.get("user_id","")
+        key = f"{pf}:{uid}" if uid else ""
     status = data.get("status","bot")
-    if not user_id or status not in STATUS_OPTIONS:
+    if not key or status not in STATUS_OPTIONS:
         return jsonify({"error": "invalid"}), 400
-    key = f"{platform}:{user_id}"
     _db.set_status(key, status)
     if status == "human":
         manual_takeover.add(key)
@@ -1581,15 +1589,20 @@ def api_customer():
     ok, _ = auth_required()
     if not ok:
         return jsonify({"error": "unauthorized"}), 403
-    platform = request.args.get("platform","").upper() or (request.get_json(silent=True) or {}).get("platform","").upper()
-    user_id = request.args.get("user_id","") or (request.get_json(silent=True) or {}).get("user_id","")
-    if not user_id:
-        return jsonify({"error": "missing user_id"}), 400
-    key = f"{platform}:{user_id}"
+    key = request.args.get("key","") or (request.get_json(silent=True) or {}).get("key","")
+    if not key:
+        pf = request.args.get("platform","").upper()
+        uid = request.args.get("user_id","")
+        key = f"{pf}:{uid}" if uid else ""
+    if not key:
+        return jsonify({"error": "missing key"}), 400
     if request.method == "GET":
         return jsonify(_db.get_customer(key))
     data = request.get_json(silent=True) or {}
-    _db.save_customer(key, platform, user_id, data)
+    parts = key.split(":",1)
+    pf = parts[0] if len(parts)>1 else ""
+    uid = parts[1] if len(parts)>1 else key
+    _db.save_customer(key, pf, uid, data)
     return jsonify({"ok": True})
 
 @app.route("/api/tag", methods=["POST"])
@@ -1598,14 +1611,16 @@ def api_tag():
     if not ok:
         return jsonify({"error": "unauthorized"}), 403
     data = request.get_json(silent=True) or {}
-    platform = data.get("platform","").upper()
-    user_id = data.get("user_id","")
+    key = data.get("key","")
+    if not key:
+        pf = data.get("platform","").upper()
+        uid = data.get("user_id","")
+        key = f"{pf}:{uid}" if uid else ""
     tags = data.get("tags", [])
-    if not user_id:
-        return jsonify({"error": "missing user_id"}), 400
-    key = f"{platform}:{user_id}"
+    if not key:
+        return jsonify({"error": "missing key"}), 400
+    _db.save_tags(key, tags)
     conv_tags[key] = tags
-    _save_tags()
     return jsonify({"ok": True})
 
 @app.route("/api/templates", methods=["GET"])
@@ -1639,18 +1654,22 @@ def api_conversations():
             profile = user_profiles.get(key, {"name": "", "avatar": ""})
             if not profile.get("name"):
                 threading.Thread(target=get_user_profile, args=(pf, uid), daemon=True).start()
-            convs[key] = {"platform": pf, "user_id": uid, "messages": [],
+            convs[key] = {"key": key, "platform": pf, "user_id": uid, "messages": [],
                           "last_time": l.get("time",""), "last_msg": l.get("msg",""),
+                          "last_message": l.get("msg",""),
                           "manual": key in manual_takeover,
                           "status": _db.get_status(key),
                           "name": profile.get("name",""),
+                          "user_name": profile.get("name","") or uid,
                           "avatar": profile.get("avatar",""),
+                          "user_avatar": profile.get("avatar",""),
                           "note": user_notes.get(key,""),
-                          "tags": conv_tags.get(key,[]),
+                          "tags": _db.get_tags(key),
                           "unread": 0}
         convs[key]["messages"].append(l)
         convs[key]["last_time"] = l.get("time","")
         convs[key]["last_msg"] = l.get("msg","")
+        convs[key]["last_message"] = l.get("msg","")
         seen_ts = last_seen.get(key, 0)
         try:
             msg_ts = time.mktime(time.strptime(l.get("time",""), "%Y/%m/%d %H:%M:%S"))
@@ -1658,6 +1677,12 @@ def api_conversations():
                 convs[key]["unread"] += 1
         except Exception:
             pass
+    for v in convs.values():
+        try:
+            ts = time.mktime(time.strptime(v.get("last_time",""), "%Y/%m/%d %H:%M:%S"))
+            v["last_time"] = int(ts)
+        except Exception:
+            v["last_time"] = 0
     result = sorted(convs.values(), key=lambda x: x["last_time"], reverse=True)
     return jsonify(result)
 
