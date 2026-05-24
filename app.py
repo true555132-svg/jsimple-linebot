@@ -17,7 +17,7 @@ from linebot.v3.messaging import (
     Configuration, ApiClient, MessagingApi,
     ReplyMessageRequest, TextMessage, ImageMessage
 )
-from linebot.v3.webhooks import MessageEvent, TextMessageContent
+from linebot.v3.webhooks import MessageEvent, TextMessageContent, ImageMessageContent, StickerMessageContent
 from knowledge_base import (
     BRAND_INFO, LINE_ENABLED, FB_ENABLED, INTENT_LABELS,
     LINE_REPLIES, FB_REPLIES, LINE_KEYWORDS, FB_KEYWORDS,
@@ -252,6 +252,33 @@ def handle_line_message(event):
 
 # ── FB Messenger Webhook ──────────────────────────────────
 
+
+@handler.add(MessageEvent, message=ImageMessageContent)
+def handle_line_image(event):
+    msg_id = event.message.id
+    user_id = event.source.user_id
+    image_url = ""
+    try:
+        dl_url = f"https://api-data.line.me/v2/bot/message/{msg_id}/content"
+        req = urllib.request.Request(dl_url, headers={"Authorization": f"Bearer {LINE_CHANNEL_ACCESS_TOKEN}"})
+        with urllib.request.urlopen(req, timeout=10) as r:
+            data = r.read()
+        filename = f"{int(time.time())}_{msg_id}.jpg"
+        image_url = upload_image_to_github(filename, data) or ""
+    except Exception:
+        pass
+    now = time.strftime("%Y/%m/%d %H:%M:%S", time.gmtime(time.time() + 8*3600))
+    log_message({"time": now, "platform": "LINE", "user_id": user_id,
+                 "msg": "[圖片]", "intent": "image", "reply": "", "replied": False, "image_url": image_url})
+
+@handler.add(MessageEvent, message=StickerMessageContent)
+def handle_line_sticker(event):
+    user_id = event.source.user_id
+    stk_id = event.message.sticker_id
+    sticker_url = f"https://stickershop.line-scdn.net/stickershop/v1/sticker/{stk_id}/iPhone/sticker@2x.png"
+    now = time.strftime("%Y/%m/%d %H:%M:%S", time.gmtime(time.time() + 8*3600))
+    log_message({"time": now, "platform": "LINE", "user_id": user_id,
+                 "msg": "[貼圖]", "intent": "sticker", "reply": "", "replied": False, "image_url": sticker_url})
 @app.route("/fb-webhook", methods=["GET"])
 def fb_verify():
     if (request.args.get("hub.mode") == "subscribe" and
@@ -390,6 +417,15 @@ def line_push(user_id: str, text: str):
         "Content-Type": "application/json",
         "Authorization": f"Bearer {LINE_CHANNEL_ACCESS_TOKEN}"
     })
+    try:
+        urllib.request.urlopen(req)
+    except Exception:
+        pass
+
+def line_push_image(user_id: str, image_url: str):
+    url = "https://api.line.me/v2/bot/message/push"
+    payload = json.dumps({"to": user_id, "messages": [{"type": "image", "originalContentUrl": image_url, "previewImageUrl": image_url}]}).encode()
+    req = urllib.request.Request(url, data=payload, headers={"Content-Type": "application/json", "Authorization": f"Bearer {LINE_CHANNEL_ACCESS_TOKEN}"})
     try:
         urllib.request.urlopen(req)
     except Exception:
@@ -725,6 +761,8 @@ body{font-family:-apple-system,sans-serif;background:#f0f2f5;height:100vh;displa
       </div>
       <div class="chat-input">
         <button onclick="toggleTpl()" style="padding:0 12px;background:#f5f5f5;border:1px solid #e0e0e0;border-radius:10px;font-size:13px;cursor:pointer;white-space:nowrap" title="快速回覆模板">⚡ 模板</button>
+        <input type="file" id="img-file-input" accept="image/*" style="display:none" onchange="uploadAndSendImage(this)">
+        <button onclick="document.getElementById('img-file-input').click()" style="padding:0 12px;background:#f5f5f5;border:1px solid #e0e0e0;border-radius:10px;font-size:18px;cursor:pointer" title="傳送圖片">🖼️</button>
         <textarea id="reply-input" placeholder="輸入回覆訊息... (Ctrl+Enter 送出)" onkeydown="if(event.ctrlKey&&event.key==='Enter')sendReply()"></textarea>
         <button class="send-btn" id="send-btn" onclick="sendReply()">送出</button>
       </div>
@@ -793,7 +831,12 @@ function openConv(i){
 function renderMessages(msgs){
   const el=document.getElementById('chat-messages');
   el.innerHTML=msgs.map(m=>{
-    const userRow=`<div class="msg-row user"><div><div class="bubble">${m.msg}</div><div class="msg-time">${m.time}</div></div></div>`;
+    let mc=m.msg;
+    if(m.image_url&&(m.msg==='[圖片]'||m.msg==='[手動圖片]'))
+      mc=`<img src="${m.image_url}" style="max-width:200px;max-height:200px;border-radius:8px;display:block;cursor:pointer" onclick="window.open('${m.image_url}','_blank')">`
+    else if(m.image_url&&m.msg==='[貼圖]')
+      mc=`<img src="${m.image_url}" style="width:90px;height:90px;object-fit:contain;display:block">`;
+    const userRow=`<div class="msg-row user"><div><div class="bubble">${mc}</div><div class="msg-time">${m.time}</div></div></div>`;
     const botRow=m.reply?`<div class="msg-row bot"><div><div class="bubble">${m.reply}</div></div></div>`:'';
     return userRow+botRow;
   }).join('');
@@ -826,6 +869,29 @@ async function sendReply(){
     currentConv.messages.push({time:new Date().toLocaleTimeString('zh-TW'),msg:'（你）'+text,reply:''});
     renderMessages(currentConv.messages);
   } else alert('發送失敗：'+(d.error||''));
+  btn.disabled=false;
+}
+
+
+async function uploadAndSendImage(input){
+  if(!currentConv||!input.files[0])return;
+  const btn=document.getElementById('send-btn');
+  btn.disabled=true;
+  try{
+    const fd=new FormData();
+    fd.append('file',input.files[0]);
+    const up=await fetch('/admin/line/upload-image?key='+KEY,{method:'POST',body:fd});
+    const ud=await up.json();
+    if(!ud.url){alert('圖片上傳失敗：'+(ud.error||''));btn.disabled=false;input.value='';return;}
+    const res=await fetch('/api/reply?key='+KEY,{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({platform:currentConv.platform,user_id:currentConv.user_id,image_url:ud.url})});
+    const d=await res.json();
+    if(d.ok){
+      currentConv.messages.push({time:new Date().toLocaleTimeString('zh-TW'),msg:'[手動圖片]',reply:'',image_url:ud.url});
+      renderMessages(currentConv.messages);
+    }else alert('發送失敗：'+(d.error||''));
+  }catch(e){alert('錯誤：'+e.message);}
+  input.value='';
   btn.disabled=false;
 }
 
@@ -1874,18 +1940,25 @@ def api_reply():
     platform = data.get("platform","").upper()
     user_id = data.get("user_id","")
     text = data.get("text","").strip()
-    if not user_id or not text:
+    image_url = data.get("image_url","").strip()
+    if not user_id or (not text and not image_url):
         return jsonify({"error": "missing fields"}), 400
     try:
         if platform == "LINE":
-            line_push(user_id, text)
+            if text: line_push(user_id, text)
+            if image_url: line_push_image(user_id, image_url)
         elif platform == "FB":
-            fb_send(user_id, text)
+            if text: fb_send(user_id, text)
+            if image_url: fb_send_image(user_id, image_url)
         else:
             return jsonify({"error": "unsupported platform"}), 400
         now = time.strftime("%Y/%m/%d %H:%M:%S", time.gmtime(time.time() + 8*3600))
-        log_message({"time": now, "platform": platform, "user_id": "ADMIN",
-                     "msg": f"[手動] {text}", "intent": "manual", "reply": "", "replied": True})
+        if text:
+            log_message({"time": now, "platform": platform, "user_id": "ADMIN",
+                         "msg": f"[手動] {text}", "intent": "manual", "reply": "", "replied": True})
+        if image_url:
+            log_message({"time": now, "platform": platform, "user_id": "ADMIN",
+                         "msg": "[手動圖片]", "intent": "manual", "reply": "", "replied": True, "image_url": image_url})
         return jsonify({"ok": True})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
