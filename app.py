@@ -788,7 +788,10 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
 <!-- LEFT SIDEBAR -->
 <div class="sidebar">
   <div class="sidebar-top">
-    <h2>&#128172; JSIMPLE CRM</h2>
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px">
+      <h2 style="margin-bottom:0">&#128172; JSIMPLE CRM</h2>
+      <a id="homeBtn" href="#" style="font-size:11px;color:#0d6efd;text-decoration:none;padding:3px 8px;border:1px solid #0d6efd;border-radius:12px">&#127968; 首頁</a>
+    </div>
     <div class="search-box">
       <span>&#128269;</span>
       <input type="text" id="searchInput" placeholder="搜尋對話...">
@@ -861,6 +864,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
 
 <script>
 const KEY = new URLSearchParams(location.search).get('key') || '';
+document.getElementById('homeBtn').href = '/admin?key=' + KEY;
 const ALL_TAGS = ['有興趣','已報價','猶豫中','要比較','問尺寸','問材質','問交期','問安裝','詢問保固','重要客戶','需要跟進','已下訂','垃圾訊息'];
 const STATUS_COLORS = {bot:'#6c757d',human:'#0d6efd',waiting:'#fd7e14',followup:'#6f42c1',closed:'#dc3545',sold:'#198754'};
 const TPL_DATA = {
