@@ -1253,6 +1253,110 @@ function escAttr(s){
 init();
 </script>
 </body></html>"""
+
+DASH_HTML = """<!DOCTYPE html>
+<html lang="zh-TW"><head><meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>J SIMPLE Bot 總覽</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:-apple-system,sans-serif;background:#f5f5f5;color:#333}
+.header{background:#1a1a1a;color:#fff;padding:14px 20px;font-size:17px;font-weight:700}
+.container{max-width:500px;margin:30px auto;padding:0 16px}
+.card{background:#fff;border-radius:14px;padding:22px;margin-bottom:16px;box-shadow:0 1px 4px rgba(0,0,0,.08);display:flex;align-items:center;justify-content:space-between;text-decoration:none;color:#333}
+.card:hover{box-shadow:0 3px 12px rgba(0,0,0,.13)}
+.card-left{display:flex;align-items:center;gap:14px}
+.icon{width:46px;height:46px;border-radius:12px;display:flex;align-items:center;justify-content:center;font-size:22px}
+.icon-line{background:#e8f5e9}
+.icon-fb{background:#e3f2fd}
+.card-title{font-size:16px;font-weight:700}
+.card-sub{font-size:13px;color:#888;margin-top:2px}
+.status{font-size:12px;font-weight:700;padding:4px 10px;border-radius:10px}
+.on{background:#e8f5e9;color:#2e7d32}
+.off{background:#fdecea;color:#c62828}
+.arrow{color:#ccc;font-size:20px}
+</style></head><body>
+<div class="header">⚡ J SIMPLE Bot 後台總覽</div>
+<div class="container">
+  <a class="card" href="/admin/inbox?key={{ key }}">
+    <div class="card-left">
+      <div class="icon" style="background:#e8f0fe">📬</div>
+      <div>
+        <div class="card-title">訊息收件匣</div>
+        <div class="card-sub">LINE + FB 統一回覆</div>
+      </div>
+    </div>
+    <div style="display:flex;align-items:center;gap:10px">
+      <span class="arrow">›</span>
+    </div>
+  </a>
+  <a class="card" href="/admin/line?key={{ key }}">
+    <div class="card-left">
+      <div class="icon icon-line">💬</div>
+      <div>
+        <div class="card-title">LINE Bot 管理</div>
+        <div class="card-sub">@JSIMPLE</div>
+      </div>
+    </div>
+    <div style="display:flex;align-items:center;gap:10px">
+      <span class="status {{ 'on' if line_on else 'off' }}">{{ '開啟' if line_on else '關閉' }}</span>
+      <span class="arrow">›</span>
+    </div>
+  </a>
+  <a class="card" href="/admin/fb?key={{ key }}">
+    <div class="card-left">
+      <div class="icon icon-fb">📘</div>
+      <div>
+        <div class="card-title">FB Messenger 管理</div>
+        <div class="card-sub">逸雅傢俱</div>
+      </div>
+    </div>
+    <div style="display:flex;align-items:center;gap:10px">
+      <span class="status {{ 'on' if fb_on else 'off' }}">{{ '開啟' if fb_on else '關閉' }}</span>
+      <span class="arrow">›</span>
+    </div>
+  </a>
+  <a class="card" href="/admin/fb_comment?key={{ key }}">
+    <div class="card-left">
+      <div class="icon" style="background:#fce4ec">💬</div>
+      <div>
+        <div class="card-title">FB 留言自動回覆</div>
+        <div class="card-sub">關鍵字比對回覆</div>
+      </div>
+    </div>
+    <div style="display:flex;align-items:center;gap:10px">
+      <span class="status on">開啟</span>
+      <span class="arrow">›</span>
+    </div>
+  </a>
+  <a class="card" href="/admin/fb-posts?key={{ key }}">
+    <div class="card-left">
+      <div class="icon" style="background:#fce4ec">📌</div>
+      <div>
+        <div class="card-title">FB 貼文指定回覆</div>
+        <div class="card-sub">針對特定貼文設定回覆</div>
+      </div>
+    </div>
+    <div style="display:flex;align-items:center;gap:10px">
+      <span class="arrow">›</span>
+    </div>
+  </a>
+  <div style="margin:8px 0 4px;font-size:12px;color:#aaa;font-weight:700;letter-spacing:.5px">工具</div>
+  <a class="card" href="https://image-processor-t1gd.onrender.com" target="_blank">
+    <div class="card-left">
+      <div class="icon" style="background:#f3e5f5">🖼️</div>
+      <div>
+        <div class="card-title">商品圖片處理</div>
+        <div class="card-sub">去背 ＋ 白底 ＋ AI 標題建議</div>
+      </div>
+    </div>
+    <div style="display:flex;align-items:center;gap:10px">
+      <span style="font-size:11px;background:#f3e5f5;color:#7b1fa2;padding:3px 8px;border-radius:8px;font-weight:700">外部工具</span>
+      <span class="arrow">›</span>
+    </div>
+  </a>
+</div>
+</body></html>"""
 LOGIN_HTML = """<!DOCTYPE html>
 <html lang="zh-TW"><head><meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
