@@ -1812,11 +1812,17 @@ def api_messages():
             ts = int(time.mktime(time.strptime(l.get("time", ""), "%Y/%m/%d %H:%M:%S")))
         except Exception:
             pass
-        if l.get("msg"):
-            msgs.append({"role": "user", "content": l["msg"], "ts": ts,
-                         "image_url": l.get("image_url", ""), "sticker_url": l.get("sticker_url", "")})
-        if l.get("reply") and l.get("replied"):
-            msgs.append({"role": "admin", "content": l["reply"], "ts": ts + 1})
+        if l.get("sent_by") == "admin":
+            content = l.get("reply", "")
+            img = l.get("image_url", "")
+            if content or img:
+                msgs.append({"role": "admin", "content": content, "ts": ts, "image_url": img})
+        else:
+            if l.get("msg"):
+                msgs.append({"role": "user", "content": l["msg"], "ts": ts,
+                             "image_url": l.get("image_url", ""), "sticker_url": l.get("sticker_url", "")})
+            if l.get("reply") and l.get("replied"):
+                msgs.append({"role": "admin", "content": l["reply"], "ts": ts + 1})
     return jsonify({"messages": msgs})
 
 @app.route("/api/conversations")
@@ -1890,10 +1896,18 @@ def api_reply():
     if not ok:
         return jsonify({"error": "unauthorized"}), 403
     data = request.get_json(silent=True) or {}
-    platform = data.get("platform","").upper()
-    user_id = data.get("user_id","")
-    text = data.get("text","").strip()
-    image_url = data.get("image_url","").strip()
+    # support {key: "LINE:Uxxxxxx"} or {platform, user_id}
+    key = data.get("key", "")
+    if key and ":" in key:
+        parts = key.split(":", 1)
+        platform = parts[0].upper()
+        user_id = parts[1]
+    else:
+        platform = data.get("platform", "").upper()
+        user_id = data.get("user_id", "")
+    # support both 'message' and 'text' fields
+    text = (data.get("message", "") or data.get("text", "")).strip()
+    image_url = data.get("image_url", "").strip()
     if not user_id or (not text and not image_url):
         return jsonify({"error": "missing fields"}), 400
     try:
@@ -1907,14 +1921,39 @@ def api_reply():
             return jsonify({"error": "unsupported platform"}), 400
         now = time.strftime("%Y/%m/%d %H:%M:%S", time.gmtime(time.time() + 8*3600))
         if text:
-            log_message({"time": now, "platform": platform, "user_id": "ADMIN",
-                         "msg": f"[手動] {text}", "intent": "manual", "reply": "", "replied": True})
+            log_message({"time": now, "platform": platform, "user_id": user_id,
+                         "msg": "", "intent": "manual", "reply": text, "replied": True, "sent_by": "admin"})
         if image_url:
-            log_message({"time": now, "platform": platform, "user_id": "ADMIN",
-                         "msg": "[手動圖片]", "intent": "manual", "reply": "", "replied": True, "image_url": image_url})
+            log_message({"time": now, "platform": platform, "user_id": user_id,
+                         "msg": "", "intent": "manual", "reply": "", "replied": True,
+                         "image_url": image_url, "sent_by": "admin"})
         return jsonify({"ok": True})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+
+@app.route("/api/upload_image", methods=["POST"])
+def api_upload_image():
+    ok, _ = auth_required()
+    if not ok:
+        return jsonify({"error": "unauthorized"}), 403
+    if not GITHUB_TOKEN:
+        return jsonify({"error": "GITHUB_TOKEN 未設定"}), 500
+    data = request.get_json(silent=True) or {}
+    filename = data.get("filename", "upload.jpg")
+    content_b64 = data.get("content", "")
+    if not content_b64:
+        return jsonify({"error": "no content"}), 400
+    import re as _re
+    safe = _re.sub(r"[^a-zA-Z0-9._-]", "_", filename)
+    fname = f"{int(time.time())}_{safe}"
+    try:
+        raw = base64.b64decode(content_b64)
+    except Exception:
+        return jsonify({"error": "invalid base64"}), 400
+    url = upload_image_to_github(fname, raw)
+    if not url:
+        return jsonify({"error": "上傳失敗"}), 500
+    return jsonify({"url": url})
 
 @app.route("/api/takeover", methods=["POST"])
 def api_takeover():
