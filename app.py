@@ -98,6 +98,47 @@ def log_message(entry):
     if GOOGLE_SHEET_ID:
         threading.Thread(target=_append_to_sheets, args=(entry,), daemon=True).start()
 
+def _load_history_from_sheets():
+    if not GOOGLE_SHEET_ID or not GOOGLE_SERVICE_ACCOUNT_JSON:
+        return
+    try:
+        import gspread
+        from google.oauth2.service_account import Credentials
+        creds = Credentials.from_service_account_info(
+            json.loads(GOOGLE_SERVICE_ACCOUNT_JSON),
+            scopes=["https://www.googleapis.com/auth/spreadsheets"]
+        )
+        gc = gspread.Client(auth=creds)
+        ws = gc.open_by_key(GOOGLE_SHEET_ID).sheet1
+        rows = ws.get_all_values()
+        loaded = 0
+        for row in rows[-800:]:
+            if len(row) < 3:
+                continue
+            time_str = row[0] if len(row) > 0 else ""
+            if not time_str or not any(ch.isdigit() for ch in time_str):
+                continue
+            platform = row[1] if len(row) > 1 else ""
+            user_id = row[2] if len(row) > 2 else ""
+            if not user_id or not platform:
+                continue
+            entry = {
+                "time": time_str,
+                "platform": platform,
+                "user_id": user_id,
+                "msg": row[3] if len(row) > 3 else "",
+                "intent": row[4] if len(row) > 4 else "",
+                "reply": row[5] if len(row) > 5 else "",
+                "replied": (row[6] if len(row) > 6 else "") == "已回覆",
+            }
+            message_log.appendleft(entry)
+            loaded += 1
+        print(f"[Sheets] loaded {loaded} messages from history")
+    except Exception as e:
+        print(f"[Sheets] load history error: {e}")
+
+threading.Thread(target=_load_history_from_sheets, daemon=True).start()
+
 # 各平台獨立狀態
 platforms = {
     "line": {
