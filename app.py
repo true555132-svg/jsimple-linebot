@@ -517,14 +517,19 @@ def upload_image_to_github(filename: str, data: bytes) -> str:
 # ── API ───────────────────────────────────────────────────
 
 def auth_required():
-    key = request.args.get("key", "") or request.args.get("admin_key", "")
-    if not key:
-        try:
-            body = request.get_json(silent=True, force=True) or {}
-            key = body.get("admin_key", "") or body.get("key", "")
-        except Exception:
-            pass
-    return key == ADMIN_PASSWORD, key
+    candidates = [
+        request.args.get("admin_key", ""),
+        request.args.get("key", ""),
+    ]
+    try:
+        body = request.get_json(silent=True, force=True) or {}
+        candidates += [body.get("admin_key", ""), body.get("key", "")]
+    except Exception:
+        pass
+    for k in candidates:
+        if k and k == ADMIN_PASSWORD:
+            return True, k
+    return False, ""
 
 @app.route("/api/test", methods=["POST"])
 def api_test():
