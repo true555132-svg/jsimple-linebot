@@ -18,6 +18,7 @@ from linebot.v3.messaging import (
     ReplyMessageRequest, TextMessage, ImageMessage
 )
 from linebot.v3.webhooks import MessageEvent, TextMessageContent, ImageMessageContent, StickerMessageContent
+import db as _db
 from knowledge_base import (
     BRAND_INFO, LINE_ENABLED, FB_ENABLED, INTENT_LABELS,
     LINE_REPLIES, FB_REPLIES, LINE_KEYWORDS, FB_KEYWORDS,
@@ -130,6 +131,21 @@ cooldowns = {"line": {}, "fb": {}, "fb_comment": {}}
 
 # 人工接手：儲存 "platform:user_id"，接手中的用戶不觸發自動回覆
 manual_takeover = set()
+ALL_TAGS = ["高架床","雙層床","客製需求","詢價中","高意願","已報價","待回訪","已成交","小坪數","樓梯款","爬梯款","書桌需求","收納需求"]
+STATUS_OPTIONS = ["bot","human","waiting","followup","closed","sold"]
+
+# 啟動時從 db 同步 human 狀態到 manual_takeover
+def _sync_status_from_db():
+    try:
+        statuses = _db.get_all_statuses()
+        for key, status in statuses.items():
+            if status == "human":
+                manual_takeover.add(key)
+            else:
+                manual_takeover.discard(key)
+    except Exception:
+        pass
+threading.Thread(target=_sync_status_from_db, daemon=True).start()
 
 # 用戶資料快取 {"platform:user_id": {"name": "", "avatar": ""}}
 user_profiles = {}
@@ -584,982 +600,653 @@ def api_logs():
 INBOX_HTML = """<!DOCTYPE html>
 <html lang="zh-TW"><head><meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>訊息收件匣</title>
+<title>JSIMPLE CRM</title>
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
-body{font-family:-apple-system,sans-serif;background:#f0f2f5;height:100vh;display:flex;flex-direction:column}
-.header{background:#1a1a1a;color:#fff;padding:13px 18px;display:flex;align-items:center;gap:12px;flex-shrink:0}
-.back{color:#aaa;text-decoration:none;font-size:20px}
-.header h1{font-size:16px;font-weight:700;flex:1}
-.main{display:flex;flex:1;overflow:hidden}
-/* 左側對話列表 */
-.sidebar{width:320px;background:#fff;border-right:1px solid #e0e0e0;display:flex;flex-direction:column;flex-shrink:0}
-.sidebar-head{padding:12px 14px;border-bottom:1px solid #f0f0f0;font-size:13px;font-weight:700;color:#888}
-.conv-list{overflow-y:auto;flex:1}
-.conv-item{padding:12px 14px;border-bottom:1px solid #f7f7f7;cursor:pointer;display:flex;gap:10px;align-items:flex-start}
-.conv-item:hover{background:#f7f9fc}
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#f0f2f5;color:#1a1a1a;height:100vh;overflow:hidden}
+.crm-wrap{display:grid;grid-template-columns:300px 1fr 320px;height:100vh}
+
+/* LEFT SIDEBAR */
+.sidebar{background:#fff;border-right:1px solid #e8eaed;display:flex;flex-direction:column;overflow:hidden}
+.sidebar-top{padding:14px 12px 10px;border-bottom:1px solid #e8eaed}
+.sidebar-top h2{font-size:15px;font-weight:700;color:#1a1a1a;margin-bottom:10px}
+.search-box{display:flex;align-items:center;background:#f5f6f8;border-radius:8px;padding:6px 10px;gap:6px}
+.search-box input{border:none;background:none;outline:none;font-size:13px;width:100%;color:#1a1a1a}
+.search-box input::placeholder{color:#9aa0a6}
+
+.status-tabs{display:flex;gap:4px;padding:8px 12px;border-bottom:1px solid #e8eaed;overflow-x:auto;flex-shrink:0}
+.status-tabs::-webkit-scrollbar{height:3px}
+.status-tabs::-webkit-scrollbar-thumb{background:#ddd;border-radius:2px}
+.stab{padding:4px 10px;border-radius:20px;font-size:11px;font-weight:600;cursor:pointer;white-space:nowrap;border:1.5px solid transparent;color:#666;background:#f5f6f8}
+.stab.active{color:#fff}
+.stab[data-s="all"].active{background:#555;border-color:#555}
+.stab[data-s="bot"].active{background:#6c757d;border-color:#6c757d}
+.stab[data-s="human"].active{background:#0d6efd;border-color:#0d6efd}
+.stab[data-s="waiting"].active{background:#fd7e14;border-color:#fd7e14}
+.stab[data-s="followup"].active{background:#6f42c1;border-color:#6f42c1}
+.stab[data-s="closed"].active{background:#dc3545;border-color:#dc3545}
+.stab[data-s="sold"].active{background:#198754;border-color:#198754}
+
+.tag-filter{padding:8px 12px;border-bottom:1px solid #e8eaed;display:flex;flex-wrap:wrap;gap:4px;flex-shrink:0}
+.tag-chip-f{padding:2px 8px;border-radius:12px;font-size:10px;cursor:pointer;border:1.5px solid #ddd;color:#555;background:#fff;white-space:nowrap}
+.tag-chip-f.active{background:#e8f4fd;border-color:#0d6efd;color:#0d6efd}
+
+.conv-list{flex:1;overflow-y:auto}
+.conv-list::-webkit-scrollbar{width:4px}
+.conv-list::-webkit-scrollbar-thumb{background:#ddd;border-radius:2px}
+.conv-item{padding:10px 12px;cursor:pointer;border-bottom:1px solid #f0f2f5;transition:background .15s;display:flex;gap:8px;align-items:flex-start}
+.conv-item:hover{background:#f8f9fa}
 .conv-item.active{background:#e8f4fd}
-.conv-avatar{width:40px;height:40px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:18px;flex-shrink:0}
+.conv-avatar{width:38px;height:38px;border-radius:50%;object-fit:cover;flex-shrink:0;background:#e8eaed}
+.conv-avatar-placeholder{width:38px;height:38px;border-radius:50%;background:#e0e4e8;display:flex;align-items:center;justify-content:center;font-size:16px;flex-shrink:0}
 .conv-info{flex:1;min-width:0}
-.conv-top{display:flex;justify-content:space-between;align-items:center;margin-bottom:3px}
-.conv-name{font-size:13px;font-weight:700;color:#333;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.conv-time{font-size:11px;color:#bbb;flex-shrink:0}
-.conv-preview{font-size:12px;color:#888;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.conv-note{font-size:11px;color:#f5a623;margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.pf-badge{font-size:10px;font-weight:700;padding:1px 6px;border-radius:6px;margin-right:4px}
-.pf-line{background:#e8f5e9;color:#00a000}
-.pf-fb{background:#e3f2fd;color:#1877f2}
-.pf-fb_comment{background:#fce4ec;color:#e91e63}
-.manual-badge{font-size:10px;background:#fff3e0;color:#e65100;padding:1px 6px;border-radius:6px;margin-left:4px}
-/* 右側聊天區 */
-.chat{flex:1;display:flex;flex-direction:column;min-width:0}
-.chat-head{padding:12px 16px;background:#fff;border-bottom:1px solid #e0e0e0;display:flex;align-items:center;justify-content:space-between}
-.chat-title{font-size:14px;font-weight:700}
-.takeover-btn{padding:6px 14px;border:none;border-radius:8px;font-size:12px;font-weight:700;cursor:pointer}
-.takeover-on{background:#fff3e0;color:#e65100}
-.takeover-off{background:#e8f5e9;color:#2e7d32}
-.chat-messages{flex:1;overflow-y:auto;padding:16px;display:flex;flex-direction:column;gap:10px}
-.msg-row{display:flex;gap:8px;max-width:75%}
-.msg-row.user{align-self:flex-start}
-.msg-row.bot{align-self:flex-end;flex-direction:row-reverse}
-.bubble{padding:10px 14px;border-radius:16px;font-size:14px;line-height:1.6;white-space:pre-wrap;word-break:break-word}
-.msg-row.user .bubble{background:#fff;border:1px solid #e0e0e0;color:#333;border-top-left-radius:4px}
-.msg-row.bot .bubble{background:#1a1a1a;color:#fff;border-top-right-radius:4px}
-.msg-time{font-size:10px;color:#bbb;margin-top:4px;text-align:center;align-self:flex-end}
-.empty-chat{flex:1;display:flex;align-items:center;justify-content:center;color:#ccc;font-size:14px}
-.chat-input{padding:12px 16px;background:#fff;border-top:1px solid #e0e0e0;display:flex;gap:10px}
-.chat-input textarea{flex:1;border:1px solid #e0e0e0;border-radius:10px;padding:10px 14px;font-size:14px;font-family:inherit;resize:none;height:60px;line-height:1.5}
-.chat-input textarea:focus{outline:none;border-color:#1a1a1a}
-.send-btn{padding:0 20px;background:#1a1a1a;color:#fff;border:none;border-radius:10px;font-size:14px;font-weight:700;cursor:pointer;flex-shrink:0}
-.send-btn:hover{opacity:.85}
-.send-btn:disabled{opacity:.4;cursor:not-allowed}
-.note-bar{padding:8px 16px;background:#fffbf0;border-top:1px solid #ffe082;display:flex;gap:8px;align-items:center}
-.note-bar input{flex:1;border:1px solid #ffe082;border-radius:8px;padding:6px 10px;font-size:13px;font-family:inherit;background:#fff}
-.note-bar input:focus{outline:none;border-color:#f5a623}
-.note-save-btn{padding:6px 14px;background:#f5a623;color:#fff;border:none;border-radius:8px;font-size:12px;font-weight:700;cursor:pointer;white-space:nowrap}
-.user-avatar{width:38px;height:38px;border-radius:50%;object-fit:cover;flex-shrink:0}
-.user-avatar-fallback{width:38px;height:38px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:17px;flex-shrink:0}
-/* 標籤 */
-.tag{display:inline-block;font-size:11px;font-weight:700;padding:2px 8px;border-radius:10px;cursor:pointer;user-select:none}
-.tag-待跟進{background:#fff3e0;color:#e65100}
-.tag-已報價{background:#e3f2fd;color:#1565c0}
-.tag-已成交{background:#e8f5e9;color:#2e7d32}
-.tag-VIP{background:#f3e5f5;color:#7b1fa2}
-.tag-問題客{background:#fdecea;color:#c62828}
-.tag-inactive{opacity:.35}
-/* 未讀紅點 */
-.unread-dot{display:inline-flex;align-items:center;justify-content:center;background:#e53935;color:#fff;font-size:10px;font-weight:700;border-radius:10px;min-width:18px;height:18px;padding:0 4px;margin-left:4px}
-/* 模板面板 */
-.tpl-panel{position:absolute;bottom:140px;left:0;right:0;background:#fff;border-top:2px solid #e0e0e0;max-height:340px;overflow-y:auto;z-index:50;display:none;flex-direction:column}
+.conv-name-row{display:flex;align-items:center;gap:4px;margin-bottom:2px}
+.conv-name{font-size:13px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;flex:1}
+.conv-time{font-size:10px;color:#9aa0a6;white-space:nowrap}
+.conv-preview{font-size:11px;color:#9aa0a6;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-bottom:4px}
+.conv-meta{display:flex;gap:3px;flex-wrap:wrap;align-items:center}
+.status-dot{width:7px;height:7px;border-radius:50%;flex-shrink:0}
+.s-bot{background:#6c757d}.s-human{background:#0d6efd}.s-waiting{background:#fd7e14}
+.s-followup{background:#6f42c1}.s-closed{background:#dc3545}.s-sold{background:#198754}
+.tag-pill{padding:1px 6px;border-radius:10px;font-size:9px;font-weight:600;background:#e8f4fd;color:#0d6efd}
+.platform-badge{font-size:9px;padding:1px 5px;border-radius:4px;font-weight:700}
+.pb-line{background:#06C755;color:#fff}.pb-fb{background:#1877F2;color:#fff}
+
+/* MIDDLE CHAT */
+.chat-main{display:flex;flex-direction:column;overflow:hidden;background:#f8f9fa}
+.chat-header{background:#fff;border-bottom:1px solid #e8eaed;padding:10px 16px;display:flex;align-items:center;gap:10px;flex-shrink:0}
+.chat-header-avatar{width:36px;height:36px;border-radius:50%;object-fit:cover;background:#e8eaed}
+.chat-header-info{flex:1;min-width:0}
+.chat-header-name{font-size:14px;font-weight:700}
+.chat-header-sub{font-size:11px;color:#9aa0a6}
+.status-select{padding:4px 8px;border:1.5px solid #ddd;border-radius:20px;font-size:11px;font-weight:600;cursor:pointer;outline:none;color:#555;background:#fff}
+.takeover-btn{padding:5px 12px;border-radius:20px;font-size:11px;font-weight:700;border:none;cursor:pointer}
+.takeover-on{background:#0d6efd;color:#fff}.takeover-off{background:#e8eaed;color:#555}
+
+.msg-area{flex:1;overflow-y:auto;padding:16px;display:flex;flex-direction:column;gap:10px}
+.msg-area::-webkit-scrollbar{width:4px}
+.msg-area::-webkit-scrollbar-thumb{background:#ddd;border-radius:2px}
+.msg-row{display:flex;gap:8px;align-items:flex-end}
+.msg-row.me{flex-direction:row-reverse}
+.msg-bubble{max-width:72%;padding:8px 12px;border-radius:16px;font-size:13px;line-height:1.5;word-break:break-word}
+.msg-row.them .msg-bubble{background:#fff;border-bottom-left-radius:4px;box-shadow:0 1px 2px rgba(0,0,0,.06)}
+.msg-row.me .msg-bubble{background:#0d6efd;color:#fff;border-bottom-right-radius:4px}
+.msg-img{max-width:220px;border-radius:12px;cursor:pointer}
+.msg-sticker{width:100px}
+.msg-time{font-size:10px;color:#9aa0a6;white-space:nowrap}
+.msg-avatar{width:28px;height:28px;border-radius:50%;object-fit:cover;background:#e8eaed;flex-shrink:0}
+.sys-msg{text-align:center;font-size:11px;color:#9aa0a6;padding:4px 0}
+
+.tpl-panel{background:#fff;border-top:1px solid #e8eaed;display:none;flex-direction:column;max-height:240px}
 .tpl-panel.open{display:flex}
-.tpl-head{padding:10px 16px;display:flex;align-items:center;justify-content:space-between;border-bottom:1px solid #f0f0f0;flex-shrink:0}
-.tpl-head-title{font-size:13px;font-weight:700;color:#555}
-.tpl-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:10px;padding:12px 16px}
-.tpl-card{border:1px solid #e8e8e8;border-radius:10px;overflow:hidden;cursor:pointer;transition:box-shadow .2s}
-.tpl-card:hover{box-shadow:0 3px 12px rgba(0,0,0,.12)}
-.tpl-img{width:100%;height:100px;object-fit:cover;background:#f5f5f5;display:block}
-.tpl-img-empty{width:100%;height:100px;background:#f5f5f5;display:flex;align-items:center;justify-content:center;color:#ccc;font-size:24px}
-.tpl-body{padding:8px 10px}
-.tpl-title{font-size:13px;font-weight:700;color:#333;margin-bottom:2px}
-.tpl-price{font-size:12px;color:#e53935;font-weight:700}
-.tpl-actions{display:flex;gap:6px;margin-top:6px}
-.tpl-use-btn{flex:1;padding:5px;background:#1a1a1a;color:#fff;border:none;border-radius:6px;font-size:11px;cursor:pointer;font-weight:600}
-.tpl-del-btn{padding:5px 8px;background:#fdecea;color:#c62828;border:none;border-radius:6px;font-size:11px;cursor:pointer}
-.tpl-add-card{border:2px dashed #e0e0e0;border-radius:10px;display:flex;align-items:center;justify-content:center;min-height:160px;cursor:pointer;color:#bbb;font-size:13px;font-weight:600;gap:6px}
-.tpl-add-card:hover{border-color:#1a1a1a;color:#333}
-/* 新增模板表單 */
-.tpl-form{padding:14px 16px;border-top:1px solid #f0f0f0;display:none;flex-direction:column;gap:8px}
-.tpl-form.open{display:flex}
-.tpl-form input,.tpl-form textarea{border:1px solid #e0e0e0;border-radius:8px;padding:8px 10px;font-size:13px;font-family:inherit}
-.tpl-form textarea{min-height:70px;resize:vertical}
-.tpl-btn-row{display:flex;gap:8px}
-.tpl-confirm-btn{flex:1;padding:8px;background:#1a1a1a;color:#fff;border:none;border-radius:8px;font-size:13px;font-weight:600;cursor:pointer}
-.tpl-cancel-btn{padding:8px 16px;background:#f5f5f5;color:#555;border:none;border-radius:8px;font-size:13px;cursor:pointer}
-@media(max-width:640px){.sidebar{width:100%;display:none}.sidebar.show{display:flex}.chat{display:none}.chat.show{display:flex}}
+.tpl-cats{display:flex;gap:4px;padding:8px 12px;overflow-x:auto;border-bottom:1px solid #f0f2f5;flex-shrink:0}
+.tpl-cats::-webkit-scrollbar{height:3px}
+.tpl-cats::-webkit-scrollbar-thumb{background:#ddd}
+.tcat{padding:3px 10px;border-radius:12px;font-size:11px;cursor:pointer;border:1.5px solid #ddd;color:#555;white-space:nowrap}
+.tcat.active{background:#0d6efd;border-color:#0d6efd;color:#fff}
+.tpl-list{overflow-y:auto;flex:1}
+.tpl-item{padding:8px 14px;cursor:pointer;border-bottom:1px solid #f5f6f8;font-size:12px;line-height:1.5;color:#333}
+.tpl-item:hover{background:#f0f8ff}
+.tpl-item strong{display:block;font-size:10px;color:#9aa0a6;margin-bottom:2px}
+
+.input-area{background:#fff;border-top:1px solid #e8eaed;padding:10px 12px;display:flex;gap:8px;align-items:flex-end;flex-shrink:0}
+.input-area textarea{flex:1;border:1.5px solid #e8eaed;border-radius:12px;padding:8px 12px;font-size:13px;resize:none;outline:none;font-family:inherit;line-height:1.5;max-height:120px}
+.input-area textarea:focus{border-color:#0d6efd}
+.btn-icon{width:36px;height:36px;border-radius:50%;border:1.5px solid #e8eaed;background:#fff;cursor:pointer;display:flex;align-items:center;justify-content:center;font-size:16px;flex-shrink:0;transition:.15s}
+.btn-icon:hover{background:#f0f8ff;border-color:#0d6efd}
+.btn-send{background:#0d6efd;border-color:#0d6efd;color:#fff}
+.btn-send:hover{background:#0b5ed7;border-color:#0b5ed7}
+
+/* RIGHT PANEL */
+.right-panel{background:#fff;border-left:1px solid #e8eaed;display:flex;flex-direction:column;overflow-y:auto}
+.right-panel::-webkit-scrollbar{width:4px}
+.right-panel::-webkit-scrollbar-thumb{background:#ddd;border-radius:2px}
+.rp-section{padding:14px 16px;border-bottom:1px solid #f0f2f5}
+.rp-section h4{font-size:12px;font-weight:700;color:#9aa0a6;text-transform:uppercase;letter-spacing:.5px;margin-bottom:10px}
+.rp-name{font-size:16px;font-weight:700;margin-bottom:2px}
+.rp-sub{font-size:11px;color:#9aa0a6}
+.rp-last{font-size:11px;color:#555;margin-top:6px;padding:6px 8px;background:#f8f9fa;border-radius:6px}
+
+.tags-wrap{display:flex;flex-wrap:wrap;gap:5px}
+.tag-chip-r{padding:3px 10px;border-radius:12px;font-size:11px;cursor:pointer;border:1.5px solid #ddd;color:#555;background:#fff;transition:.15s}
+.tag-chip-r.on{background:#e8f4fd;border-color:#0d6efd;color:#0d6efd;font-weight:600}
+
+.note-area{width:100%;border:1.5px solid #e8eaed;border-radius:8px;padding:8px;font-size:12px;resize:vertical;min-height:80px;outline:none;font-family:inherit;color:#333}
+.note-area:focus{border-color:#0d6efd}
+.note-saved{font-size:10px;color:#198754;margin-top:4px;display:none}
+
+.needs-form{display:flex;flex-direction:column;gap:8px}
+.needs-row{display:flex;flex-direction:column;gap:3px}
+.needs-row label{font-size:11px;color:#9aa0a6;font-weight:600}
+.needs-row input,.needs-row select{border:1.5px solid #e8eaed;border-radius:6px;padding:5px 8px;font-size:12px;outline:none;width:100%;color:#333}
+.needs-row input:focus,.needs-row select:focus{border-color:#0d6efd}
+.needs-row .radio-row{display:flex;gap:12px}
+.needs-row .radio-row label{font-size:12px;color:#333;font-weight:400;display:flex;align-items:center;gap:4px;cursor:pointer}
+.save-btn{padding:6px 0;background:#0d6efd;color:#fff;border:none;border-radius:8px;font-size:12px;font-weight:700;cursor:pointer;width:100%;margin-top:2px}
+.save-btn:hover{background:#0b5ed7}
+
+.ai-box{background:#f8f9fa;border-radius:8px;padding:10px;font-size:12px;color:#333;line-height:1.6;min-height:60px}
+.ai-btn{margin-top:8px;padding:5px 0;background:#6f42c1;color:#fff;border:none;border-radius:8px;font-size:11px;font-weight:700;cursor:pointer;width:100%}
+.ai-btn:hover{background:#5a2fa0}
+
+.no-conv{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;color:#9aa0a6;gap:8px}
+.no-conv .icon{font-size:48px}
+
+/* TOAST */
+.toast{position:fixed;bottom:24px;left:50%;transform:translateX(-50%);background:#1a1a1a;color:#fff;padding:8px 20px;border-radius:20px;font-size:13px;z-index:9999;opacity:0;transition:opacity .3s;pointer-events:none}
+.toast.show{opacity:1}
 </style></head>
 <body>
-<div class="header">
-  <a class="back" href="/admin?key={{ key }}">‹</a>
-  <h1>📬 訊息收件匣</h1>
-</div>
-<div class="main">
-  <div class="sidebar">
-    <div class="sidebar-head" style="display:flex;align-items:center;justify-content:space-between">
-      <span>所有對話</span>
-      <button onclick="showTemplateManager()" style="font-size:12px;padding:4px 10px;background:#1a1a1a;color:#fff;border:none;border-radius:6px;cursor:pointer">⚡ 管理模板</button>
+<div class="crm-wrap">
+<!-- LEFT SIDEBAR -->
+<div class="sidebar">
+  <div class="sidebar-top">
+    <h2>&#128172; JSIMPLE CRM</h2>
+    <div class="search-box">
+      <span>&#128269;</span>
+      <input type="text" id="searchInput" placeholder="搜尋對話...">
     </div>
-    <div class="conv-list" id="conv-list"><div style="padding:30px;text-align:center;color:#ccc;font-size:13px">載入中...</div></div>
   </div>
-  <div class="chat" id="chat-panel">
-    <div class="empty-chat" id="empty-chat">← 選擇一個對話開始</div>
+  <div class="status-tabs" id="statusTabs">
+    <div class="stab active" data-s="all">全部</div>
+    <div class="stab" data-s="bot">Bot</div>
+    <div class="stab" data-s="human">人工</div>
+    <div class="stab" data-s="waiting">等待</div>
+    <div class="stab" data-s="followup">追蹤</div>
+    <div class="stab" data-s="closed">結案</div>
+    <div class="stab" data-s="sold">成交</div>
+  </div>
+  <div class="tag-filter" id="tagFilter"></div>
+  <div class="conv-list" id="convList"></div>
+</div>
 
-    <!-- 模板管理頁面 -->
-    <div id="tpl-manager" style="display:none;flex:1;flex-direction:column;overflow:hidden">
-      <div class="chat-head">
-        <div><div class="chat-title">⚡ 快速回覆模板</div><div style="font-size:11px;color:#aaa;margin-top:2px">點「新增」建立模板，發送時一鍵帶入</div></div>
-      </div>
-      <div style="padding:16px;overflow-y:auto;flex:1">
-        <!-- 新增按鈕列 -->
-        <div style="display:flex;gap:8px;margin-bottom:16px">
-          <button onclick="showAddForm('image')" style="flex:1;padding:10px;background:#1a1a1a;color:#fff;border:none;border-radius:8px;font-size:13px;font-weight:700;cursor:pointer">🖼️ 圖片＋文字</button>
-          <button onclick="showAddForm('text')" style="flex:1;padding:10px;background:#444;color:#fff;border:none;border-radius:8px;font-size:13px;font-weight:700;cursor:pointer">💬 純文字</button>
-        </div>
-        <!-- 新增表單 -->
-        <div id="mgr-form" style="display:none;background:#f9f9f9;border-radius:10px;padding:14px;margin-bottom:16px;border:1px solid #e0e0e0">
-          <div id="mgr-form-title" style="font-size:13px;font-weight:700;margin-bottom:10px;color:#333"></div>
-          <div style="display:flex;flex-direction:column;gap:8px">
-            <input type="text" id="mgr-title" placeholder="模板名稱（例如：加購床墊）" style="border:1px solid #e0e0e0;border-radius:8px;padding:8px 10px;font-size:13px">
-            <input type="text" id="mgr-price" placeholder="價格標示（選填，例如：NT$2,999）" style="border:1px solid #e0e0e0;border-radius:8px;padding:8px 10px;font-size:13px">
-            <input type="text" id="mgr-image" placeholder="圖片網址（選填）" style="border:1px solid #e0e0e0;border-radius:8px;padding:8px 10px;font-size:13px" id="mgr-image-field">
-            <textarea id="mgr-text" placeholder="回覆文字內容" style="border:1px solid #e0e0e0;border-radius:8px;padding:8px 10px;font-size:13px;min-height:80px;resize:vertical;font-family:inherit"></textarea>
-            <div style="display:flex;gap:8px">
-              <button onclick="submitAddTemplate()" style="flex:1;padding:9px;background:#00c300;color:#fff;border:none;border-radius:8px;font-size:13px;font-weight:700;cursor:pointer">✓ 儲存模板</button>
-              <button onclick="document.getElementById('mgr-form').style.display='none'" style="padding:9px 16px;background:#f0f0f0;border:none;border-radius:8px;font-size:13px;cursor:pointer">取消</button>
-            </div>
-          </div>
-        </div>
-        <!-- 模板列表 -->
-        <div id="mgr-grid" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:10px"></div>
-      </div>
+<!-- MIDDLE CHAT -->
+<div class="chat-main">
+  <div class="chat-header" id="chatHeader" style="display:none">
+    <div class="chat-header-avatar" id="hdrAvatar"></div>
+    <div class="chat-header-info">
+      <div class="chat-header-name" id="hdrName"></div>
+      <div class="chat-header-sub" id="hdrSub"></div>
     </div>
-    <div id="chat-main" style="display:none;flex:1;flex-direction:column;overflow:hidden;display:none">
-      <div class="chat-head">
-        <div style="flex:1;min-width:0">
-          <div class="chat-title" id="chat-title">—</div>
-          <div style="font-size:11px;color:#aaa;margin-top:2px" id="chat-uid">—</div>
-          <div id="tag-bar" style="display:flex;gap:5px;flex-wrap:wrap;margin-top:6px"></div>
-        </div>
-        <button class="takeover-btn takeover-off" id="takeover-btn" onclick="toggleTakeover()">自動回覆中</button>
-      </div>
-      <div class="chat-messages" id="chat-messages"></div>
-      <div class="note-bar">
-        <span style="font-size:12px;color:#f5a623;font-weight:700;white-space:nowrap">📝 備註</span>
-        <input type="text" id="note-input" placeholder="輸入客戶備註（例如：已報價、等回覆）">
-        <button class="note-save-btn" onclick="saveNote()">儲存</button>
-      </div>
-      <div style="position:relative">
-        <div class="tpl-panel" id="tpl-panel">
-          <div class="tpl-head">
-            <span class="tpl-head-title">⚡ 快速回覆模板</span>
-            <div style="display:flex;gap:8px">
-              <button onclick="showTplForm()" style="font-size:12px;padding:4px 10px;background:#1a1a1a;color:#fff;border:none;border-radius:6px;cursor:pointer">＋ 新增</button>
-              <button onclick="toggleTpl()" style="font-size:18px;background:none;border:none;cursor:pointer;color:#aaa">×</button>
-            </div>
-          </div>
-          <div class="tpl-form" id="tpl-form">
-            <input type="text" id="tpl-title" placeholder="模板名稱（例如：加購床墊）">
-            <input type="text" id="tpl-price" placeholder="價格（例如：NT$2,999）">
-            <input type="text" id="tpl-image" placeholder="圖片網址（選填）">
-            <textarea id="tpl-text" placeholder="回覆文字內容"></textarea>
-            <div class="tpl-btn-row">
-              <button class="tpl-confirm-btn" onclick="addTemplate()">新增模板</button>
-              <button class="tpl-cancel-btn" onclick="hideTplForm()">取消</button>
-            </div>
-          </div>
-          <div class="tpl-grid" id="tpl-grid"></div>
-        </div>
-      </div>
-      <div class="chat-input">
-        <button onclick="toggleTpl()" style="padding:0 12px;background:#f5f5f5;border:1px solid #e0e0e0;border-radius:10px;font-size:13px;cursor:pointer;white-space:nowrap" title="快速回覆模板">⚡ 模板</button>
-        <input type="file" id="img-file-input" accept="image/*" style="display:none" onchange="uploadAndSendImage(this)">
-        <button onclick="document.getElementById('img-file-input').click()" style="padding:0 12px;background:#f5f5f5;border:1px solid #e0e0e0;border-radius:10px;font-size:18px;cursor:pointer" title="傳送圖片">🖼️</button>
-        <textarea id="reply-input" placeholder="輸入回覆訊息... (Ctrl+Enter 送出)" onkeydown="if(event.ctrlKey&&event.key==='Enter')sendReply()"></textarea>
-        <button class="send-btn" id="send-btn" onclick="sendReply()">送出</button>
-      </div>
+    <select class="status-select" id="statusSelect" onchange="updateStatus(this.value)">
+      <option value="bot">&#129302; Bot</option>
+      <option value="human">&#128100; 人工</option>
+      <option value="waiting">&#9203; 等待</option>
+      <option value="followup">&#128276; 追蹤</option>
+      <option value="closed">&#10060; 結案</option>
+      <option value="sold">&#127881; 成交</option>
+    </select>
+    <button class="takeover-btn takeover-off" id="takeoverBtn" onclick="toggleTakeover()">接管</button>
+  </div>
+  <div class="msg-area" id="msgArea">
+    <div class="no-conv">
+      <div class="icon">&#128172;</div>
+      <div>選擇一個對話開始</div>
     </div>
   </div>
+  <div class="tpl-panel" id="tplPanel">
+    <div class="tpl-cats" id="tplCats"></div>
+    <div class="tpl-list" id="tplList"></div>
+  </div>
+  <div class="input-area">
+    <button class="btn-icon" onclick="toggleTpl()" title="快速回覆">&#9889;</button>
+    <label class="btn-icon" title="傳送圖片" style="cursor:pointer">
+      &#128247;
+      <input type="file" id="imgInput" accept="image/*" style="display:none" onchange="uploadImg(this)">
+    </label>
+    <textarea id="replyInput" placeholder="輸入訊息..." rows="1"
+      oninput="autoResize(this)"
+      onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();sendReply()}"></textarea>
+    <button class="btn-icon btn-send" onclick="sendReply()" title="送出">&#10148;</button>
+  </div>
 </div>
+
+<!-- RIGHT PANEL -->
+<div class="right-panel" id="rightPanel">
+  <div style="flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;color:#9aa0a6;padding:24px;text-align:center">
+    <div style="font-size:40px;margin-bottom:8px">&#128100;</div>
+    <div style="font-size:13px">選擇對話後顯示客戶資訊</div>
+  </div>
+</div>
+</div>
+
+<div class="toast" id="toast"></div>
+
 <script>
-const KEY="{{ key }}";
-let currentConv=null, convData={};
+const KEY = new URLSearchParams(location.search).get('key') || '';
+const ALL_TAGS = ['有興趣','已報價','猶豫中','要比較','問尺寸','問材質','問交期','問安裝','詢問保固','重要客戶','需要跟進','已下訂','垃圾訊息'];
+const STATUS_COLORS = {bot:'#6c757d',human:'#0d6efd',waiting:'#fd7e14',followup:'#6f42c1',closed:'#dc3545',sold:'#198754'};
+const TPL_DATA = {
+  '打招呼':['你好，我是JSIMPLE高架床專員，請問有什麼可以幫您？','感謝您的詢問，請問您的需求是？'],
+  '報價':['我們的高架床系列售價從NT$8,800起，依尺寸和材質不同，我幫您報正確的價格。','請問需要的尺寸是單人(90cm)、標準(120cm)還是雙人(150cm)？'],
+  '尺寸':['標準房間建議90x190或120x190，需要我幫您確認空間適合哪種嗎？','請問您的房間長寬大約是多少？方便我幫您規劃最合適的床架配置。'],
+  '材質':['我們提供實木、鋼管、系統板三種材質，各有不同優缺點，您比較在意哪個方向？','鋼管款式耐重又好清潔，實木款則更有質感，預算和使用習慣都可以協助建議。'],
+  '交期':['現貨商品約3-5個工作天可出貨，訂製款需要10-15天。','請問您方便收貨的時間？我們可以安排合適的配送日期。'],
+  '安裝':['我們有提供到府安裝服務，費用NT$800，台北、新北、桃園可預約。','安裝通常需要1-2小時，請確保有成人在家接待師傅。'],
+  '跟進':['您好，上次有詢問高架床，請問有決定了嗎？有任何問題都可以告訴我。','您好，想再確認一下，我們的限時優惠還有兩天，需要幫您保留嗎？'],
+  '成交':['感謝您的訂購，我馬上幫您安排出貨，請確認收件地址是否正確。','訂單已確認，預計X月X日出貨，有任何問題請隨時告訴我。']
+};
 
-async function loadConversations(){
-  const list=document.getElementById('conv-list');
+let allConvs = [], curKey = null, curStatus = 'bot', filterStatus = 'all', filterTag = null, searchQ = '';
+let curTags = [], curCustomer = {}, noteTimer = null;
+
+// INIT
+async function init(){
+  buildTagFilter();
+  buildTplCats();
+  await loadConvs();
+  setInterval(loadConvs, 8000);
+}
+
+function buildTagFilter(){
+  const el = document.getElementById('tagFilter');
+  el.innerHTML = ALL_TAGS.map(t=>
+    `<div class="tag-chip-f" data-tag="${t}" onclick="filterByTag('${t}')">${t}</div>`
+  ).join('');
+}
+
+function filterByTag(tag){
+  filterTag = filterTag === tag ? null : tag;
+  document.querySelectorAll('.tag-chip-f').forEach(el=>{
+    el.classList.toggle('active', el.dataset.tag === filterTag);
+  });
+  renderList();
+}
+
+document.querySelectorAll('.stab').forEach(el=>{
+  el.addEventListener('click',()=>{
+    filterStatus = el.dataset.s;
+    document.querySelectorAll('.stab').forEach(e=>e.classList.remove('active'));
+    el.classList.add('active');
+    renderList();
+  });
+});
+
+document.getElementById('searchInput').addEventListener('input', e=>{
+  searchQ = e.target.value.trim().toLowerCase();
+  renderList();
+});
+
+async function loadConvs(){
   try{
-  const res=await fetch('/api/conversations?key='+KEY);
-  if(!res.ok){list.innerHTML='<div style="padding:30px;text-align:center;color:#e53935;font-size:13px">載入失敗（'+res.status+'）<br><a href="" style="color:#1877f2">重新整理</a></div>';return;}
-  const data=await res.json();
-  convData=data;
-  if(!Array.isArray(data)||!data.length){list.innerHTML='<div style="padding:30px;text-align:center;color:#ccc;font-size:13px">尚無對話記錄</div>';return;}
-  list.innerHTML=data.map((c,i)=>{
-    const pfClass=c.platform==='LINE'?'pf-line':c.platform==='FB'?'pf-fb':'pf-fb_comment';
-    const pfIcon=c.platform==='LINE'?'💬':c.platform==='FB'?'📘':'💬';
-    const avatarBg=c.platform==='LINE'?'#e8f5e9':c.platform==='FB'?'#e3f2fd':'#fce4ec';
-    const manualBadge=c.manual?'<span class="manual-badge">人工</span>':'';
-    const displayName=c.name||c.user_id.slice(0,12)+'...';
-    const avatar=c.avatar?`<img class="user-avatar" src="${c.avatar}" onerror="this.style.display='none'">`:
-      `<div class="user-avatar-fallback" style="background:${avatarBg}">${pfIcon}</div>`;
-    const notePreview=c.note?`<div class="conv-note">📝 ${c.note}</div>`:'';
-    const unreadBadge=c.unread>0?`<span class="unread-dot">${c.unread}</span>`:'';
-    const tagPills=(c.tags||[]).map(t=>`<span class="tag tag-${t}">${t}</span>`).join('');
-    return `<div class="conv-item" id="conv-${i}" onclick="openConv(${i})">
-      ${avatar}
+    const r = await fetch(`/api/conversations?key=${KEY}`);
+    const d = await r.json();
+    if(d.conversations) allConvs = d.conversations;
+    renderList();
+    if(curKey) {
+      const cur = allConvs.find(c=>c.key===curKey);
+      if(cur) updateHeaderStatus(cur.status||'bot');
+    }
+  }catch(e){console.error(e)}
+}
+
+function renderList(){
+  let list = allConvs.filter(c=>{
+    if(filterStatus !== 'all' && (c.status||'bot') !== filterStatus) return false;
+    if(filterTag && !(c.tags||[]).includes(filterTag)) return false;
+    if(searchQ){
+      const name = (c.user_name||c.user_id||'').toLowerCase();
+      const last = (c.last_message||'').toLowerCase();
+      if(!name.includes(searchQ) && !last.includes(searchQ)) return false;
+    }
+    return true;
+  });
+  const el = document.getElementById('convList');
+  if(!list.length){el.innerHTML='<div style="padding:20px;text-align:center;color:#9aa0a6;font-size:13px">沒有符合的對話</div>';return}
+  el.innerHTML = list.map(c=>{
+    const s = c.status||'bot';
+    const tags = (c.tags||[]).slice(0,3).map(t=>`<span class="tag-pill">${t}</span>`).join('');
+    const pb = c.platform==='fb'?'<span class="platform-badge pb-fb">FB</span>':'<span class="platform-badge pb-line">LINE</span>';
+    const time = c.last_time ? new Date(c.last_time*1000).toLocaleTimeString('zh-TW',{hour:'2-digit',minute:'2-digit'}) : '';
+    const avatarEl = c.user_avatar
+      ? `<img class="conv-avatar" src="${c.user_avatar}" onerror="this.style.display='none'">`
+      : `<div class="conv-avatar-placeholder">${c.platform==='fb'?'&#128100;':'&#128100;'}</div>`;
+    return `<div class="conv-item${c.key===curKey?' active':''}" onclick="openConv('${c.key}')">
+      ${avatarEl}
       <div class="conv-info">
-        <div class="conv-top">
-          <div class="conv-name"><span class="pf-badge ${pfClass}">${c.platform}</span>${displayName}${manualBadge}${unreadBadge}</div>
-          <div class="conv-time">${c.last_time.slice(5,16)}</div>
+        <div class="conv-name-row">
+          <span class="conv-name">${escHtml(c.user_name||c.user_id||'未知用戶')}</span>
+          <span class="conv-time">${time}</span>
         </div>
-        <div class="conv-preview">${c.last_msg}</div>
-        ${tagPills?`<div style="margin-top:4px;display:flex;gap:4px;flex-wrap:wrap">${tagPills}</div>`:''}
-        ${notePreview}
+        <div class="conv-preview">${escHtml((c.last_message||'').slice(0,40))}</div>
+        <div class="conv-meta">
+          <div class="status-dot s-${s}"></div>
+          ${pb}${tags}
+        </div>
       </div>
     </div>`;
   }).join('');
-  }catch(e){list.innerHTML='<div style="padding:30px;text-align:center;color:#e53935;font-size:13px">載入錯誤：'+e.message+'<br><a href="" style="color:#1877f2">重新整理</a></div>';}
 }
 
-function openConv(i){
-  document.querySelectorAll('.conv-item').forEach(e=>e.classList.remove('active'));
-  document.getElementById('conv-'+i).classList.add('active');
-  currentConv=convData[i];
-  document.getElementById('empty-chat').style.display='none';
-  const main=document.getElementById('chat-main');
-  main.style.display='flex';
-  main.style.flexDirection='column';
-  document.getElementById('chat-title').textContent=currentConv.name||currentConv.user_id;
-  document.getElementById('chat-uid').textContent=currentConv.platform+' · '+currentConv.user_id;
-  document.getElementById('note-input').value=currentConv.note||'';
-  renderTags(currentConv.tags||[]);
-  fetch('/api/seen?key='+KEY,{method:'POST',headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({platform:currentConv.platform,user_id:currentConv.user_id})});
-  const btn=document.getElementById('takeover-btn');
-  if(currentConv.manual){btn.textContent='人工接手中';btn.className='takeover-btn takeover-on';}
-  else{btn.textContent='自動回覆中';btn.className='takeover-btn takeover-off';}
-  renderMessages(currentConv.messages);
+async function openConv(key){
+  curKey = key;
+  document.querySelectorAll('.conv-item').forEach(el=>el.classList.remove('active'));
+  document.querySelector(`.conv-item[onclick="openConv('${key}')"]`)?.classList.add('active');
+
+  const conv = allConvs.find(c=>c.key===key);
+  curStatus = conv?.status || 'bot';
+
+  // show header
+  const hdr = document.getElementById('chatHeader');
+  hdr.style.display = 'flex';
+  const name = conv?.user_name || conv?.user_id || '未知用戶';
+  document.getElementById('hdrName').textContent = name;
+  document.getElementById('hdrSub').textContent = conv?.platform==='fb'?'Facebook Messenger':'LINE';
+  const hdrAv = document.getElementById('hdrAvatar');
+  if(conv?.user_avatar){
+    hdrAv.outerHTML = `<img class="chat-header-avatar" id="hdrAvatar" src="${conv.user_avatar}">`;
+  }
+  updateHeaderStatus(curStatus);
+
+  // load messages
+  await loadMsgs(key);
+  // load right panel
+  await loadInfoPanel(key, conv);
 }
 
-function renderMessages(msgs){
-  const el=document.getElementById('chat-messages');
-  el.innerHTML=msgs.map(m=>{
-    let mc=m.msg;
-    if(m.image_url&&(m.msg==='[圖片]'||m.msg==='[手動圖片]'))
-      mc=`<img src="${m.image_url}" style="max-width:200px;max-height:200px;border-radius:8px;display:block;cursor:pointer" onclick="window.open('${m.image_url}','_blank')">`
-    else if(m.image_url&&m.msg==='[貼圖]')
-      mc=`<img src="${m.image_url}" style="width:90px;height:90px;object-fit:contain;display:block">`;
-    const userRow=`<div class="msg-row user"><div><div class="bubble">${mc}</div><div class="msg-time">${m.time}</div></div></div>`;
-    const botRow=m.reply?`<div class="msg-row bot"><div><div class="bubble">${m.reply}</div></div></div>`:'';
-    return userRow+botRow;
-  }).join('');
-  el.scrollTop=el.scrollHeight;
-}
-
-async function toggleTakeover(){
-  if(!currentConv)return;
-  const res=await fetch('/api/takeover?key='+KEY,{method:'POST',headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({platform:currentConv.platform,user_id:currentConv.user_id,active:!currentConv.manual})});
-  const d=await res.json();
-  currentConv.manual=d.active;
-  const btn=document.getElementById('takeover-btn');
-  if(d.active){btn.textContent='人工接手中';btn.className='takeover-btn takeover-on';}
-  else{btn.textContent='自動回覆中';btn.className='takeover-btn takeover-off';}
-  await loadConversations();
-}
-
-async function sendReply(){
-  if(!currentConv)return;
-  const text=document.getElementById('reply-input').value.trim();
-  if(!text)return;
-  const btn=document.getElementById('send-btn');
-  btn.disabled=true;
-  const res=await fetch('/api/reply?key='+KEY,{method:'POST',headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({platform:currentConv.platform,user_id:currentConv.user_id,text})});
-  const d=await res.json();
-  if(d.ok){
-    document.getElementById('reply-input').value='';
-    currentConv.messages.push({time:new Date().toLocaleTimeString('zh-TW'),msg:'（你）'+text,reply:''});
-    renderMessages(currentConv.messages);
-  } else alert('發送失敗：'+(d.error||''));
-  btn.disabled=false;
-}
-
-
-async function uploadAndSendImage(input){
-  if(!currentConv||!input.files[0])return;
-  const btn=document.getElementById('send-btn');
-  btn.disabled=true;
+async function loadMsgs(key){
   try{
-    const fd=new FormData();
-    fd.append('file',input.files[0]);
-    const up=await fetch('/admin/line/upload-image?key='+KEY,{method:'POST',body:fd});
-    const ud=await up.json();
-    if(!ud.url){alert('圖片上傳失敗：'+(ud.error||''));btn.disabled=false;input.value='';return;}
-    const res=await fetch('/api/reply?key='+KEY,{method:'POST',headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({platform:currentConv.platform,user_id:currentConv.user_id,image_url:ud.url})});
-    const d=await res.json();
-    if(d.ok){
-      currentConv.messages.push({time:new Date().toLocaleTimeString('zh-TW'),msg:'[手動圖片]',reply:'',image_url:ud.url});
-      renderMessages(currentConv.messages);
-    }else alert('發送失敗：'+(d.error||''));
-  }catch(e){alert('錯誤：'+e.message);}
-  input.value='';
-  btn.disabled=false;
+    const r = await fetch(`/api/messages?key=${key}&admin_key=${KEY}`);
+    const d = await r.json();
+    renderMsgs(d.messages||[]);
+  }catch(e){console.error(e)}
 }
 
-const ALL_TAGS=['待跟進','已報價','已成交','VIP','問題客'];
-function renderTags(active){
-  const bar=document.getElementById('tag-bar');
-  bar.innerHTML=ALL_TAGS.map(t=>{
-    const on=active.includes(t);
-    return `<span class="tag tag-${t}${on?'':' tag-inactive'}" onclick="toggleTag('${t}')">${t}</span>`;
+function renderMsgs(msgs){
+  const area = document.getElementById('msgArea');
+  if(!msgs.length){area.innerHTML='<div class="sys-msg">沒有訊息記錄</div>';return}
+  area.innerHTML = msgs.map(m=>{
+    const isMe = m.role==='admin';
+    const time = m.ts ? new Date(m.ts*1000).toLocaleTimeString('zh-TW',{hour:'2-digit',minute:'2-digit'}) : '';
+    let content = '';
+    if(m.image_url) content = `<img class="msg-img" src="${m.image_url}" onclick="window.open(this.src)">`;
+    else if(m.sticker_url) content = `<img class="msg-sticker" src="${m.sticker_url}">`;
+    else content = escHtml(m.content||'');
+    return `<div class="msg-row ${isMe?'me':'them'}">
+      <div class="msg-bubble">${content}</div>
+      <span class="msg-time">${time}</span>
+    </div>`;
   }).join('');
-}
-async function toggleTag(tag){
-  if(!currentConv)return;
-  const tags=currentConv.tags||[];
-  const idx=tags.indexOf(tag);
-  if(idx>=0)tags.splice(idx,1);else tags.push(tag);
-  currentConv.tags=tags;
-  renderTags(tags);
-  await fetch('/api/tags?key='+KEY,{method:'POST',headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({platform:currentConv.platform,user_id:currentConv.user_id,tags})});
-  await loadConversations();
+  area.scrollTop = area.scrollHeight;
 }
 
-let templates=[], mgrMode='text';
-async function loadTemplates(){
-  const res=await fetch('/api/templates?key='+KEY);
-  templates=await res.json();
-  renderTplGrid();
-  renderMgrGrid();
-}
-function renderTplGrid(){
-  const grid=document.getElementById('tpl-grid');
-  if(!grid)return;
-  grid.innerHTML=templates.map(t=>{
-    const img=t.image_url?`<img class="tpl-img" src="${t.image_url}" onerror="this.parentElement.innerHTML='<div class=tpl-img-empty>🖼️</div>'">`:
-      `<div class="tpl-img-empty">💬</div>`;
-    return `<div class="tpl-card">
-      ${img}<div class="tpl-body">
-        <div class="tpl-title">${t.title}</div>
-        ${t.price?`<div class="tpl-price">${t.price}</div>`:''}
-        <div class="tpl-actions">
-          <button class="tpl-use-btn" onclick="useTpl('${t.id}')">插入</button>
-          <button class="tpl-use-btn" style="background:#00c300" onclick="sendTpl('${t.id}')">發送</button>
-        </div>
-      </div></div>`;
-  }).join('');
-}
-function renderMgrGrid(){
-  const grid=document.getElementById('mgr-grid');
-  if(!grid)return;
-  if(!templates.length){grid.innerHTML='<div style="grid-column:1/-1;text-align:center;color:#ccc;padding:30px;font-size:13px">尚無模板，點上方按鈕新增</div>';return;}
-  grid.innerHTML=templates.map(t=>{
-    const img=t.image_url?`<img class="tpl-img" src="${t.image_url}" onerror="this.style.display='none'">`:
-      `<div class="tpl-img-empty">💬</div>`;
-    return `<div class="tpl-card">
-      ${img}<div class="tpl-body">
-        <div class="tpl-title">${t.title}</div>
-        ${t.price?`<div class="tpl-price">${t.price}</div>`:''}
-        <div style="font-size:11px;color:#aaa;margin-top:4px;max-height:36px;overflow:hidden">${t.text.slice(0,40)}${t.text.length>40?'…':''}</div>
-        <button class="tpl-del-btn" style="width:100%;margin-top:6px" onclick="delTpl('${t.id}')">✕ 刪除</button>
-      </div></div>`;
-  }).join('');
-}
-function showTemplateManager(){
-  document.getElementById('empty-chat').style.display='none';
-  document.getElementById('tpl-manager').style.display='flex';
-  const m=document.getElementById('chat-main');
-  m.style.display='none';
-  loadTemplates();
-}
-function showAddForm(mode){
-  mgrMode=mode;
-  document.getElementById('mgr-form').style.display='block';
-  document.getElementById('mgr-form-title').textContent=mode==='image'?'🖼️ 新增圖片＋文字模板':'💬 新增純文字模板';
-  document.getElementById('mgr-image').style.display=mode==='image'?'block':'none';
-}
-async function submitAddTemplate(){
-  const title=document.getElementById('mgr-title').value.trim();
-  const text=document.getElementById('mgr-text').value.trim();
-  const price=document.getElementById('mgr-price').value.trim();
-  const image_url=mgrMode==='image'?document.getElementById('mgr-image').value.trim():'';
-  if(!title||!text){alert('請填寫名稱和內容');return;}
-  await fetch('/api/templates?key='+KEY,{method:'POST',headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({action:'add',title,text,price,image_url})});
-  ['mgr-title','mgr-text','mgr-price','mgr-image'].forEach(id=>document.getElementById(id).value='');
-  document.getElementById('mgr-form').style.display='none';
-  loadTemplates();
-}
-async function delTpl(id){
-  if(!confirm('刪除這個模板？'))return;
-  await fetch('/api/templates?key='+KEY,{method:'POST',headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({action:'delete',id})});
-  loadTemplates();
-}
-function toggleTpl(){
-  const p=document.getElementById('tpl-panel');
-  p.classList.toggle('open');
-  if(p.classList.contains('open'))loadTemplates();
-}
-function useTpl(id){
-  const t=templates.find(x=>x.id===id);
-  if(!t)return;
-  let msg=t.text;
-  if(t.price)msg+='\\n\\n💰 '+t.price;
-  document.getElementById('reply-input').value=msg;
-  document.getElementById('tpl-panel').classList.remove('open');
-  document.getElementById('reply-input').focus();
-}
-async function sendTpl(id){
-  const t=templates.find(x=>x.id===id);
-  if(!t||!currentConv)return;
-  let msg=t.text;
-  if(t.price)msg+='\\n\\n💰 '+t.price;
-  document.getElementById('reply-input').value=msg;
-  document.getElementById('tpl-panel').classList.remove('open');
-  await sendReply();
-  if(t.image_url){
-    await fetch('/api/reply?key='+KEY,{method:'POST',headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({platform:currentConv.platform,user_id:currentConv.user_id,text:t.image_url,type:'image'})});
+function updateHeaderStatus(s){
+  curStatus = s;
+  const sel = document.getElementById('statusSelect');
+  if(sel) sel.value = s;
+  const btn = document.getElementById('takeoverBtn');
+  if(btn){
+    if(s==='human'){btn.textContent='接管中';btn.className='takeover-btn takeover-on';}
+    else{btn.textContent='接管';btn.className='takeover-btn takeover-off';}
   }
 }
 
-async function saveNote(){
-  if(!currentConv)return;
-  const note=document.getElementById('note-input').value.trim();
-  await fetch('/api/note?key='+KEY,{method:'POST',headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({platform:currentConv.platform,user_id:currentConv.user_id,note})});
-  currentConv.note=note;
-  await loadConversations();
+async function updateStatus(s){
+  if(!curKey) return;
+  try{
+    await fetch('/api/status',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({key:curKey,admin_key:KEY,status:s})});
+    curStatus = s;
+    updateHeaderStatus(s);
+    // update in list
+    const c = allConvs.find(x=>x.key===curKey);
+    if(c) c.status = s;
+    renderList();
+    toast('狀態已更新');
+  }catch(e){toast('更新失敗')}
 }
 
-loadConversations();
-setInterval(loadConversations, 15000);
-</script>
-</body></html>"""
-
-DASH_HTML = """<!DOCTYPE html>
-<html lang="zh-TW"><head><meta charset="UTF-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<title>J SIMPLE Bot 總覽</title>
-<style>
-*{box-sizing:border-box;margin:0;padding:0}
-body{font-family:-apple-system,sans-serif;background:#f5f5f5;color:#333}
-.header{background:#1a1a1a;color:#fff;padding:14px 20px;font-size:17px;font-weight:700}
-.container{max-width:500px;margin:30px auto;padding:0 16px}
-.card{background:#fff;border-radius:14px;padding:22px;margin-bottom:16px;box-shadow:0 1px 4px rgba(0,0,0,.08);display:flex;align-items:center;justify-content:space-between;text-decoration:none;color:#333}
-.card:hover{box-shadow:0 3px 12px rgba(0,0,0,.13)}
-.card-left{display:flex;align-items:center;gap:14px}
-.icon{width:46px;height:46px;border-radius:12px;display:flex;align-items:center;justify-content:center;font-size:22px}
-.icon-line{background:#e8f5e9}
-.icon-fb{background:#e3f2fd}
-.card-title{font-size:16px;font-weight:700}
-.card-sub{font-size:13px;color:#888;margin-top:2px}
-.status{font-size:12px;font-weight:700;padding:4px 10px;border-radius:10px}
-.on{background:#e8f5e9;color:#2e7d32}
-.off{background:#fdecea;color:#c62828}
-.arrow{color:#ccc;font-size:20px}
-</style></head><body>
-<div class="header">⚡ J SIMPLE Bot 後台總覽</div>
-<div class="container">
-  <a class="card" href="/admin/inbox?key={{ key }}">
-    <div class="card-left">
-      <div class="icon" style="background:#e8f0fe">📬</div>
-      <div>
-        <div class="card-title">訊息收件匣</div>
-        <div class="card-sub">LINE + FB 統一回覆</div>
-      </div>
-    </div>
-    <div style="display:flex;align-items:center;gap:10px">
-      <span class="arrow">›</span>
-    </div>
-  </a>
-  <a class="card" href="/admin/line?key={{ key }}">
-    <div class="card-left">
-      <div class="icon icon-line">💬</div>
-      <div>
-        <div class="card-title">LINE Bot 管理</div>
-        <div class="card-sub">@JSIMPLE</div>
-      </div>
-    </div>
-    <div style="display:flex;align-items:center;gap:10px">
-      <span class="status {{ 'on' if line_on else 'off' }}">{{ '開啟' if line_on else '關閉' }}</span>
-      <span class="arrow">›</span>
-    </div>
-  </a>
-  <a class="card" href="/admin/fb?key={{ key }}">
-    <div class="card-left">
-      <div class="icon icon-fb">📘</div>
-      <div>
-        <div class="card-title">FB Messenger 管理</div>
-        <div class="card-sub">逸雅傢俱</div>
-      </div>
-    </div>
-    <div style="display:flex;align-items:center;gap:10px">
-      <span class="status {{ 'on' if fb_on else 'off' }}">{{ '開啟' if fb_on else '關閉' }}</span>
-      <span class="arrow">›</span>
-    </div>
-  </a>
-  <a class="card" href="/admin/fb_comment?key={{ key }}">
-    <div class="card-left">
-      <div class="icon" style="background:#fce4ec">💬</div>
-      <div>
-        <div class="card-title">FB 留言自動回覆</div>
-        <div class="card-sub">關鍵字比對回覆</div>
-      </div>
-    </div>
-    <div style="display:flex;align-items:center;gap:10px">
-      <span class="status on">開啟</span>
-      <span class="arrow">›</span>
-    </div>
-  </a>
-  <a class="card" href="/admin/fb-posts?key={{ key }}">
-    <div class="card-left">
-      <div class="icon" style="background:#fce4ec">📌</div>
-      <div>
-        <div class="card-title">FB 貼文指定回覆</div>
-        <div class="card-sub">針對特定貼文設定回覆</div>
-      </div>
-    </div>
-    <div style="display:flex;align-items:center;gap:10px">
-      <span class="arrow">›</span>
-    </div>
-  </a>
-  <div style="margin:8px 0 4px;font-size:12px;color:#aaa;font-weight:700;letter-spacing:.5px">工具</div>
-  <a class="card" href="https://image-processor-t1gd.onrender.com" target="_blank">
-    <div class="card-left">
-      <div class="icon" style="background:#f3e5f5">🖼️</div>
-      <div>
-        <div class="card-title">商品圖片處理</div>
-        <div class="card-sub">去背 ＋ 白底 ＋ AI 標題建議</div>
-      </div>
-    </div>
-    <div style="display:flex;align-items:center;gap:10px">
-      <span style="font-size:11px;background:#f3e5f5;color:#7b1fa2;padding:3px 8px;border-radius:8px;font-weight:700">外部工具</span>
-      <span class="arrow">›</span>
-    </div>
-  </a>
-</div>
-</body></html>"""
-
-PLATFORM_HTML = """<!DOCTYPE html>
-<html lang="zh-TW"><head><meta charset="UTF-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<title>{{ pname }} 管理</title>
-<style>
-*{box-sizing:border-box;margin:0;padding:0}
-body{font-family:-apple-system,sans-serif;background:#f5f5f5;color:#333;font-size:15px}
-.header{background:#1a1a1a;color:#fff;padding:13px 18px;display:flex;align-items:center;gap:12px}
-.back{color:#aaa;text-decoration:none;font-size:20px;line-height:1}
-.header h1{font-size:16px;font-weight:700;flex:1}
-.toggle-wrap{display:flex;align-items:center;gap:8px}
-.toggle-label{font-size:13px}
-.toggle{position:relative;width:46px;height:26px}
-.toggle input{opacity:0;width:0;height:0}
-.slider{position:absolute;inset:0;border-radius:26px;background:#555;cursor:pointer;transition:.3s}
-.slider:before{content:"";position:absolute;width:20px;height:20px;left:3px;bottom:3px;background:#fff;border-radius:50%;transition:.3s}
-input:checked+.slider{background:#00c300}
-input:checked+.slider:before{transform:translateX(20px)}
-.tabs{display:flex;background:#fff;border-bottom:2px solid #eee;overflow-x:auto;scrollbar-width:none}
-.tabs::-webkit-scrollbar{display:none}
-.tab{padding:11px 18px;cursor:pointer;white-space:nowrap;font-weight:600;color:#999;border-bottom:3px solid transparent;margin-bottom:-2px;font-size:14px}
-.tab.active{color:var(--ac);border-bottom-color:var(--ac)}
-.tab-content{display:none}
-.tab-content.active{display:block}
-.container{max-width:860px;margin:18px auto;padding:0 14px 90px}
-.badge{font-size:11px;color:#999;background:#f0f0f0;padding:2px 8px;border-radius:8px;font-weight:600}
-textarea{width:100%;border:1px solid #e0e0e0;border-radius:8px;padding:10px;font-size:14px;line-height:1.75;resize:vertical;font-family:inherit}
-textarea:focus{outline:none;border-color:var(--ac);box-shadow:0 0 0 3px rgba(var(--ac-rgb),.08)}
-input[type=text]{width:100%;border:1px solid #e0e0e0;border-radius:8px;padding:9px 11px;font-size:14px;font-family:inherit}
-input[type=text]:focus{outline:none;border-color:var(--ac)}
-.hint{font-size:12px;color:#bbb;margin-top:5px}
-/* ── 意圖卡片（雙欄） ── */
-.intent-card{background:#fff;border-radius:12px;margin-bottom:10px;box-shadow:0 1px 4px rgba(0,0,0,.07);overflow:hidden;transition:opacity .2s}
-.intent-card.disabled{opacity:.38}
-.ic-head{display:flex;align-items:center;justify-content:space-between;padding:10px 14px;background:#fafafa;border-bottom:1px solid #efefef}
-.ic-name{display:flex;align-items:center;gap:7px;font-size:14px;font-weight:700}
-.ic-body{display:grid;grid-template-columns:1fr 1.7fr}
-.ic-left{padding:14px;border-right:1px solid #f0f0f0;display:flex;flex-direction:column;gap:12px}
-.ic-right{padding:14px;display:flex;flex-direction:column;gap:8px}
-.col-label{font-size:11px;color:#aaa;font-weight:700;letter-spacing:.5px;text-transform:uppercase;margin-bottom:5px}
-.ic-del{display:flex;justify-content:flex-end;margin-top:4px}
-.del-btn{border:none;background:none;color:#e57373;cursor:pointer;font-size:12px;padding:4px 8px;border-radius:6px}
-.del-btn:hover{background:#fdecea}
-/* ── 기타 카드 (테스트/로그) ── */
-.card{background:#fff;border-radius:12px;padding:16px;margin-bottom:12px;box-shadow:0 1px 4px rgba(0,0,0,.07)}
-.card-title{font-size:15px;font-weight:700;margin-bottom:10px}
-/* ── 新增 ── */
-.add-card{border:2px dashed #e0e0e0;border-radius:12px;padding:18px;margin-bottom:12px;background:none}
-.add-card:hover{border-color:var(--ac)}
-.add-title{font-size:14px;font-weight:700;color:#888;margin-bottom:12px}
-.field{margin-bottom:10px}
-.field label{font-size:13px;color:#888;display:block;margin-bottom:4px}
-.btn-add{width:100%;padding:11px;background:var(--ac);color:#fff;border:none;border-radius:8px;font-size:14px;font-weight:600;cursor:pointer;margin-top:4px}
-.btn-add:hover{opacity:.85}
-/* ── 底部按鈕 ── */
-.btn-row{position:fixed;bottom:0;left:0;right:0;background:#fff;border-top:1px solid #eee;padding:10px 14px;display:flex;gap:10px;justify-content:center;z-index:100}
-.btn{padding:10px 22px;border:none;border-radius:8px;font-size:14px;font-weight:600;cursor:pointer}
-.btn:hover{opacity:.85}
-.btn-save{background:var(--ac);color:#fff}
-/* ── 測試 ── */
-.test-input{width:100%;border:1px solid #ddd;border-radius:8px;padding:11px;font-size:15px;font-family:inherit}
-.test-input:focus{outline:none;border-color:var(--ac)}
-.btn-test{width:100%;margin-top:10px;padding:11px;background:var(--ac);color:#fff;border:none;border-radius:8px;font-size:14px;font-weight:600;cursor:pointer}
-.test-result{margin-top:14px;display:none}
-.intent-badge{display:inline-block;padding:3px 10px;border-radius:10px;font-size:12px;font-weight:600;margin-bottom:8px;background:rgba(var(--ac-rgb),.12);color:var(--ac)}
-.reply-pre{background:#f5f5f5;border-radius:8px;padding:12px;font-size:14px;line-height:1.7;white-space:pre-wrap}
-/* ── 紀錄 ── */
-.log-table{width:100%;border-collapse:collapse;font-size:12px}
-.log-table th{text-align:left;padding:8px 10px;background:#f9f9f9;color:#888;font-weight:600;border-bottom:2px solid #eee;white-space:nowrap}
-.log-table td{padding:8px 10px;border-bottom:1px solid #f0f0f0;vertical-align:top;word-break:break-all}
-.log-table tr:last-child td{border-bottom:none}
-.replied-yes{color:#00b050;font-weight:600;font-size:12px}
-.replied-no{color:#bbb;font-size:12px}
-.log-reply{color:#555;font-size:11px;background:#f7f7f7;padding:4px 6px;border-radius:4px;margin-top:3px;max-height:60px;overflow:hidden;white-space:pre-wrap}
-.log-uid{font-size:10px;color:#bbb;font-family:monospace}
-.empty{text-align:center;color:#ccc;padding:40px;font-size:14px}
-.flash{padding:10px 16px;border-radius:8px;margin-bottom:12px;font-size:14px}
-.ok{background:#e8f5e9;color:#2e7d32}
-.err{background:#fdecea;color:#c62828}
-/* ── 開關 ── */
-.mini-toggle{position:relative;width:38px;height:22px;flex-shrink:0}
-.mini-toggle input{opacity:0;width:0;height:0;position:absolute}
-.m-slider{position:absolute;inset:0;border-radius:22px;background:#ccc;cursor:pointer;transition:.25s}
-.m-slider:before{content:"";position:absolute;width:16px;height:16px;left:3px;bottom:3px;background:#fff;border-radius:50%;transition:.25s;box-shadow:0 1px 3px rgba(0,0,0,.2)}
-.mini-toggle input:checked+.m-slider{background:var(--ac)}
-.mini-toggle input:checked+.m-slider:before{transform:translateX(16px)}
-@media(max-width:640px){
-  .ic-body{grid-template-columns:1fr}
-  .ic-left{border-right:none;border-bottom:1px solid #f0f0f0}
-  .tab{padding:9px 12px;font-size:13px}
-  .btn{padding:9px 14px;font-size:13px}
+async function toggleTakeover(){
+  const newS = curStatus==='human' ? 'bot' : 'human';
+  await updateStatus(newS);
 }
-</style>
-</head>
-<body style="--ac:{{ ac }};--ac-rgb:{{ ac_rgb }}">
-<div class="header">
-  <a class="back" href="/admin?key={{ key }}">‹</a>
-  <h1>{{ pname }}</h1>
-  <div class="toggle-wrap">
-    <span class="toggle-label">{{ '開啟' if cfg.enabled else '關閉' }}</span>
-    <form method="POST" action="/admin/{{ platform }}/toggle?key={{ key }}" style="display:inline">
-      <label class="toggle">
-        <input type="checkbox" onchange="this.form.submit()" {{ 'checked' if cfg.enabled }}>
-        <span class="slider"></span>
-      </label>
-    </form>
-  </div>
-</div>
 
-<div class="tabs">
-  <div class="tab active" onclick="switchTab('replies',this)">💬 回覆管理</div>
-  <div class="tab" onclick="switchTab('add',this)">➕ 新增</div>
-  <div class="tab" onclick="switchTab('test',this)">🧪 測試</div>
-  <div class="tab" onclick="switchTab('logs',this)">📋 紀錄</div>
-</div>
+async function sendReply(){
+  if(!curKey) return;
+  const inp = document.getElementById('replyInput');
+  const txt = inp.value.trim();
+  if(!txt) return;
+  inp.value = '';
+  inp.style.height = '';
+  try{
+    const r = await fetch('/api/reply',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({key:curKey,admin_key:KEY,message:txt})});
+    const d = await r.json();
+    if(d.ok) await loadMsgs(curKey);
+    else toast('發送失敗：'+(d.error||''));
+  }catch(e){toast('發送失敗')}
+}
 
-<div class="container">
-  {% if flash %}<div class="flash {{ flash_type }}">{{ flash }}</div>{% endif %}
+async function uploadImg(input){
+  if(!input.files[0]||!curKey) return;
+  const file = input.files[0];
+  const reader = new FileReader();
+  reader.onload = async e=>{
+    const b64 = e.target.result.split(',')[1];
+    try{
+      const up = await fetch('/api/upload_image',{method:'POST',headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({key:curKey,admin_key:KEY,filename:file.name,content:b64})});
+      const ud = await up.json();
+      if(ud.url){
+        await fetch('/api/reply',{method:'POST',headers:{'Content-Type':'application/json'},
+          body:JSON.stringify({key:curKey,admin_key:KEY,image_url:ud.url})});
+        await loadMsgs(curKey);
+      }else toast('上傳失敗');
+    }catch(e){toast('上傳失敗')}
+  };
+  reader.readAsDataURL(file);
+  input.value = '';
+}
 
-  <!-- 回覆管理（雙欄） -->
-  <div id="tab-replies" class="tab-content active">
-    <form method="POST" action="/admin/{{ platform }}/save?key={{ key }}">
-      {% for id, label in cfg.labels.items() %}
-      {% set intent_on = cfg.enabled_intents.get(id, True) %}
-      {% set img = cfg.image_urls.get(id,'') %}
-      <div class="intent-card{{ '' if intent_on else ' disabled' }}" id="card-{{ id }}">
-        <!-- 標題列 -->
-        <div class="ic-head">
-          <div class="ic-name">
-            <span class="badge">{{ id }}</span>
-            {{ label }}
-          </div>
-          <label class="mini-toggle">
-            <input type="checkbox" name="enabled_{{ id }}" {{ 'checked' if intent_on }} onchange="toggleCard('{{ id }}',this)">
-            <span class="m-slider"></span>
-          </label>
-        </div>
-        <!-- 左右欄 -->
-        <div class="ic-body">
-          <!-- 左：關鍵字 + 圖片 -->
-          <div class="ic-left">
-            <div>
-              <div class="col-label">觸發關鍵字</div>
-              {% if id != 'default' %}
-              <input type="text" name="kw_{{ id }}" value="{{ cfg.keywords.get(id,[])|join(', ') }}" placeholder="關鍵字1, 關鍵字2, ...">
-              <div class="hint">逗號分隔，不分大小寫</div>
-              {% else %}
-              <div style="font-size:13px;color:#bbb;padding:6px 0">無關鍵字命中時自動觸發</div>
-              {% endif %}
-            </div>
-            <div>
-              <div class="col-label">圖片回覆（選填）</div>
-              {% if img %}
-              <div id="img-preview-{{ id }}" style="margin-bottom:8px">
-                <img src="{{ img }}" style="max-width:90px;max-height:64px;border-radius:6px;border:1px solid #eee;display:block;margin-bottom:5px">
-                <button type="button" onclick="clearImage('{{ id }}')" style="border:none;background:none;color:#e57373;cursor:pointer;font-size:12px">✕ 移除圖片</button>
-              </div>
-              {% else %}
-              <div id="img-preview-{{ id }}" style="display:none;margin-bottom:8px">
-                <img id="img-thumb-{{ id }}" src="" style="max-width:90px;max-height:64px;border-radius:6px;border:1px solid #eee;display:block;margin-bottom:5px">
-                <button type="button" onclick="clearImage('{{ id }}')" style="border:none;background:none;color:#e57373;cursor:pointer;font-size:12px">✕ 移除圖片</button>
-              </div>
-              {% endif %}
-              <input type="hidden" name="img_{{ id }}" id="img-url-{{ id }}" value="{{ img }}">
-              <label style="display:inline-flex;align-items:center;gap:5px;background:#f5f5f5;border:1px solid #ddd;border-radius:7px;padding:6px 11px;cursor:pointer;font-size:12px;color:#555">
-                📷 上傳圖片
-                <input type="file" accept="image/*" style="display:none" onchange="uploadImg('{{ id }}',this)">
-              </label>
-            </div>
-          </div>
-          <!-- 右：回覆內容 -->
-          <div class="ic-right">
-            {% if platform == 'fb_comment' %}
-            <div>
-              <div class="col-label">公開回覆（所有人看得到）</div>
-              <textarea name="reply_{{ id }}" style="min-height:90px">{{ cfg.replies.get(id,'') }}</textarea>
-            </div>
-            <div>
-              <div class="col-label">私訊內容（只有留言者收到）</div>
-              <textarea name="private_reply_{{ id }}" style="min-height:110px">{{ cfg.get('private_replies', {}).get(id,'') }}</textarea>
-            </div>
-            {% else %}
-            <div>
-              <div class="col-label">自動回覆內容</div>
-              <textarea name="reply_{{ id }}" style="min-height:160px">{{ cfg.replies.get(id,'') }}</textarea>
-            </div>
-            {% endif %}
-            {% if id not in builtin_intents %}
-            <div class="ic-del">
-              <button type="button" class="del-btn" onclick="delIntent('{{ id }}')">✕ 刪除類別</button>
-            </div>
-            {% endif %}
-          </div>
-        </div>
-      </div>
-      {% endfor %}
-      <div class="btn-row">
-        <button class="btn btn-save" type="submit" name="action" value="save">💾 儲存</button>
-        <button class="btn btn-save" type="submit" name="action" value="deploy" style="background:#1a1a1a">🚀 部署</button>
-      </div>
-    </form>
-  </div>
+// TEMPLATES
+function buildTplCats(){
+  const cats = Object.keys(TPL_DATA);
+  document.getElementById('tplCats').innerHTML = cats.map((c,i)=>
+    `<div class="tcat${i===0?' active':''}" onclick="selectCat('${c}',this)">${c}</div>`
+  ).join('');
+  showTplCat(cats[0]);
+}
 
-  <!-- 新增意圖 -->
-  <div id="tab-add" class="tab-content">
-    <form method="POST" action="/admin/{{ platform }}/add-intent?key={{ key }}">
-      <div class="add-card">
-        <div class="add-title">➕ 新增回覆類別</div>
-        <div class="field">
-          <label>識別碼（英文，不可重複）</label>
-          <input type="text" name="intent_key" placeholder="例如：assembly" required pattern="[a-z_]+">
-        </div>
-        <div class="field">
-          <label>顯示名稱</label>
-          <input type="text" name="intent_label" placeholder="例如：安裝教學" required>
-        </div>
-        <div class="field">
-          <label>觸發關鍵字（逗號分隔）</label>
-          <input type="text" name="intent_keywords" placeholder="例如：怎麼裝,安裝步驟,組裝說明" required>
-        </div>
-        <div class="field">
-          <label>回覆內容</label>
-          <textarea name="intent_reply" style="min-height:80px" placeholder="輸入回覆文字..." required></textarea>
-        </div>
-        <button type="submit" class="btn-add">新增</button>
-      </div>
-    </form>
-  </div>
-
-  <!-- 測試 -->
-  <div id="tab-test" class="tab-content">
-    <div class="card">
-      <div class="card-title" style="margin-bottom:12px">模擬用戶訊息</div>
-      <input class="test-input" id="test-input" type="text" placeholder="輸入訊息，例如：這個有現貨嗎" onkeydown="if(event.key==='Enter')runTest()">
-      <button class="btn-test" onclick="runTest()">送出測試</button>
-      <div class="test-result" id="test-result">
-        <div class="intent-badge" id="test-intent"></div>
-        <div class="reply-pre" id="test-reply"></div>
-      </div>
-    </div>
-  </div>
-
-  <!-- 紀錄 -->
-  <div id="tab-logs" class="tab-content">
-    <div class="card" style="padding:0;overflow:hidden">
-      <div id="log-content"><div class="empty">載入中...</div></div>
-    </div>
-  </div>
-</div>
-
-<!-- 刪除意圖 form（hidden） -->
-<form id="del-form" method="POST" action="/admin/{{ platform }}/del-intent?key={{ key }}">
-  <input type="hidden" name="intent_key" id="del-key">
-</form>
-
-<script>
-const KEY="{{ key }}",PLATFORM="{{ platform }}";
-function switchTab(name,el){
-  document.querySelectorAll('.tab-content').forEach(t=>t.classList.remove('active'));
-  document.querySelectorAll('.tab').forEach(t=>t.classList.remove('active'));
-  document.getElementById('tab-'+name).classList.add('active');
+function selectCat(cat, el){
+  document.querySelectorAll('.tcat').forEach(e=>e.classList.remove('active'));
   el.classList.add('active');
-  if(name==='logs')loadLogs();
+  showTplCat(cat);
 }
-function runTest(){
-  const text=document.getElementById('test-input').value.trim();
-  if(!text)return;
-  fetch('/api/test?key='+KEY,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({text,platform:PLATFORM})})
-    .then(r=>r.json()).then(d=>{
-      document.getElementById('test-intent').textContent=d.label+'（'+d.intent+'）';
-      document.getElementById('test-reply').textContent=d.reply;
-      document.getElementById('test-result').style.display='block';
-    });
+
+function showTplCat(cat){
+  const items = TPL_DATA[cat]||[];
+  document.getElementById('tplList').innerHTML = items.map(t=>
+    `<div class="tpl-item" onclick="useTpl(this.dataset.t)" data-t="${escAttr(t)}"><strong>${cat}</strong>${escHtml(t)}</div>`
+  ).join('');
 }
-function loadLogs(){
-  fetch('/api/logs?key='+KEY+'&platform='+PLATFORM).then(r=>r.json()).then(logs=>{
-    if(!logs.length){document.getElementById('log-content').innerHTML='<div class="empty">尚無訊息紀錄</div>';return;}
-    let h='<table class="log-table"><thead><tr><th>時間</th><th>平台</th><th>用戶</th><th>用戶訊息</th><th>意圖</th><th>Bot 回覆</th><th>狀態</th></tr></thead><tbody>';
-    logs.forEach(l=>{
-      const rep=l.replied?'<span class="replied-yes">✓ 已回覆</span>':'<span class="replied-no">冷卻中</span>';
-      const uid=l.user_id?`<div class="log-uid">${l.user_id.slice(0,12)}...</div>`:'';
-      const reply=l.reply?`<div class="log-reply">${l.reply.slice(0,80)}${l.reply.length>80?'…':''}</div>`:'<span style="color:#ddd">—</span>';
-      const pf=l.platform||'';
-      const pfColor=pf==='LINE'?'#00c300':pf==='FB'?'#1877f2':'#e91e63';
-      const pfBadge=`<span style="font-size:11px;font-weight:700;color:${pfColor}">${pf}</span>`;
-      h+=`<tr><td style="white-space:nowrap">${l.time}</td><td>${pfBadge}</td><td>${uid}</td><td>${l.msg}</td><td>${l.intent}</td><td>${reply}</td><td>${rep}</td></tr>`;
-    });
-    h+='</tbody></table>';
-    document.getElementById('log-content').innerHTML=h;
+
+function toggleTpl(){
+  const p = document.getElementById('tplPanel');
+  p.classList.toggle('open');
+}
+
+function useTpl(text){
+  const inp = document.getElementById('replyInput');
+  inp.value = text;
+  autoResize(inp);
+  document.getElementById('tplPanel').classList.remove('open');
+  inp.focus();
+}
+
+function autoResize(el){
+  el.style.height = '';
+  el.style.height = Math.min(el.scrollHeight, 120)+'px';
+}
+
+// RIGHT PANEL
+async function loadInfoPanel(key, conv){
+  const panel = document.getElementById('rightPanel');
+  const name = conv?.user_name || conv?.user_id || '未知用戶';
+  const platform = conv?.platform==='fb'?'Facebook':'LINE';
+  const lastTime = conv?.last_time ? new Date(conv.last_time*1000).toLocaleDateString('zh-TW') : '—';
+  const status = conv?.status || 'bot';
+
+  // fetch customer data
+  let cust = {};
+  try{
+    const r = await fetch(`/api/customer?key=${key}&admin_key=${KEY}`);
+    cust = await r.json();
+  }catch(e){}
+  curCustomer = cust;
+  curTags = conv?.tags || [];
+
+  panel.innerHTML = `
+    <div class="rp-section">
+      <h4>客戶資訊</h4>
+      <div class="rp-name">${escHtml(name)}</div>
+      <div class="rp-sub">${platform}</div>
+      <div class="rp-last">最後訊息：${lastTime}</div>
+    </div>
+    <div class="rp-section">
+      <h4>標籤</h4>
+      <div class="tags-wrap" id="tagsWrap">
+        ${ALL_TAGS.map(t=>`<div class="tag-chip-r${curTags.includes(t)?' on':''}" onclick="toggleTag('${t}',this)">${t}</div>`).join('')}
+      </div>
+    </div>
+    <div class="rp-section">
+      <h4>備註</h4>
+      <textarea class="note-area" id="noteArea" placeholder="輸入備註...">${escHtml(cust.note||'')}</textarea>
+      <div class="note-saved" id="noteSaved">已儲存</div>
+    </div>
+    <div class="rp-section">
+      <h4>需求資訊</h4>
+      <div class="needs-form">
+        <div class="needs-row">
+          <label>房間尺寸</label>
+          <input type="text" id="nRoomSize" placeholder="例：10坪" value="${escAttr(cust.room_size||'')}">
+        </div>
+        <div class="needs-row">
+          <label>床型</label>
+          <select id="nBedType">
+            <option value="">請選擇</option>
+            <option value="single"${cust.bed_type==='single'?' selected':''}>單人 90cm</option>
+            <option value="standard"${cust.bed_type==='standard'?' selected':''}>標準 120cm</option>
+            <option value="double"${cust.bed_type==='double'?' selected':''}>雙人 150cm</option>
+          </select>
+        </div>
+        <div class="needs-row">
+          <label>訂製</label>
+          <div class="radio-row">
+            <label><input type="radio" name="isCustom" value="1"${cust.is_custom?'checked':''}> 是</label>
+            <label><input type="radio" name="isCustom" value="0"${!cust.is_custom?'checked':''}> 否</label>
+          </div>
+        </div>
+        <div class="needs-row">
+          <label>預算</label>
+          <input type="text" id="nBudget" placeholder="例：15000" value="${escAttr(cust.budget||'')}">
+        </div>
+        <div class="needs-row">
+          <label>下次跟進</label>
+          <input type="date" id="nFollowup" value="${escAttr(cust.next_followup||'')}">
+        </div>
+        <button class="save-btn" onclick="saveCustomer()">儲存客戶資料</button>
+      </div>
+    </div>
+    <div class="rp-section">
+      <h4>AI 摘要</h4>
+      <div class="ai-box" id="aiBox">點擊下方按鈕分析對話</div>
+      <button class="ai-btn" onclick="runAI()">&#129302; 分析對話</button>
+    </div>
+  `;
+
+  // note auto-save
+  document.getElementById('noteArea').addEventListener('input', ()=>{
+    clearTimeout(noteTimer);
+    noteTimer = setTimeout(()=>saveNote(), 1500);
   });
 }
-function uploadImg(intentKey, input){
-  const file = input.files[0];
-  if(!file) return;
-  const fd = new FormData();
-  fd.append('file', file);
-  fd.append('intent_key', intentKey);
-  fetch('/admin/'+PLATFORM+'/upload-image?key='+KEY, {method:'POST', body:fd})
-    .then(r=>r.json()).then(d=>{
-      if(d.url){
-        const prev = document.getElementById('img-preview-'+intentKey);
-        const thumb = document.getElementById('img-thumb-'+intentKey);
-        if(thumb) thumb.src = d.url;
-        prev.style.display = 'block';
-        document.getElementById('img-url-'+intentKey).value = d.url;
-      } else alert('上傳失敗：'+(d.error||''));
-    });
+
+async function toggleTag(tag, el){
+  if(!curKey) return;
+  el.classList.toggle('on');
+  if(curTags.includes(tag)) curTags = curTags.filter(t=>t!==tag);
+  else curTags.push(tag);
+  try{
+    await fetch('/api/tag',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({key:curKey,admin_key:KEY,tags:curTags})});
+    const c = allConvs.find(x=>x.key===curKey);
+    if(c) c.tags = [...curTags];
+    renderList();
+  }catch(e){}
 }
-function clearImage(intentKey){
-  document.getElementById('img-url-'+intentKey).value='';
-  const prev=document.getElementById('img-preview-'+intentKey);
-  prev.style.display='none';
+
+async function saveNote(){
+  if(!curKey) return;
+  const note = document.getElementById('noteArea')?.value || '';
+  curCustomer.note = note;
+  try{
+    await fetch('/api/customer',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({key:curKey,admin_key:KEY,...curCustomer,note})});
+    const el = document.getElementById('noteSaved');
+    if(el){el.style.display='block';setTimeout(()=>el.style.display='none',2000)}
+  }catch(e){}
 }
-function delIntent(key){
-  if(!confirm('確定刪除「'+key+'」這個類別？'))return;
-  document.getElementById('del-key').value=key;
-  document.getElementById('del-form').submit();
+
+async function saveCustomer(){
+  if(!curKey) return;
+  const data = {
+    room_size: document.getElementById('nRoomSize')?.value||'',
+    bed_type: document.getElementById('nBedType')?.value||'',
+    is_custom: document.querySelector('input[name="isCustom"]:checked')?.value==='1',
+    budget: document.getElementById('nBudget')?.value||'',
+    next_followup: document.getElementById('nFollowup')?.value||'',
+    note: document.getElementById('noteArea')?.value||''
+  };
+  curCustomer = {...curCustomer,...data};
+  try{
+    await fetch('/api/customer',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({key:curKey,admin_key:KEY,...curCustomer})});
+    toast('客戶資料已儲存');
+  }catch(e){toast('儲存失敗')}
 }
-function toggleCard(id,cb){
-  const card=document.getElementById('card-'+id);
-  if(card){card.classList.toggle('disabled',!cb.checked);}
+
+async function runAI(){
+  if(!curKey) return;
+  const box = document.getElementById('aiBox');
+  box.textContent = '分析中...';
+  try{
+    const r = await fetch(`/api/messages?key=${curKey}&admin_key=${KEY}`);
+    const d = await r.json();
+    const msgs = (d.messages||[]).slice(-20);
+    const keywords = [];
+    const text = msgs.map(m=>m.content||'').join(' ').toLowerCase();
+    if(text.includes('尺寸')||text.includes('cm')) keywords.push('詢問尺寸');
+    if(text.includes('價格')||text.includes('多少錢')||text.includes('報價')) keywords.push('詢問價格');
+    if(text.includes('材質')||text.includes('木')||text.includes('鋼')) keywords.push('詢問材質');
+    if(text.includes('安裝')||text.includes('組裝')) keywords.push('詢問安裝');
+    if(text.includes('訂')||text.includes('購買')||text.includes('下訂')) keywords.push('有購買意向');
+    if(text.includes('比較')||text.includes('其他家')) keywords.push('正在比較');
+    if(text.includes('考慮')||text.includes('想想')) keywords.push('猶豫中');
+    const summary = keywords.length
+      ? `關鍵意圖：${keywords.join('、')}
+對話共 ${msgs.length} 則，客戶${keywords.includes('有購買意向')?'購買意向明確':'尚在評估中'}。`
+      : `對話共 ${msgs.length} 則，尚未偵測到明確購買信號。`;
+    box.textContent = summary;
+  }catch(e){box.textContent='分析失敗，請稍後再試'}
 }
+
+function toast(msg){
+  const el = document.getElementById('toast');
+  el.textContent = msg;
+  el.classList.add('show');
+  setTimeout(()=>el.classList.remove('show'),2500);
+}
+
+function escHtml(s){
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+function escAttr(s){
+  return String(s).replace(/"/g,'&quot;').replace(/'/g,'&#39;');
+}
+
+init();
 </script>
 </body></html>"""
-
-FB_POSTS_HTML = """<!DOCTYPE html>
-<html lang="zh-TW"><head><meta charset="UTF-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<title>FB 貼文指定回覆</title>
-<style>
-*{box-sizing:border-box;margin:0;padding:0}
-body{font-family:-apple-system,sans-serif;background:#f5f5f5;color:#333;font-size:15px}
-.header{background:#1a1a1a;color:#fff;padding:13px 18px;display:flex;align-items:center;gap:12px}
-.back{color:#aaa;text-decoration:none;font-size:20px}
-.header h1{font-size:16px;font-weight:700}
-.container{max-width:700px;margin:20px auto;padding:0 14px 100px}
-.card{background:#fff;border-radius:12px;padding:16px;margin-bottom:12px;box-shadow:0 1px 4px rgba(0,0,0,.07)}
-.card-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:12px}
-.card-title{font-size:14px;font-weight:700}
-.badge{font-size:11px;color:#999;background:#f0f0f0;padding:2px 8px;border-radius:8px;font-family:monospace}
-label{font-size:12px;color:#888;display:block;margin-bottom:4px;margin-top:10px}
-textarea,input[type=text]{width:100%;border:1px solid #e0e0e0;border-radius:8px;padding:9px 11px;font-size:14px;font-family:inherit}
-textarea{min-height:80px;resize:vertical;line-height:1.7}
-textarea:focus,input[type=text]:focus{outline:none;border-color:#e91e63}
-.hint{font-size:12px;color:#bbb;margin-top:4px}
-.del-btn{border:none;background:none;color:#e57373;cursor:pointer;font-size:12px;padding:4px 8px;border-radius:6px}
-.del-btn:hover{background:#fdecea}
-.add-card{border:2px dashed #e0e0e0;border-radius:12px;padding:18px;margin-bottom:12px}
-.add-card:hover{border-color:#e91e63}
-.add-title{font-size:14px;font-weight:700;color:#888;margin-bottom:12px}
-.btn-row{position:fixed;bottom:0;left:0;right:0;background:#fff;border-top:1px solid #eee;padding:10px 14px;display:flex;gap:10px;justify-content:center;z-index:100}
-.btn{padding:10px 22px;border:none;border-radius:8px;font-size:14px;font-weight:600;cursor:pointer}
-.btn-save{background:#e91e63;color:#fff}
-.btn-add{width:100%;padding:11px;background:#e91e63;color:#fff;border:none;border-radius:8px;font-size:14px;font-weight:600;cursor:pointer;margin-top:8px}
-.flash{padding:10px 16px;border-radius:8px;margin-bottom:12px;font-size:14px}
-.ok{background:#e8f5e9;color:#2e7d32}
-.err{background:#fdecea;color:#c62828}
-.toggle{position:relative;width:40px;height:22px}
-.toggle input{opacity:0;width:0;height:0;position:absolute}
-.t-slider{position:absolute;inset:0;border-radius:22px;background:#ccc;cursor:pointer;transition:.25s}
-.t-slider:before{content:"";position:absolute;width:16px;height:16px;left:3px;bottom:3px;background:#fff;border-radius:50%;transition:.25s}
-.toggle input:checked+.t-slider{background:#e91e63}
-.toggle input:checked+.t-slider:before{transform:translateX(18px)}
-.row{display:flex;align-items:center;gap:8px}
-</style></head>
-<body>
-<div class="header">
-  <a class="back" href="/admin?key={{ key }}">‹</a>
-  <h1>📌 FB 貼文指定回覆</h1>
-</div>
-<div class="container">
-  {% if flash %}<div class="flash ok">{{ flash }}</div>{% endif %}
-
-  {% for pid, cfg in posts.items() %}
-  <form method="POST" action="/admin/fb-posts/save?key={{ key }}">
-    <input type="hidden" name="post_id" value="{{ pid }}">
-    <div class="card">
-      <div class="card-head">
-        <div>
-          <div class="card-title">貼文 ID</div>
-          <span class="badge">{{ pid }}</span>
-        </div>
-        <div class="row">
-          <label class="toggle" style="margin:0">
-            <input type="checkbox" name="enabled" {{ 'checked' if cfg.enabled }}>
-            <span class="t-slider"></span>
-          </label>
-          <button type="button" class="del-btn" onclick="delPost('{{ pid }}')">✕ 刪除</button>
-        </div>
-      </div>
-      <label>公開回覆內容（所有人看得到）</label>
-      <textarea name="reply">{{ cfg.reply }}</textarea>
-      <label>圖片網址（選填，公開回覆和私訊都會附上）</label>
-      <input type="text" name="image_url" value="{{ cfg.image_url }}" placeholder="https://...">
-      <div class="hint">貼文網址範例：facebook.com/逸雅傢俱/posts/<b>貼文ID</b></div>
-      <button type="submit" class="btn btn-add" style="margin-top:12px">💾 儲存此貼文</button>
-    </div>
-  </form>
-  {% else %}
-  <div style="text-align:center;color:#bbb;padding:40px;font-size:14px">尚未設定任何貼文，新增後即可指定回覆</div>
-  {% endfor %}
-
-  <!-- 新增貼文 -->
-  <form method="POST" action="/admin/fb-posts/add?key={{ key }}">
-    <div class="add-card">
-      <div class="add-title">➕ 新增貼文指定回覆</div>
-      <label>貼文 ID（從貼文網址最後一串數字）</label>
-      <input type="text" name="post_id" placeholder="例如：1234567890123456" required>
-      <label>公開回覆內容</label>
-      <textarea name="reply" placeholder="有人留言此貼文時自動回覆..." required></textarea>
-      <label>圖片網址（選填）</label>
-      <input type="text" name="image_url" placeholder="https://...">
-      <button type="submit" class="btn-add">新增</button>
-    </div>
-  </form>
-</div>
-<form id="del-form" method="POST" action="/admin/fb-posts/del?key={{ key }}">
-  <input type="hidden" name="post_id" id="del-pid">
-</form>
-<script>
-function delPost(pid){
-  if(!confirm('確定刪除此貼文設定？'))return;
-  document.getElementById('del-pid').value=pid;
-  document.getElementById('del-form').submit();
-}
-</script>
-</body></html>"""
-
 LOGIN_HTML = """<!DOCTYPE html>
 <html lang="zh-TW"><head><meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
@@ -1870,6 +1557,64 @@ def build_knowledge_base_py() -> str:
 
 # ── 收件匣 ───────────────────────────────────────────────
 
+@app.route("/api/status", methods=["POST"])
+def api_status():
+    ok, _ = auth_required()
+    if not ok:
+        return jsonify({"error": "unauthorized"}), 403
+    data = request.get_json(silent=True) or {}
+    platform = data.get("platform","").upper()
+    user_id = data.get("user_id","")
+    status = data.get("status","bot")
+    if not user_id or status not in STATUS_OPTIONS:
+        return jsonify({"error": "invalid"}), 400
+    key = f"{platform}:{user_id}"
+    _db.set_status(key, status)
+    if status == "human":
+        manual_takeover.add(key)
+    else:
+        manual_takeover.discard(key)
+    return jsonify({"ok": True, "status": status})
+
+@app.route("/api/customer", methods=["GET","POST"])
+def api_customer():
+    ok, _ = auth_required()
+    if not ok:
+        return jsonify({"error": "unauthorized"}), 403
+    platform = request.args.get("platform","").upper() or (request.get_json(silent=True) or {}).get("platform","").upper()
+    user_id = request.args.get("user_id","") or (request.get_json(silent=True) or {}).get("user_id","")
+    if not user_id:
+        return jsonify({"error": "missing user_id"}), 400
+    key = f"{platform}:{user_id}"
+    if request.method == "GET":
+        return jsonify(_db.get_customer(key))
+    data = request.get_json(silent=True) or {}
+    _db.save_customer(key, platform, user_id, data)
+    return jsonify({"ok": True})
+
+@app.route("/api/tag", methods=["POST"])
+def api_tag():
+    ok, _ = auth_required()
+    if not ok:
+        return jsonify({"error": "unauthorized"}), 403
+    data = request.get_json(silent=True) or {}
+    platform = data.get("platform","").upper()
+    user_id = data.get("user_id","")
+    tags = data.get("tags", [])
+    if not user_id:
+        return jsonify({"error": "missing user_id"}), 400
+    key = f"{platform}:{user_id}"
+    conv_tags[key] = tags
+    _save_tags()
+    return jsonify({"ok": True})
+
+@app.route("/api/templates", methods=["GET"])
+def api_templates():
+    ok, _ = auth_required()
+    if not ok:
+        return jsonify({"error": "unauthorized"}), 403
+    return jsonify(list(quick_reply_templates))
+
 @app.route("/admin/inbox")
 def admin_inbox():
     ok, key = check_auth()
@@ -1897,6 +1642,7 @@ def api_conversations():
             convs[key] = {"platform": pf, "user_id": uid, "messages": [],
                           "last_time": l.get("time",""), "last_msg": l.get("msg",""),
                           "manual": key in manual_takeover,
+                          "status": _db.get_status(key),
                           "name": profile.get("name",""),
                           "avatar": profile.get("avatar",""),
                           "note": user_notes.get(key,""),
