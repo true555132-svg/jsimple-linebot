@@ -353,12 +353,41 @@ def fb_webhook():
             for event in entry.get("messaging", []):
                 sid = event.get("sender", {}).get("id", "")
                 msg = event.get("message", {})
-                if sid and "text" in msg:
-                    text, image_url = get_reply(msg["text"].strip(), sid, "fb")
+                if not sid or not msg:
+                    continue
+                # 忽略 bot 自己發出的 echo
+                if event.get("message", {}).get("is_echo"):
+                    continue
+                now = time.strftime("%Y/%m/%d %H:%M:%S", time.gmtime(time.time() + 8*3600))
+                if "text" in msg:
+                    text, reply_img = get_reply(msg["text"].strip(), sid, "fb")
                     if text:
                         fb_send(sid, text)
-                    if image_url:
-                        fb_send_image(sid, image_url)
+                    if reply_img:
+                        fb_send_image(sid, reply_img)
+                else:
+                    # 圖片/貼圖/其他附件 - 只記錄不回覆
+                    attachments = msg.get("attachments", [])
+                    img_url = ""
+                    msg_type = "[附件]"
+                    if attachments:
+                        att = attachments[0]
+                        att_type = att.get("type", "")
+                        payload = att.get("payload", {})
+                        if att_type == "image":
+                            img_url = payload.get("url", "")
+                            msg_type = "[圖片]"
+                        elif att_type == "video":
+                            img_url = payload.get("url", "")
+                            msg_type = "[影片]"
+                        elif att_type == "audio":
+                            msg_type = "[語音]"
+                        elif att_type == "sticker":
+                            img_url = payload.get("url", "")
+                            msg_type = "[貼圖]"
+                    log_message({"time": now, "platform": "FB", "user_id": sid,
+                                 "msg": msg_type, "intent": "media", "reply": "", "replied": False,
+                                 "image_url": img_url})
             # 貼文留言
             for change in entry.get("changes", []):
                 if change.get("field") == "feed":
@@ -2112,6 +2141,29 @@ def api_seen():
     key = f"{platform}:{user_id}"
     last_seen[key] = time.time()
     return jsonify({"ok": True})
+
+@app.route("/api/fb-diag")
+def api_fb_diag():
+    ok, _ = auth_required()
+    if not ok:
+        return jsonify({"error": "unauthorized"}), 403
+    result = {"token_set": bool(FB_PAGE_ACCESS_TOKEN), "webhook_url": "/fb-webhook"}
+    # 測試 token 是否有效
+    try:
+        url = f"https://graph.facebook.com/v22.0/me?access_token={FB_PAGE_ACCESS_TOKEN}"
+        with urllib.request.urlopen(url, timeout=5) as r:
+            d = json.loads(r.read())
+            result["page_name"] = d.get("name", "")
+            result["page_id"] = d.get("id", "")
+            result["token_ok"] = True
+    except Exception as e:
+        result["token_ok"] = False
+        result["token_error"] = str(e)
+    # 最近 FB 訊息數
+    fb_msgs = [l for l in message_log if l.get("platform") == "FB"]
+    result["fb_messages_in_log"] = len(fb_msgs)
+    result["latest_fb"] = fb_msgs[0] if fb_msgs else None
+    return jsonify(result)
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
