@@ -29,6 +29,7 @@ from knowledge_base import (
 )
 
 app = Flask(__name__)
+app.config['MAX_CONTENT_LENGTH'] = 50 * 1024 * 1024  # 50MB
 
 LINE_CHANNEL_SECRET       = os.getenv("LINE_CHANNEL_SECRET", "ed4319138fed1c6db548b60327e2d69d")
 LINE_CHANNEL_ACCESS_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN", "S/R1BB9ByxtJ5CXr4kbbj51Xkz7S9kfxYIjzYsqDvjzAYHXLc6aOJQq6eDO5j7Me3SVGrkkpPeX0OH5tUHYnjGyO/S4WDRYlOWoIPIJplSUUCNX0FmeCnPhizFaUSnPNIw2uyvV016cyuO1jtO5dZQdB04t89/1O/w1cDnyilFU=")
@@ -431,6 +432,19 @@ def fb_send(psid: str, text: str):
     except Exception:
         pass
 
+def fb_send_video(psid: str, video_url: str):
+    if not FB_PAGE_ACCESS_TOKEN:
+        return
+    url = f"https://graph.facebook.com/v22.0/me/messages?access_token={FB_PAGE_ACCESS_TOKEN}"
+    payload = json.dumps({"recipient": {"id": psid}, "message": {
+        "attachment": {"type": "video", "payload": {"url": video_url, "is_reusable": True}}
+    }}).encode()
+    req = urllib.request.Request(url, data=payload, headers={"Content-Type": "application/json"})
+    try:
+        urllib.request.urlopen(req)
+    except Exception:
+        pass
+
 def fb_send_image(psid: str, image_url: str):
     if not FB_PAGE_ACCESS_TOKEN:
         return
@@ -474,6 +488,17 @@ def line_push(user_id: str, text: str):
         "Content-Type": "application/json",
         "Authorization": f"Bearer {LINE_CHANNEL_ACCESS_TOKEN}"
     })
+    try:
+        urllib.request.urlopen(req)
+    except Exception:
+        pass
+
+def line_push_video(user_id: str, video_url: str, preview_url: str):
+    url = "https://api.line.me/v2/bot/message/push"
+    payload = json.dumps({"to": user_id, "messages": [{"type": "video",
+        "originalContentUrl": video_url, "previewImageUrl": preview_url}]}).encode()
+    req = urllib.request.Request(url, data=payload, headers={
+        "Content-Type": "application/json", "Authorization": f"Bearer {LINE_CHANNEL_ACCESS_TOKEN}"})
     try:
         urllib.request.urlopen(req)
     except Exception:
@@ -845,9 +870,9 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
   </div>
   <div class="input-area">
     <button class="btn-icon" onclick="toggleTpl()" title="快速回覆">&#9889;</button>
-    <label class="btn-icon" title="傳送圖片" style="cursor:pointer">
+    <label class="btn-icon" title="傳送圖片/影片" style="cursor:pointer">
       &#128247;
-      <input type="file" id="imgInput" accept="image/*" style="display:none" onchange="uploadImg(this)">
+      <input type="file" id="imgInput" accept="image/*,video/*" style="display:none" onchange="uploadImg(this)">
     </label>
     <textarea id="replyInput" placeholder="輸入訊息..." rows="1"
       oninput="autoResize(this)"
@@ -1016,8 +1041,11 @@ function renderMsgs(msgs){
     const isMe = m.role==='admin';
     const time = m.ts ? new Date(m.ts*1000).toLocaleTimeString('zh-TW',{hour:'2-digit',minute:'2-digit'}) : '';
     let content = '';
-    if(m.image_url) content = `<img class="msg-img" src="${m.image_url}" onclick="window.open(this.src)">`;
-    else if(m.sticker_url) content = `<img class="msg-sticker" src="${m.sticker_url}">`;
+    if(m.image_url){
+      const isVid=/\.(mp4|mov|avi|webm|m4v)(\?|$)/i.test(m.image_url);
+      if(isVid) content=`<video src="${m.image_url}" controls style="max-width:220px;border-radius:12px;display:block"></video>`;
+      else content=`<img class="msg-img" src="${m.image_url}" onclick="window.open(this.src)">`;
+    } else if(m.sticker_url) content = `<img class="msg-sticker" src="${m.sticker_url}">`;
     else content = escHtml(m.content||'');
     return `<div class="msg-row ${isMe?'me':'them'}">
       <div class="msg-bubble">${content}</div>
@@ -1074,25 +1102,61 @@ async function sendReply(){
   }catch(e){toast('發送失敗')}
 }
 
+async function generateVideoThumb(file){
+  return new Promise(res=>{
+    const vid=document.createElement('video');
+    const burl=URL.createObjectURL(file);
+    vid.preload='metadata'; vid.src=burl; vid.muted=true;
+    vid.onloadeddata=()=>{ vid.currentTime=0.5; };
+    vid.onseeked=()=>{
+      const c=document.createElement('canvas');
+      c.width=vid.videoWidth||640; c.height=vid.videoHeight||360;
+      c.getContext('2d').drawImage(vid,0,0);
+      c.toBlob(b=>{
+        if(!b){ URL.revokeObjectURL(burl); res(null); return; }
+        const r=new FileReader();
+        r.onload=e=>{ URL.revokeObjectURL(burl); res(e.target.result.split(',')[1]); };
+        r.readAsDataURL(b);
+      },'image/jpeg',0.8);
+    };
+    vid.onerror=()=>{ URL.revokeObjectURL(burl); res(null); };
+  });
+}
+
 async function uploadImg(input){
   if(!input.files[0]||!curKey) return;
-  const file = input.files[0];
-  const reader = new FileReader();
-  reader.onload = async e=>{
-    const b64 = e.target.result.split(',')[1];
+  const file=input.files[0];
+  const isVideo=file.type.startsWith('video/');
+  toast(isVideo?'影片上傳中...':'圖片上傳中...');
+  const reader=new FileReader();
+  reader.onload=async e=>{
+    const b64=e.target.result.split(',')[1];
     try{
-      const up = await fetch('/api/upload_image',{method:'POST',headers:{'Content-Type':'application/json'},
+      const up=await fetch('/api/upload_image',{method:'POST',headers:{'Content-Type':'application/json'},
         body:JSON.stringify({key:curKey,admin_key:KEY,filename:file.name,content:b64})});
-      const ud = await up.json();
-      if(ud.url){
+      const ud=await up.json();
+      if(!ud.url){ toast('上傳失敗：'+(ud.error||'未知錯誤')); return; }
+      if(isVideo){
+        let previewUrl=ud.url;
+        const thumb=await generateVideoThumb(file);
+        if(thumb){
+          const tname='thumb_'+file.name.replace(/\.[^.]+$/,'.jpg');
+          const tu=await fetch('/api/upload_image',{method:'POST',headers:{'Content-Type':'application/json'},
+            body:JSON.stringify({key:curKey,admin_key:KEY,filename:tname,content:thumb})});
+          const td=await tu.json();
+          if(td.url) previewUrl=td.url;
+        }
+        await fetch('/api/reply',{method:'POST',headers:{'Content-Type':'application/json'},
+          body:JSON.stringify({key:curKey,admin_key:KEY,video_url:ud.url,preview_url:previewUrl})});
+      }else{
         await fetch('/api/reply',{method:'POST',headers:{'Content-Type':'application/json'},
           body:JSON.stringify({key:curKey,admin_key:KEY,image_url:ud.url})});
-        await loadMsgs(curKey);
-      }else toast('上傳失敗');
-    }catch(e){toast('上傳失敗')}
+      }
+      await loadMsgs(curKey);
+    }catch(e){ toast('上傳失敗：'+e.message); }
   };
   reader.readAsDataURL(file);
-  input.value = '';
+  input.value='';
 }
 
 // TEMPLATES
@@ -1908,15 +1972,19 @@ def api_reply():
     # support both 'message' and 'text' fields
     text = (data.get("message", "") or data.get("text", "")).strip()
     image_url = data.get("image_url", "").strip()
-    if not user_id or (not text and not image_url):
+    video_url = data.get("video_url", "").strip()
+    preview_url = data.get("preview_url", "").strip()
+    if not user_id or (not text and not image_url and not video_url):
         return jsonify({"error": "missing fields"}), 400
     try:
         if platform == "LINE":
             if text: line_push(user_id, text)
             if image_url: line_push_image(user_id, image_url)
+            if video_url: line_push_video(user_id, video_url, preview_url or video_url)
         elif platform == "FB":
             if text: fb_send(user_id, text)
             if image_url: fb_send_image(user_id, image_url)
+            if video_url: fb_send_video(user_id, video_url)
         else:
             return jsonify({"error": "unsupported platform"}), 400
         now = time.strftime("%Y/%m/%d %H:%M:%S", time.gmtime(time.time() + 8*3600))
@@ -1927,6 +1995,10 @@ def api_reply():
             log_message({"time": now, "platform": platform, "user_id": user_id,
                          "msg": "", "intent": "manual", "reply": "", "replied": True,
                          "image_url": image_url, "sent_by": "admin"})
+        if video_url:
+            log_message({"time": now, "platform": platform, "user_id": user_id,
+                         "msg": "", "intent": "manual", "reply": "", "replied": True,
+                         "image_url": video_url, "sent_by": "admin"})
         return jsonify({"ok": True})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
