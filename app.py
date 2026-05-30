@@ -322,7 +322,7 @@ def handle_line_image(event):
         with urllib.request.urlopen(req, timeout=10) as r:
             data = r.read()
         filename = f"{int(time.time())}_{msg_id}.jpg"
-        image_url = upload_image_to_github(filename, data) or ""
+        image_url, _ = upload_image_to_github(filename, data)
     except Exception:
         pass
     now = time.strftime("%Y/%m/%d %H:%M:%S", time.gmtime(time.time() + 8*3600))
@@ -542,7 +542,11 @@ def line_push_image(user_id: str, image_url: str):
     except Exception:
         pass
 
-def upload_image_to_github(filename: str, data: bytes) -> str:
+def upload_image_to_github(filename: str, data: bytes) -> tuple:
+    """Returns (url, error_msg). url is empty string on failure."""
+    import sys
+    if not GITHUB_TOKEN:
+        return "", "GITHUB_TOKEN 未設定"
     url = f"https://api.github.com/repos/{GITHUB_REPO}/contents/images/{filename}"
     try:
         req = urllib.request.Request(url, headers={
@@ -551,7 +555,7 @@ def upload_image_to_github(filename: str, data: bytes) -> str:
         })
         sha = None
         try:
-            with urllib.request.urlopen(req) as r:
+            with urllib.request.urlopen(req, timeout=15) as r:
                 sha = json.loads(r.read()).get("sha")
         except Exception:
             pass
@@ -563,10 +567,19 @@ def upload_image_to_github(filename: str, data: bytes) -> str:
             "Content-Type": "application/json",
             "Accept": "application/vnd.github.v3+json",
         })
-        urllib.request.urlopen(req2)
-        return f"https://raw.githubusercontent.com/{GITHUB_REPO}/main/images/{filename}"
+        with urllib.request.urlopen(req2, timeout=30) as r:
+            resp = json.loads(r.read())
+        raw_url = f"https://raw.githubusercontent.com/{GITHUB_REPO}/main/images/{filename}"
+        return raw_url, ""
+    except urllib.error.HTTPError as e:
+        body_err = e.read().decode(errors="ignore")
+        msg = f"GitHub HTTP {e.code}: {body_err[:200]}"
+        print(f"[GitHub Upload Error] {msg}", file=sys.stderr)
+        return "", msg
     except Exception as e:
-        return ""
+        msg = str(e)
+        print(f"[GitHub Upload Error] {msg}", file=sys.stderr)
+        return "", msg
 
 # ── API ───────────────────────────────────────────────────
 
@@ -614,9 +627,9 @@ def upload_image(platform):
     import re, time as _time
     safe = re.sub(r"[^a-zA-Z0-9._-]", "_", f.filename)
     filename = f"{int(_time.time())}_{safe}"
-    image_url = upload_image_to_github(filename, f.read())
+    image_url, err = upload_image_to_github(filename, f.read())
     if not image_url:
-        return jsonify({"error": "上傳失敗"}), 500
+        return jsonify({"error": err or "上傳失敗"}), 500
     intent_key = request.form.get("intent_key", "")
     if intent_key:
         platforms[platform]["image_urls"][intent_key] = image_url
@@ -2051,9 +2064,9 @@ def api_upload_image():
         raw = base64.b64decode(content_b64)
     except Exception:
         return jsonify({"error": "invalid base64"}), 400
-    url = upload_image_to_github(fname, raw)
+    url, err = upload_image_to_github(fname, raw)
     if not url:
-        return jsonify({"error": "上傳失敗"}), 500
+        return jsonify({"error": err or "上傳失敗"}), 500
     return jsonify({"url": url})
 
 @app.route("/api/takeover", methods=["POST"])
@@ -2141,6 +2154,36 @@ def api_seen():
     key = f"{platform}:{user_id}"
     last_seen[key] = time.time()
     return jsonify({"ok": True})
+
+@app.route("/api/github-diag")
+def api_github_diag():
+    ok, _ = auth_required()
+    if not ok:
+        return jsonify({"error": "unauthorized"}), 403
+    result = {"token_set": bool(GITHUB_TOKEN), "repo": GITHUB_REPO}
+    if not GITHUB_TOKEN:
+        return jsonify(result)
+    try:
+        # 測試 token 是否有效
+        req = urllib.request.Request(
+            f"https://api.github.com/repos/{GITHUB_REPO}",
+            headers={"Authorization": f"token {GITHUB_TOKEN}", "Accept": "application/vnd.github.v3+json"}
+        )
+        with urllib.request.urlopen(req, timeout=10) as r:
+            d = json.loads(r.read())
+            result["repo_accessible"] = True
+            result["repo_name"] = d.get("full_name", "")
+    except urllib.error.HTTPError as e:
+        result["repo_accessible"] = False
+        result["repo_error"] = f"HTTP {e.code}: {e.read().decode(errors='ignore')[:200]}"
+    except Exception as e:
+        result["repo_accessible"] = False
+        result["repo_error"] = str(e)
+    # 試著上傳一個小測試檔
+    test_url, test_err = upload_image_to_github("diag_test.txt", b"test")
+    result["upload_test_ok"] = bool(test_url)
+    result["upload_test_error"] = test_err
+    return jsonify(result)
 
 @app.route("/api/fb-diag")
 def api_fb_diag():
