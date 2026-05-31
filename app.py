@@ -770,6 +770,9 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
 .tag-pill{padding:1px 6px;border-radius:10px;font-size:9px;font-weight:600;background:#e8f4fd;color:#0d6efd}
 .platform-badge{font-size:9px;padding:1px 5px;border-radius:4px;font-weight:700}
 .pb-line{background:#06C755;color:#fff}.pb-fb{background:#1877F2;color:#fff}
+.unread-badge{background:#e53935;color:#fff;border-radius:10px;padding:1px 6px;font-size:10px;font-weight:700;min-width:18px;text-align:center;display:inline-block;line-height:16px}
+.conv-item.has-unread .conv-name{font-weight:800;color:#0d0d0d}
+.conv-item.has-unread .conv-preview{color:#555;font-weight:500}
 
 /* MIDDLE CHAT */
 .chat-main{display:flex;flex-direction:column;overflow:hidden;background:#f8f9fa}
@@ -1019,18 +1022,21 @@ function renderList(){
   if(!list.length){el.innerHTML='<div style="padding:20px;text-align:center;color:#9aa0a6;font-size:13px">沒有符合的對話</div>';return}
   el.innerHTML = list.map(c=>{
     const s = c.status||'bot';
+    const unread = c.unread||0;
     const tags = (c.tags||[]).slice(0,3).map(t=>`<span class="tag-pill">${t}</span>`).join('');
     const pb = c.platform==='fb'?'<span class="platform-badge pb-fb">FB</span>':'<span class="platform-badge pb-line">LINE</span>';
-    const time = c.last_time ? new Date(c.last_time*1000).toLocaleTimeString('zh-TW',{hour:'2-digit',minute:'2-digit'}) : '';
+    const timeStr = c.last_time ? new Date(c.last_time*1000).toLocaleTimeString('zh-TW',{hour:'2-digit',minute:'2-digit'}) : '';
     const avatarEl = c.user_avatar
       ? `<img class="conv-avatar" src="${c.user_avatar}" onerror="this.style.display='none'">`
-      : `<div class="conv-avatar-placeholder">${c.platform==='fb'?'&#128100;':'&#128100;'}</div>`;
-    return `<div class="conv-item${c.key===curKey?' active':''}" onclick="openConv('${c.key}')">
+      : `<div class="conv-avatar-placeholder">&#128100;</div>`;
+    const unreadBadge = unread>0 ? `<span class="unread-badge">${unread}</span>` : '';
+    const hasUnread = unread>0 ? ' has-unread' : '';
+    return `<div class="conv-item${c.key===curKey?' active':''}${hasUnread}" onclick="openConv('${c.key}')">
       ${avatarEl}
       <div class="conv-info">
         <div class="conv-name-row">
           <span class="conv-name">${escHtml(c.user_name||c.user_id||'未知用戶')}</span>
-          <span class="conv-time">${time}</span>
+          <div style="display:flex;align-items:center;gap:4px;flex-shrink:0">${unreadBadge}<span class="conv-time">${timeStr}</span></div>
         </div>
         <div class="conv-preview">${escHtml((c.last_message||'').slice(0,40))}</div>
         <div class="conv-meta">
@@ -1062,6 +1068,11 @@ async function openConv(key){
   }
   updateHeaderStatus(curStatus);
 
+  // mark as read
+  fetch('/api/seen',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({key:key,admin_key:KEY})});
+  const c2 = allConvs.find(x=>x.key===key);
+  if(c2){ c2.unread=0; renderList(); }
   // load messages
   await loadMsgs(key);
   // load right panel
@@ -1967,7 +1978,7 @@ def api_conversations():
         seen_ts = last_seen.get(key, 0)
         try:
             msg_ts = time.mktime(time.strptime(l.get("time",""), "%Y/%m/%d %H:%M:%S"))
-            if msg_ts > seen_ts and l.get("user_id","") != "ADMIN":
+            if msg_ts > seen_ts and l.get("user_id","") != "ADMIN" and l.get("sent_by","") != "admin":
                 convs[key]["unread"] += 1
         except Exception:
             pass
@@ -2149,10 +2160,13 @@ def api_seen():
     if not ok:
         return jsonify({"error": "unauthorized"}), 403
     data = request.get_json(silent=True) or {}
-    platform = data.get("platform", "").upper()
-    user_id = data.get("user_id", "")
-    key = f"{platform}:{user_id}"
-    last_seen[key] = time.time()
+    key = data.get("key", "")
+    if not key:
+        platform = data.get("platform", "").upper()
+        user_id = data.get("user_id", "")
+        key = f"{platform}:{user_id}"
+    if key:
+        last_seen[key] = time.time()
     return jsonify({"ok": True})
 
 @app.route("/api/github-diag")
