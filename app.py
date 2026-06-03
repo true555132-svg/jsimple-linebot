@@ -83,6 +83,15 @@ def _init_messages_db():
             """)
             cur.execute("CREATE INDEX IF NOT EXISTS idx_msg_pf_uid ON messages(platform, user_id)")
             cur.execute("CREATE INDEX IF NOT EXISTS idx_msg_time   ON messages(time)")
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS templates (
+                    id         TEXT PRIMARY KEY,
+                    category   TEXT NOT NULL,
+                    text       TEXT DEFAULT '',
+                    image_url  TEXT DEFAULT '',
+                    sort_order INTEGER DEFAULT 0
+                )
+            """)
             conn.commit()
             cur.close()
             conn.close()
@@ -90,6 +99,39 @@ def _init_messages_db():
         import sys; print(f"[DB Init Error] {e}", file=sys.stderr)
 
 _init_messages_db()
+
+_DEFAULT_TEMPLATES = [
+    ("打招呼","你好，我是JSIMPLE高架床專員，請問有什麼可以幫您？",""),
+    ("打招呼","感謝您的詢問，請問您的需求是？",""),
+    ("報價","我們的高架床系列售價從NT$7,000起，依尺寸和材質不同，我幫您報正確的價格。",""),
+    ("報價","請問需要的尺寸是單人(90cm)、標準(120cm)還是雙人(150cm)？",""),
+    ("尺寸","標準房間建議90x190或120x190，需要我幫您確認空間適合哪種嗎？",""),
+    ("交期","現貨商品約2-5個工作天可出貨，訂製款需要4-6週。",""),
+    ("跟進","您好，上次有詢問高架床，請問有決定了嗎？有任何問題都可以告訴我。",""),
+    ("成交","感謝您的訂購，我馬上幫您安排出貨，請確認收件地址是否正確。",""),
+]
+
+def _seed_templates():
+    if not DATABASE_URL:
+        return
+    try:
+        import uuid as _uuid
+        conn = _pg_conn()
+        cur = conn.cursor()
+        cur.execute("SELECT COUNT(*) FROM templates")
+        if cur.fetchone()[0] == 0:
+            for i, (cat, txt, img) in enumerate(_DEFAULT_TEMPLATES):
+                cur.execute(
+                    "INSERT INTO templates (id,category,text,image_url,sort_order) VALUES (%s,%s,%s,%s,%s)",
+                    (str(_uuid.uuid4()), cat, txt, img, i)
+                )
+            conn.commit()
+        cur.close()
+        conn.close()
+    except Exception as e:
+        import sys; print(f"[Templates seed] {e}", file=sys.stderr)
+
+threading.Thread(target=_seed_templates, daemon=True).start()
 
 def _db_insert_message(entry):
     if not DATABASE_URL:
@@ -959,17 +1001,43 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
 .msg-avatar{width:28px;height:28px;border-radius:50%;object-fit:cover;background:#e8eaed;flex-shrink:0}
 .sys-msg{text-align:center;font-size:11px;color:#9aa0a6;padding:4px 0}
 
-.tpl-panel{background:#fff;border-top:1px solid #e8eaed;display:none;flex-direction:column;max-height:240px}
+.tpl-panel{background:#fff;border-top:1px solid #e8eaed;display:none;flex-direction:column;max-height:280px}
 .tpl-panel.open{display:flex}
-.tpl-cats{display:flex;gap:4px;padding:8px 12px;overflow-x:auto;border-bottom:1px solid #f0f2f5;flex-shrink:0}
+.tpl-header{display:flex;align-items:center;justify-content:space-between;padding:6px 12px;border-bottom:1px solid #f0f2f5;flex-shrink:0}
+.tpl-header-title{font-size:11px;font-weight:700;color:#555}
+.tpl-header-btns{display:flex;gap:6px}
+.tpl-hbtn{font-size:10px;padding:2px 8px;border-radius:10px;border:1.5px solid #ddd;background:#fff;cursor:pointer;color:#555}
+.tpl-hbtn:hover{border-color:#0d6efd;color:#0d6efd}
+.tpl-hbtn.active{background:#0d6efd;border-color:#0d6efd;color:#fff}
+.tpl-cats{display:flex;gap:4px;padding:6px 12px;overflow-x:auto;border-bottom:1px solid #f0f2f5;flex-shrink:0}
 .tpl-cats::-webkit-scrollbar{height:3px}
 .tpl-cats::-webkit-scrollbar-thumb{background:#ddd}
 .tcat{padding:3px 10px;border-radius:12px;font-size:11px;cursor:pointer;border:1.5px solid #ddd;color:#555;white-space:nowrap}
 .tcat.active{background:#0d6efd;border-color:#0d6efd;color:#fff}
 .tpl-list{overflow-y:auto;flex:1}
-.tpl-item{padding:8px 14px;cursor:pointer;border-bottom:1px solid #f5f6f8;font-size:12px;line-height:1.5;color:#333}
+.tpl-item{padding:7px 14px;cursor:pointer;border-bottom:1px solid #f5f6f8;font-size:12px;line-height:1.5;color:#333;display:flex;align-items:center;gap:6px}
 .tpl-item:hover{background:#f0f8ff}
-.tpl-item strong{display:block;font-size:10px;color:#9aa0a6;margin-bottom:2px}
+.tpl-item-body{flex:1;min-width:0}
+.tpl-item-cat{font-size:10px;color:#9aa0a6;margin-bottom:1px}
+.tpl-item-text{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.tpl-item-img{width:28px;height:28px;border-radius:4px;object-fit:cover;flex-shrink:0}
+.tpl-item-actions{display:none;gap:4px;flex-shrink:0}
+.tpl-edit-mode .tpl-item-actions{display:flex}
+.tpl-act{font-size:11px;padding:2px 6px;border-radius:6px;border:1px solid #ddd;background:#fff;cursor:pointer}
+.tpl-act:hover{background:#f0f8ff}
+.tpl-modal-overlay{display:none;position:fixed;inset:0;background:rgba(0,0,0,.4);z-index:9999;align-items:center;justify-content:center}
+.tpl-modal-overlay.open{display:flex}
+.tpl-modal{background:#fff;border-radius:12px;padding:20px;width:360px;max-width:95vw;box-shadow:0 8px 32px rgba(0,0,0,.18)}
+.tpl-modal h3{font-size:14px;font-weight:700;margin-bottom:14px}
+.tpl-form-row{margin-bottom:10px}
+.tpl-form-row label{display:block;font-size:11px;color:#555;margin-bottom:3px;font-weight:600}
+.tpl-form-row input,.tpl-form-row textarea,.tpl-form-row select{width:100%;padding:6px 8px;border:1.5px solid #ddd;border-radius:6px;font-size:12px;outline:none;box-sizing:border-box}
+.tpl-form-row input:focus,.tpl-form-row textarea:focus{border-color:#0d6efd}
+.tpl-form-row textarea{resize:vertical;min-height:70px}
+.tpl-img-preview{width:60px;height:60px;border-radius:6px;object-fit:cover;margin-top:6px;display:block}
+.tpl-modal-footer{display:flex;gap:8px;justify-content:flex-end;margin-top:14px}
+.tpl-btn-save{padding:6px 16px;background:#0d6efd;color:#fff;border:none;border-radius:8px;font-size:12px;cursor:pointer;font-weight:600}
+.tpl-btn-cancel{padding:6px 16px;background:#f0f2f5;color:#555;border:none;border-radius:8px;font-size:12px;cursor:pointer}
 
 .input-area{background:#fff;border-top:1px solid #e8eaed;padding:10px 12px;display:flex;gap:8px;align-items:flex-end;flex-shrink:0}
 .input-area textarea{flex:1;border:1.5px solid #e8eaed;border-radius:12px;padding:8px 12px;font-size:13px;resize:none;outline:none;font-family:inherit;line-height:1.5;max-height:120px}
@@ -1079,8 +1147,42 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
     </div>
   </div>
   <div class="tpl-panel" id="tplPanel">
+    <div class="tpl-header">
+      <span class="tpl-header-title">⚡ 快速回覆</span>
+      <div class="tpl-header-btns">
+        <button class="tpl-hbtn" onclick="openTplModal(null)">＋ 新增</button>
+        <button class="tpl-hbtn" id="tplEditBtn" onclick="toggleTplEditMode()">✏️ 管理</button>
+      </div>
+    </div>
     <div class="tpl-cats" id="tplCats"></div>
     <div class="tpl-list" id="tplList"></div>
+  </div>
+  <div class="tpl-modal-overlay" id="tplModal">
+    <div class="tpl-modal">
+      <h3 id="tplModalTitle">新增快捷模板</h3>
+      <div class="tpl-form-row">
+        <label>分類名稱</label>
+        <input id="tplFormCat" placeholder="例：報價、跟進、成交" list="tplCatList">
+        <datalist id="tplCatList"></datalist>
+      </div>
+      <div class="tpl-form-row">
+        <label>回覆文字（可空白）</label>
+        <textarea id="tplFormText" placeholder="輸入要發送的文字..."></textarea>
+      </div>
+      <div class="tpl-form-row">
+        <label>附加圖片（可選）</label>
+        <div style="display:flex;gap:8px;align-items:center">
+          <button class="tpl-hbtn" onclick="pickTplImage()" style="flex-shrink:0">從圖庫選</button>
+          <button class="tpl-hbtn" onclick="clearTplImage()" id="tplImgClearBtn" style="display:none">清除圖片</button>
+        </div>
+        <img id="tplFormImgPreview" class="tpl-img-preview" style="display:none">
+        <input type="hidden" id="tplFormImgUrl">
+      </div>
+      <div class="tpl-modal-footer">
+        <button class="tpl-btn-cancel" onclick="closeTplModal()">取消</button>
+        <button class="tpl-btn-save" onclick="saveTpl()">儲存</button>
+      </div>
+    </div>
   </div>
   <div class="img-lib-panel" id="imgLibPanel">
     <div class="img-lib-grid" id="imgLibGrid"></div>
@@ -1133,7 +1235,6 @@ let curTags = [], curCustomer = {}, noteTimer = null;
 // INIT
 async function init(){
   buildTagFilter();
-  buildTplCats();
   await loadConvs();
   setInterval(loadConvs, 8000);
 }
@@ -1410,32 +1511,173 @@ async function uploadImg(input){
   input.value='';
 }
 
-// TEMPLATES
-function buildTplCats(){
-  const cats = Object.keys(TPL_DATA);
-  document.getElementById('tplCats').innerHTML = cats.map((c,i)=>
-    `<div class="tcat${i===0?' active':''}" onclick="selectCat('${c}',this)">${c}</div>`
-  ).join('');
-  showTplCat(cats[0]);
+// ── 快捷模板 ──────────────────────────────────────────────
+let allTpls = [], curTplCat = '', tplEditMode = false, tplEditId = null, imgLibForTpl = false;
+
+async function loadTemplates(){
+  try{
+    const r = await fetch(`/api/templates?key=${KEY}`);
+    allTpls = await r.json();
+  }catch(e){ allTpls = []; }
 }
 
-function selectCat(cat, el){
+function getTplCats(){
+  return [...new Set(allTpls.map(t=>t.category))];
+}
+
+function buildTplCats(){
+  loadTemplates().then(()=>{
+    const cats = getTplCats();
+    if(!curTplCat || !cats.includes(curTplCat)) curTplCat = cats[0]||'';
+    renderTplCats();
+    renderTplList();
+    // datalist for modal
+    document.getElementById('tplCatList').innerHTML = cats.map(c=>`<option value="${escHtml(c)}">`).join('');
+  });
+}
+
+function renderTplCats(){
+  const cats = getTplCats();
+  document.getElementById('tplCats').innerHTML = cats.map(c=>
+    `<div class="tcat${c===curTplCat?' active':''}" onclick="selectTplCat('${escAttr(c)}',this)">${escHtml(c)}</div>`
+  ).join('');
+}
+
+function selectTplCat(cat, el){
+  curTplCat = cat;
   document.querySelectorAll('.tcat').forEach(e=>e.classList.remove('active'));
   el.classList.add('active');
-  showTplCat(cat);
+  renderTplList();
 }
 
-function showTplCat(cat){
-  const items = TPL_DATA[cat]||[];
-  document.getElementById('tplList').innerHTML = items.map(t=>
-    `<div class="tpl-item" onclick="useTpl(this.dataset.t)" data-t="${escAttr(t)}"><strong>${cat}</strong>${escHtml(t)}</div>`
-  ).join('');
+function renderTplList(){
+  const items = allTpls.filter(t=>t.category===curTplCat);
+  const panel = document.getElementById('tplPanel');
+  document.getElementById('tplList').innerHTML = items.length ? items.map(t=>{
+    const imgEl = t.image_url ? `<img class="tpl-item-img" src="${t.image_url}">` : '';
+    const combo = t.image_url ? ' 🖼️' : '';
+    return `<div class="tpl-item" onclick="useTpl('${t.id}')">
+      <div class="tpl-item-body">
+        <div class="tpl-item-cat">${escHtml(t.category)}${combo}</div>
+        <div class="tpl-item-text">${escHtml(t.text||'（僅圖片）')}</div>
+      </div>
+      ${imgEl}
+      <div class="tpl-item-actions">
+        <button class="tpl-act" onclick="event.stopPropagation();openTplModal('${t.id}')">✏️</button>
+        <button class="tpl-act" onclick="event.stopPropagation();deleteTpl('${t.id}')" style="color:#dc3545">🗑️</button>
+      </div>
+    </div>`;
+  }).join('') : '<div style="padding:16px;text-align:center;color:#9aa0a6;font-size:12px">這個分類沒有模板，點「新增」加入</div>';
+}
+
+function toggleTplEditMode(){
+  tplEditMode = !tplEditMode;
+  document.getElementById('tplPanel').classList.toggle('tpl-edit-mode', tplEditMode);
+  document.getElementById('tplEditBtn').classList.toggle('active', tplEditMode);
+  renderTplList();
 }
 
 function toggleTpl(){
   const p = document.getElementById('tplPanel');
+  const isOpen = p.classList.contains('open');
   p.classList.toggle('open');
   document.getElementById('imgLibPanel').classList.remove('open');
+  if(!isOpen) buildTplCats();
+}
+
+async function useTpl(id){
+  const tpl = allTpls.find(t=>t.id===id);
+  if(!tpl) return;
+  document.getElementById('tplPanel').classList.remove('open');
+  if(tpl.image_url && tpl.text){
+    if(!curKey){ toast('請先選擇對話'); return; }
+    toast('傳送中...');
+    await fetch('/api/reply',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({key:curKey,admin_key:KEY,image_url:tpl.image_url})});
+    await new Promise(r=>setTimeout(r,600));
+    await fetch('/api/reply',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({key:curKey,admin_key:KEY,text:tpl.text})});
+    await loadMsgs(curKey);
+  } else if(tpl.image_url){
+    if(!curKey){ toast('請先選擇對話'); return; }
+    await fetch('/api/reply',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({key:curKey,admin_key:KEY,image_url:tpl.image_url})});
+    await loadMsgs(curKey);
+  } else {
+    const inp = document.getElementById('replyInput');
+    inp.value = tpl.text;
+    autoResize(inp);
+    inp.focus();
+  }
+}
+
+function openTplModal(id){
+  tplEditId = id;
+  const tpl = id ? allTpls.find(t=>t.id===id) : null;
+  document.getElementById('tplModalTitle').textContent = id ? '編輯快捷模板' : '新增快捷模板';
+  document.getElementById('tplFormCat').value = tpl ? tpl.category : (curTplCat||'');
+  document.getElementById('tplFormText').value = tpl ? tpl.text : '';
+  const imgUrl = tpl ? (tpl.image_url||'') : '';
+  document.getElementById('tplFormImgUrl').value = imgUrl;
+  const preview = document.getElementById('tplFormImgPreview');
+  const clearBtn = document.getElementById('tplImgClearBtn');
+  if(imgUrl){ preview.src=imgUrl; preview.style.display='block'; clearBtn.style.display=''; }
+  else { preview.style.display='none'; clearBtn.style.display='none'; }
+  // refresh datalist
+  const cats = getTplCats();
+  document.getElementById('tplCatList').innerHTML = cats.map(c=>`<option value="${escHtml(c)}">`).join('');
+  document.getElementById('tplModal').classList.add('open');
+}
+
+function closeTplModal(){
+  document.getElementById('tplModal').classList.remove('open');
+  tplEditId = null;
+}
+
+function clearTplImage(){
+  document.getElementById('tplFormImgUrl').value = '';
+  document.getElementById('tplFormImgPreview').style.display='none';
+  document.getElementById('tplImgClearBtn').style.display='none';
+}
+
+function pickTplImage(){
+  imgLibForTpl = true;
+  document.getElementById('tplModal').classList.remove('open');
+  document.getElementById('imgLibPanel').classList.add('open');
+  loadQuickImages();
+}
+
+async function saveTpl(){
+  const cat = document.getElementById('tplFormCat').value.trim();
+  const text = document.getElementById('tplFormText').value.trim();
+  const image_url = document.getElementById('tplFormImgUrl').value.trim();
+  if(!cat){ toast('請填寫分類名稱'); return; }
+  if(!text && !image_url){ toast('文字或圖片至少填一個'); return; }
+  const body = {admin_key:KEY, category:cat, text, image_url};
+  const url = tplEditId ? `/api/templates/${tplEditId}` : '/api/templates';
+  const method = tplEditId ? 'PUT' : 'POST';
+  try{
+    const r = await fetch(url,{method,headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+    const d = await r.json();
+    if(d.ok||d.id){ toast(tplEditId?'已更新':'已新增'); closeTplModal(); await reloadTpls(); }
+    else toast('儲存失敗：'+(d.error||''));
+  }catch(e){ toast('儲存失敗：'+e.message); }
+}
+
+async function deleteTpl(id){
+  if(!confirm('確定刪除這個模板？')) return;
+  try{
+    await fetch(`/api/templates/${id}`,{method:'DELETE',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({admin_key:KEY})});
+    await reloadTpls();
+  }catch(e){ toast('刪除失敗'); }
+}
+
+async function reloadTpls(){
+  await loadTemplates();
+  if(!getTplCats().includes(curTplCat)) curTplCat = getTplCats()[0]||'';
+  renderTplCats();
+  renderTplList();
 }
 
 // ── 快速圖庫 ──────────────────────────────────────────────
@@ -1469,8 +1711,17 @@ function renderImgLib(){
 }
 
 async function sendQuickImg(url){
-  if(!curKey){ toast('請先選擇對話'); return; }
   document.getElementById('imgLibPanel').classList.remove('open');
+  if(imgLibForTpl){
+    imgLibForTpl = false;
+    document.getElementById('tplFormImgUrl').value = url;
+    const preview = document.getElementById('tplFormImgPreview');
+    preview.src = url; preview.style.display='block';
+    document.getElementById('tplImgClearBtn').style.display='';
+    document.getElementById('tplModal').classList.add('open');
+    return;
+  }
+  if(!curKey){ toast('請先選擇對話'); return; }
   toast('傳送中...');
   try{
     await fetch('/api/reply',{method:'POST',headers:{'Content-Type':'application/json'},
@@ -2507,6 +2758,73 @@ def api_fb_diag():
     result["fb_messages_in_log"] = len(fb_msgs)
     result["latest_fb"] = fb_msgs[0] if fb_msgs else None
     return jsonify(result)
+
+# ── 快捷模板 CRUD API ─────────────────────────────────────
+
+@app.route("/api/templates", methods=["GET"])
+def api_get_templates():
+    ok, _ = auth_required()
+    if not ok: return jsonify({"error":"unauthorized"}), 403
+    if not DATABASE_URL: return jsonify([])
+    try:
+        conn = _pg_conn(); cur = conn.cursor()
+        cur.execute("SELECT id,category,text,image_url,sort_order FROM templates ORDER BY sort_order,id")
+        rows = cur.fetchall(); cur.close(); conn.close()
+        return jsonify([{"id":r[0],"category":r[1],"text":r[2],"image_url":r[3] or ""} for r in rows])
+    except Exception as e:
+        return jsonify({"error":str(e)}), 500
+
+@app.route("/api/templates", methods=["POST"])
+def api_create_template():
+    ok, _ = auth_required()
+    if not ok: return jsonify({"error":"unauthorized"}), 403
+    data = request.get_json(silent=True) or {}
+    category = data.get("category","").strip()
+    text = data.get("text","").strip()
+    image_url = data.get("image_url","").strip()
+    if not category: return jsonify({"error":"category required"}), 400
+    import uuid as _uuid
+    tid = str(_uuid.uuid4())
+    try:
+        conn = _pg_conn(); cur = conn.cursor()
+        cur.execute("SELECT COALESCE(MAX(sort_order),0)+1 FROM templates")
+        order = cur.fetchone()[0]
+        cur.execute("INSERT INTO templates (id,category,text,image_url,sort_order) VALUES (%s,%s,%s,%s,%s)",
+                    (tid, category, text, image_url, order))
+        conn.commit(); cur.close(); conn.close()
+        return jsonify({"ok":True,"id":tid})
+    except Exception as e:
+        return jsonify({"error":str(e)}), 500
+
+@app.route("/api/templates/<tid>", methods=["PUT"])
+def api_update_template(tid):
+    ok, _ = auth_required()
+    if not ok: return jsonify({"error":"unauthorized"}), 403
+    data = request.get_json(silent=True) or {}
+    category = data.get("category","").strip()
+    text = data.get("text","").strip()
+    image_url = data.get("image_url","").strip()
+    if not category: return jsonify({"error":"category required"}), 400
+    try:
+        conn = _pg_conn(); cur = conn.cursor()
+        cur.execute("UPDATE templates SET category=%s,text=%s,image_url=%s WHERE id=%s",
+                    (category, text, image_url, tid))
+        conn.commit(); cur.close(); conn.close()
+        return jsonify({"ok":True})
+    except Exception as e:
+        return jsonify({"error":str(e)}), 500
+
+@app.route("/api/templates/<tid>", methods=["DELETE"])
+def api_delete_template(tid):
+    ok, _ = auth_required()
+    if not ok: return jsonify({"error":"unauthorized"}), 403
+    try:
+        conn = _pg_conn(); cur = conn.cursor()
+        cur.execute("DELETE FROM templates WHERE id=%s", (tid,))
+        conn.commit(); cur.close(); conn.close()
+        return jsonify({"ok":True})
+    except Exception as e:
+        return jsonify({"error":str(e)}), 500
 
 # ── 快速圖庫 API ──────────────────────────────────────────
 
