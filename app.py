@@ -477,21 +477,6 @@ def _set_note(key, note):
 # 貼文指定回覆 {post_id: {"reply": str, "image_url": str, "enabled": bool}}
 fb_post_replies: dict = {}
 
-# 快速回覆模板 [{id, title, text, image_url, price}]
-TEMPLATES_FILE = "templates.json"
-def _load_templates():
-    try:
-        with open(TEMPLATES_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except Exception:
-        return []
-quick_reply_templates = _load_templates()
-def _save_templates():
-    try:
-        with open(TEMPLATES_FILE, "w", encoding="utf-8") as f:
-            json.dump(quick_reply_templates, f, ensure_ascii=False)
-    except Exception:
-        pass
 
 # 標籤與 last_seen 皆由 Supabase customer_cache 提供
 last_seen = {}  # 保留為 in-memory 快取，寫入由 _pg_set_last_seen 非同步處理
@@ -2494,13 +2479,6 @@ def api_tag():
     _pg_set_tags(key, tags)
     return jsonify({"ok": True})
 
-@app.route("/api/templates", methods=["GET"])
-def api_templates():
-    ok, _ = auth_required()
-    if not ok:
-        return jsonify({"error": "unauthorized"}), 403
-    return jsonify(list(quick_reply_templates))
-
 @app.route("/admin/inbox")
 def admin_inbox():
     ok, key = check_auth()
@@ -2694,45 +2672,6 @@ def api_takeover():
         manual_takeover.discard(key)
     return jsonify({"ok": True, "active": active})
 
-# ── 快速回覆模板 API ──────────────────────────────────────
-
-@app.route("/api/templates", methods=["GET"])
-def api_templates_get():
-    ok, _ = auth_required()
-    if not ok:
-        return jsonify({"error": "unauthorized"}), 403
-    return jsonify(quick_reply_templates)
-
-@app.route("/api/templates", methods=["POST"])
-def api_templates_post():
-    ok, _ = auth_required()
-    if not ok:
-        return jsonify({"error": "unauthorized"}), 403
-    data = request.get_json(silent=True) or {}
-    action = data.get("action", "add")
-    if action == "add":
-        import uuid
-        tpl = {
-            "id": str(uuid.uuid4())[:8],
-            "title": data.get("title", "").strip(),
-            "text": data.get("text", "").strip(),
-            "image_url": data.get("image_url", "").strip(),
-            "price": data.get("price", "").strip(),
-        }
-        if not tpl["title"] or not tpl["text"]:
-            return jsonify({"error": "title and text required"}), 400
-        quick_reply_templates.append(tpl)
-        _save_templates()
-        return jsonify({"ok": True, "tpl": tpl})
-    elif action == "delete":
-        tid = data.get("id", "")
-        for i, t in enumerate(quick_reply_templates):
-            if t["id"] == tid:
-                quick_reply_templates.pop(i)
-                _save_templates()
-                return jsonify({"ok": True})
-        return jsonify({"error": "not found"}), 404
-    return jsonify({"error": "unknown action"}), 400
 
 # ── 標籤 API ─────────────────────────────────────────────
 
