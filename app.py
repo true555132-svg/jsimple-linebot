@@ -8,7 +8,7 @@ J SIMPLE 高架床 Bot
 - /admin/fb     FB 管理
 """
 
-import os, json, base64, urllib.request, time, threading
+import os, json, base64, urllib.request, time, threading, sqlite3
 from collections import deque
 from flask import Flask, request, abort, render_template_string, redirect, jsonify
 from linebot.v3 import WebhookHandler
@@ -46,22 +46,111 @@ handler = WebhookHandler(LINE_CHANNEL_SECRET)
 
 COOLDOWN_SECONDS = 0
 LOGS_FILE = "logs.json"
+MESSAGES_DB = os.getenv("MESSAGES_DB_PATH", "messages.db")
 GOOGLE_SHEET_ID = os.getenv("GOOGLE_SHEET_ID", "")
 GOOGLE_SERVICE_ACCOUNT_JSON = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON", "")
 
-def _load_logs():
+_db_lock = threading.Lock()
+
+def _init_messages_db():
+    with sqlite3.connect(MESSAGES_DB) as conn:
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS messages (
+                id        INTEGER PRIMARY KEY AUTOINCREMENT,
+                time      TEXT,
+                platform  TEXT,
+                user_id   TEXT,
+                msg       TEXT,
+                intent    TEXT DEFAULT '',
+                reply     TEXT DEFAULT '',
+                replied   INTEGER DEFAULT 0,
+                image_url TEXT DEFAULT '',
+                sticker_url TEXT DEFAULT '',
+                sent_by   TEXT DEFAULT ''
+            )
+        """)
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_msg_pf_uid ON messages(platform, user_id)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_msg_time  ON messages(time)")
+        conn.commit()
+
+_init_messages_db()
+
+def _db_insert_message(entry):
+    try:
+        with _db_lock, sqlite3.connect(MESSAGES_DB) as conn:
+            conn.execute("""
+                INSERT INTO messages
+                  (time, platform, user_id, msg, intent, reply, replied, image_url, sticker_url, sent_by)
+                VALUES (?,?,?,?,?,?,?,?,?,?)
+            """, (
+                entry.get("time",""),
+                entry.get("platform",""),
+                entry.get("user_id",""),
+                entry.get("msg",""),
+                entry.get("intent",""),
+                entry.get("reply",""),
+                1 if entry.get("replied") else 0,
+                entry.get("image_url",""),
+                entry.get("sticker_url",""),
+                entry.get("sent_by",""),
+            ))
+            conn.commit()
+    except Exception as e:
+        import sys; print(f"[DB Insert Error] {e}", file=sys.stderr)
+
+def _load_logs_from_db():
+    try:
+        with sqlite3.connect(MESSAGES_DB) as conn:
+            rows = conn.execute("""
+                SELECT time,platform,user_id,msg,intent,reply,replied,image_url,sticker_url,sent_by
+                FROM messages ORDER BY id DESC
+            """).fetchall()
+        d = deque()
+        for r in rows:
+            d.append({
+                "time": r[0], "platform": r[1], "user_id": r[2],
+                "msg": r[3], "intent": r[4], "reply": r[5],
+                "replied": bool(r[6]), "image_url": r[7] or "",
+                "sticker_url": r[8] or "", "sent_by": r[9] or "",
+            })
+        return d
+    except Exception:
+        return deque()
+
+def _migrate_json_to_db():
     try:
         with open(LOGS_FILE, "r", encoding="utf-8") as f:
-            return deque(json.load(f), maxlen=2000)
-    except Exception:
-        return deque(maxlen=2000)
+            entries = json.load(f)
+        with _db_lock, sqlite3.connect(MESSAGES_DB) as conn:
+            for entry in reversed(entries):
+                conn.execute("""
+                    INSERT INTO messages
+                      (time,platform,user_id,msg,intent,reply,replied,image_url,sticker_url,sent_by)
+                    VALUES (?,?,?,?,?,?,?,?,?,?)
+                """, (
+                    entry.get("time",""), entry.get("platform",""), entry.get("user_id",""),
+                    entry.get("msg",""), entry.get("intent",""), entry.get("reply",""),
+                    1 if entry.get("replied") else 0,
+                    entry.get("image_url",""), entry.get("sticker_url",""), entry.get("sent_by",""),
+                ))
+            conn.commit()
+        print(f"[DB] Migrated {len(entries)} messages from logs.json")
+    except Exception as e:
+        print(f"[DB] Migration skipped: {e}")
+
+def _load_logs():
+    d = _load_logs_from_db()
+    if not d:
+        _migrate_json_to_db()
+        d = _load_logs_from_db()
+    return d
 
 message_log = _load_logs()
 
 def _save_logs():
     try:
         with open(LOGS_FILE, "w", encoding="utf-8") as f:
-            json.dump(list(message_log), f, ensure_ascii=False)
+            json.dump(list(message_log)[:500], f, ensure_ascii=False)
     except Exception:
         pass
 
@@ -95,7 +184,7 @@ def _append_to_sheets(entry):
 
 def log_message(entry):
     message_log.appendleft(entry)
-    _save_logs()
+    threading.Thread(target=_db_insert_message, args=(entry,), daemon=True).start()
     if GOOGLE_SHEET_ID:
         threading.Thread(target=_append_to_sheets, args=(entry,), daemon=True).start()
 
@@ -773,6 +862,9 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
 .unread-badge{background:#e53935;color:#fff;border-radius:10px;padding:1px 6px;font-size:10px;font-weight:700;min-width:18px;text-align:center;display:inline-block;line-height:16px}
 .conv-item.has-unread .conv-name{font-weight:800;color:#0d0d0d}
 .conv-item.has-unread .conv-preview{color:#555;font-weight:500}
+.read-toggle{width:10px;height:10px;border-radius:50%;border:2px solid #9aa0a6;background:transparent;cursor:pointer;flex-shrink:0;padding:0;margin-left:4px;transition:background 0.15s,border-color 0.15s}
+.read-toggle.is-unread{background:#e53935;border-color:#e53935}
+.read-toggle:hover{border-color:#0d6efd}
 
 /* MIDDLE CHAT */
 .chat-main{display:flex;flex-direction:column;overflow:hidden;background:#f8f9fa}
@@ -1024,19 +1116,25 @@ function renderList(){
     const s = c.status||'bot';
     const unread = c.unread||0;
     const tags = (c.tags||[]).slice(0,3).map(t=>`<span class="tag-pill">${t}</span>`).join('');
-    const pb = c.platform==='fb'?'<span class="platform-badge pb-fb">FB</span>':'<span class="platform-badge pb-line">LINE</span>';
+    const pb = c.platform?.toLowerCase()==='fb'?'<span class="platform-badge pb-fb">FB</span>':'<span class="platform-badge pb-line">LINE</span>';
     const timeStr = c.last_time ? new Date(c.last_time*1000).toLocaleTimeString('zh-TW',{hour:'2-digit',minute:'2-digit'}) : '';
     const avatarEl = c.user_avatar
       ? `<img class="conv-avatar" src="${c.user_avatar}" onerror="this.style.display='none'">`
       : `<div class="conv-avatar-placeholder">&#128100;</div>`;
     const unreadBadge = unread>0 ? `<span class="unread-badge">${unread}</span>` : '';
     const hasUnread = unread>0 ? ' has-unread' : '';
-    return `<div class="conv-item${c.key===curKey?' active':''}${hasUnread}" onclick="openConv('${c.key}')">
+    const toggleClass = unread>0 ? ' is-unread' : '';
+    const safeKey = c.key.replace(/'/g,"\\'");
+    return `<div class="conv-item${c.key===curKey?' active':''}${hasUnread}" onclick="openConv('${safeKey}')">
       ${avatarEl}
       <div class="conv-info">
         <div class="conv-name-row">
           <span class="conv-name">${escHtml(c.user_name||c.user_id||'未知用戶')}</span>
-          <div style="display:flex;align-items:center;gap:4px;flex-shrink:0">${unreadBadge}<span class="conv-time">${timeStr}</span></div>
+          <div style="display:flex;align-items:center;gap:4px;flex-shrink:0">
+            ${unreadBadge}
+            <button class="read-toggle${toggleClass}" title="${unread>0?'標為已讀':'標為未讀'}" onclick="toggleRead(event,'${safeKey}')"></button>
+            <span class="conv-time">${timeStr}</span>
+          </div>
         </div>
         <div class="conv-preview">${escHtml((c.last_message||'').slice(0,40))}</div>
         <div class="conv-meta">
@@ -1046,6 +1144,24 @@ function renderList(){
       </div>
     </div>`;
   }).join('');
+}
+
+async function toggleRead(evt, key){
+  evt.stopPropagation();
+  const c = allConvs.find(x=>x.key===key);
+  if(!c) return;
+  if(c.unread>0){
+    // 標為已讀
+    await fetch('/api/seen',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({key,admin_key:KEY})});
+    c.unread=0;
+  } else {
+    // 標為未讀
+    await fetch('/api/mark-unread',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({key,admin_key:KEY})});
+    c.unread=1;
+  }
+  renderList();
 }
 
 async function openConv(key){
@@ -1061,7 +1177,7 @@ async function openConv(key){
   hdr.style.display = 'flex';
   const name = conv?.user_name || conv?.user_id || '未知用戶';
   document.getElementById('hdrName').textContent = name;
-  document.getElementById('hdrSub').textContent = conv?.platform==='fb'?'Facebook Messenger':'LINE';
+  document.getElementById('hdrSub').textContent = conv?.platform?.toLowerCase()==='fb'?'Facebook Messenger':'LINE';
   const hdrAv = document.getElementById('hdrAvatar');
   if(conv?.user_avatar){
     hdrAv.outerHTML = `<img class="chat-header-avatar" id="hdrAvatar" src="${conv.user_avatar}">`;
@@ -1256,7 +1372,7 @@ function autoResize(el){
 async function loadInfoPanel(key, conv){
   const panel = document.getElementById('rightPanel');
   const name = conv?.user_name || conv?.user_id || '未知用戶';
-  const platform = conv?.platform==='fb'?'Facebook':'LINE';
+  const platform = conv?.platform?.toLowerCase()==='fb'?'Facebook':'LINE';
   const lastTime = conv?.last_time ? new Date(conv.last_time*1000).toLocaleDateString('zh-TW') : '—';
   const status = conv?.status || 'bot';
 
@@ -2167,6 +2283,21 @@ def api_seen():
         key = f"{platform}:{user_id}"
     if key:
         last_seen[key] = time.time()
+    return jsonify({"ok": True})
+
+@app.route("/api/mark-unread", methods=["POST"])
+def api_mark_unread():
+    ok, _ = auth_required()
+    if not ok:
+        return jsonify({"error": "unauthorized"}), 403
+    data = request.get_json(silent=True) or {}
+    key = data.get("key", "")
+    if not key:
+        platform = data.get("platform", "").upper()
+        user_id = data.get("user_id", "")
+        key = f"{platform}:{user_id}"
+    if key:
+        last_seen[key] = 0
     return jsonify({"ok": True})
 
 @app.route("/api/github-diag")
