@@ -1652,19 +1652,24 @@ async function useTpl(id){
   const tpl = allTpls.find(t=>t.id===id);
   if(!tpl) return;
   document.getElementById('tplPanel').classList.remove('open');
-  if(tpl.image_url && tpl.text){
+  if(tpl.image_url || tpl.text){
     if(!curKey){ toast('請先選擇對話'); return; }
     toast('傳送中...');
-    await fetch('/api/reply',{method:'POST',headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({key:curKey,admin_key:KEY,image_url:tpl.image_url})});
-    await new Promise(r=>setTimeout(r,600));
-    await fetch('/api/reply',{method:'POST',headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({key:curKey,admin_key:KEY,text:tpl.text})});
-    await loadMsgs(curKey);
-  } else if(tpl.image_url){
-    if(!curKey){ toast('請先選擇對話'); return; }
-    await fetch('/api/reply',{method:'POST',headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({key:curKey,admin_key:KEY,image_url:tpl.image_url})});
+    try{
+      // 先送圖片
+      if(tpl.image_url){
+        await fetch('/api/reply',{method:'POST',headers:{'Content-Type':'application/json'},
+          body:JSON.stringify({key:curKey,admin_key:KEY,image_url:tpl.image_url})});
+        if(tpl.text) await new Promise(r=>setTimeout(r,600));
+      }
+      // 再送文字
+      if(tpl.text){
+        const r = await fetch('/api/reply',{method:'POST',headers:{'Content-Type':'application/json'},
+          body:JSON.stringify({key:curKey,admin_key:KEY,message:tpl.text})});
+        const d = await r.json();
+        if(!d.ok) toast('文字傳送失敗：'+(d.error||''));
+      }
+    }catch(e){ toast('傳送失敗：'+e.message); }
     await loadMsgs(curKey);
   } else {
     const inp = document.getElementById('replyInput');
