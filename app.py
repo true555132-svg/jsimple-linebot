@@ -1615,22 +1615,59 @@ function selectTplCat(cat, el){
 
 function renderTplList(){
   const items = allTpls.filter(t=>t.category===curTplCat);
-  const panel = document.getElementById('tplPanel');
   document.getElementById('tplList').innerHTML = items.length ? items.map(t=>{
     const imgEl = t.image_url ? `<img class="tpl-item-img" src="${t.image_url}">` : '';
     const combo = t.image_url ? ' 🖼️' : '';
-    return `<div class="tpl-item" onclick="useTpl('${t.id}')">
+    return `<div class="tpl-item"
+      data-tpl-text="${escAttr(t.text||'')}"
+      data-tpl-img="${escAttr(t.image_url||'')}"
+      data-tpl-id="${escAttr(t.id)}"
+      onclick="sendTpl(this)">
       <div class="tpl-item-body">
         <div class="tpl-item-cat">${escHtml(t.category)}${combo}</div>
         <div class="tpl-item-text">${escHtml(t.text||'（僅圖片）')}</div>
       </div>
       ${imgEl}
       <div class="tpl-item-actions">
-        <button class="tpl-act" onclick="event.stopPropagation();openTplModal('${t.id}')">✏️</button>
-        <button class="tpl-act" onclick="event.stopPropagation();deleteTpl('${t.id}')" style="color:#dc3545">🗑️</button>
+        <button class="tpl-act" onclick="event.stopPropagation();openTplModal('${escAttr(t.id)}')">✏️</button>
+        <button class="tpl-act" onclick="event.stopPropagation();deleteTpl('${escAttr(t.id)}')" style="color:#dc3545">🗑️</button>
       </div>
     </div>`;
   }).join('') : '<div style="padding:16px;text-align:center;color:#9aa0a6;font-size:12px">這個分類沒有模板，點「新增」加入</div>';
+}
+
+async function sendTpl(el){
+  const text = el.dataset.tplText || '';
+  const imgUrl = el.dataset.tplImg || '';
+  const id = el.dataset.tplId || '';
+  document.getElementById('tplPanel').classList.remove('open');
+  if(imgUrl && text){
+    if(!curKey){ toast('請先選擇對話'); return; }
+    toast('傳送中...');
+    try{
+      await fetch('/api/reply',{method:'POST',headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({key:curKey,admin_key:KEY,image_url:imgUrl})});
+      await new Promise(r=>setTimeout(r,600));
+      const r = await fetch('/api/reply',{method:'POST',headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({key:curKey,admin_key:KEY,message:text})});
+      const d = await r.json();
+      if(!d.ok) toast('傳送失敗：'+(d.error||''));
+    }catch(e){ toast('傳送失敗：'+e.message); }
+    await loadMsgs(curKey);
+  } else if(imgUrl){
+    if(!curKey){ toast('請先選擇對話'); return; }
+    toast('傳送中...');
+    try{
+      await fetch('/api/reply',{method:'POST',headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({key:curKey,admin_key:KEY,image_url:imgUrl})});
+    }catch(e){ toast('傳送失敗：'+e.message); }
+    await loadMsgs(curKey);
+  } else if(text){
+    const inp = document.getElementById('replyInput');
+    inp.value = text;
+    autoResize(inp);
+    inp.focus();
+  }
 }
 
 function toggleTplEditMode(){
