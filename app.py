@@ -8,7 +8,7 @@ J SIMPLE 高架床 Bot
 - /admin/fb     FB 管理
 """
 
-import os, json, base64, urllib.request, time, threading, sqlite3
+import os, json, base64, urllib.request, time, threading
 from collections import deque
 from flask import Flask, request, abort, render_template_string, redirect, jsonify
 from linebot.v3 import WebhookHandler
@@ -46,42 +46,59 @@ handler = WebhookHandler(LINE_CHANNEL_SECRET)
 
 COOLDOWN_SECONDS = 0
 LOGS_FILE = "logs.json"
-MESSAGES_DB = os.getenv("MESSAGES_DB_PATH", "messages.db")
+DATABASE_URL = os.getenv("DATABASE_URL", "")
 GOOGLE_SHEET_ID = os.getenv("GOOGLE_SHEET_ID", "")
 GOOGLE_SERVICE_ACCOUNT_JSON = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON", "")
 
 _db_lock = threading.Lock()
 
+def _pg_conn():
+    import psycopg2
+    return psycopg2.connect(DATABASE_URL)
+
 def _init_messages_db():
-    with sqlite3.connect(MESSAGES_DB) as conn:
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS messages (
-                id        INTEGER PRIMARY KEY AUTOINCREMENT,
-                time      TEXT,
-                platform  TEXT,
-                user_id   TEXT,
-                msg       TEXT,
-                intent    TEXT DEFAULT '',
-                reply     TEXT DEFAULT '',
-                replied   INTEGER DEFAULT 0,
-                image_url TEXT DEFAULT '',
-                sticker_url TEXT DEFAULT '',
-                sent_by   TEXT DEFAULT ''
-            )
-        """)
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_msg_pf_uid ON messages(platform, user_id)")
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_msg_time  ON messages(time)")
-        conn.commit()
+    if not DATABASE_URL:
+        return
+    try:
+        with _db_lock:
+            conn = _pg_conn()
+            cur = conn.cursor()
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS messages (
+                    id          SERIAL PRIMARY KEY,
+                    time        TEXT,
+                    platform    TEXT,
+                    user_id     TEXT,
+                    msg         TEXT,
+                    intent      TEXT DEFAULT '',
+                    reply       TEXT DEFAULT '',
+                    replied     BOOLEAN DEFAULT FALSE,
+                    image_url   TEXT DEFAULT '',
+                    sticker_url TEXT DEFAULT '',
+                    sent_by     TEXT DEFAULT ''
+                )
+            """)
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_msg_pf_uid ON messages(platform, user_id)")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_msg_time   ON messages(time)")
+            conn.commit()
+            cur.close()
+            conn.close()
+    except Exception as e:
+        import sys; print(f"[DB Init Error] {e}", file=sys.stderr)
 
 _init_messages_db()
 
 def _db_insert_message(entry):
+    if not DATABASE_URL:
+        return
     try:
-        with _db_lock, sqlite3.connect(MESSAGES_DB) as conn:
-            conn.execute("""
+        with _db_lock:
+            conn = _pg_conn()
+            cur = conn.cursor()
+            cur.execute("""
                 INSERT INTO messages
-                  (time, platform, user_id, msg, intent, reply, replied, image_url, sticker_url, sent_by)
-                VALUES (?,?,?,?,?,?,?,?,?,?)
+                  (time,platform,user_id,msg,intent,reply,replied,image_url,sticker_url,sent_by)
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
             """, (
                 entry.get("time",""),
                 entry.get("platform",""),
@@ -89,22 +106,30 @@ def _db_insert_message(entry):
                 entry.get("msg",""),
                 entry.get("intent",""),
                 entry.get("reply",""),
-                1 if entry.get("replied") else 0,
+                bool(entry.get("replied")),
                 entry.get("image_url",""),
                 entry.get("sticker_url",""),
                 entry.get("sent_by",""),
             ))
             conn.commit()
+            cur.close()
+            conn.close()
     except Exception as e:
         import sys; print(f"[DB Insert Error] {e}", file=sys.stderr)
 
 def _load_logs_from_db():
+    if not DATABASE_URL:
+        return deque()
     try:
-        with sqlite3.connect(MESSAGES_DB) as conn:
-            rows = conn.execute("""
-                SELECT time,platform,user_id,msg,intent,reply,replied,image_url,sticker_url,sent_by
-                FROM messages ORDER BY id DESC
-            """).fetchall()
+        conn = _pg_conn()
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT time,platform,user_id,msg,intent,reply,replied,image_url,sticker_url,sent_by
+            FROM messages ORDER BY id DESC
+        """)
+        rows = cur.fetchall()
+        cur.close()
+        conn.close()
         d = deque()
         for r in rows:
             d.append({
@@ -114,26 +139,33 @@ def _load_logs_from_db():
                 "sticker_url": r[8] or "", "sent_by": r[9] or "",
             })
         return d
-    except Exception:
+    except Exception as e:
+        import sys; print(f"[DB Load Error] {e}", file=sys.stderr)
         return deque()
 
 def _migrate_json_to_db():
+    if not DATABASE_URL:
+        return
     try:
         with open(LOGS_FILE, "r", encoding="utf-8") as f:
             entries = json.load(f)
-        with _db_lock, sqlite3.connect(MESSAGES_DB) as conn:
+        with _db_lock:
+            conn = _pg_conn()
+            cur = conn.cursor()
             for entry in reversed(entries):
-                conn.execute("""
+                cur.execute("""
                     INSERT INTO messages
                       (time,platform,user_id,msg,intent,reply,replied,image_url,sticker_url,sent_by)
-                    VALUES (?,?,?,?,?,?,?,?,?,?)
+                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
                 """, (
                     entry.get("time",""), entry.get("platform",""), entry.get("user_id",""),
                     entry.get("msg",""), entry.get("intent",""), entry.get("reply",""),
-                    1 if entry.get("replied") else 0,
+                    bool(entry.get("replied")),
                     entry.get("image_url",""), entry.get("sticker_url",""), entry.get("sent_by",""),
                 ))
             conn.commit()
+            cur.close()
+            conn.close()
         print(f"[DB] Migrated {len(entries)} messages from logs.json")
     except Exception as e:
         print(f"[DB] Migration skipped: {e}")
@@ -143,6 +175,12 @@ def _load_logs():
     if not d:
         _migrate_json_to_db()
         d = _load_logs_from_db()
+    if not d:
+        try:
+            with open(LOGS_FILE, "r", encoding="utf-8") as f:
+                return deque(json.load(f))
+        except Exception:
+            pass
     return d
 
 message_log = _load_logs()
