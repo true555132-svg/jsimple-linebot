@@ -92,6 +92,16 @@ def _init_messages_db():
                     sort_order INTEGER DEFAULT 0
                 )
             """)
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS customer_data (
+                    key        TEXT PRIMARY KEY,
+                    status     TEXT DEFAULT 'bot',
+                    note       TEXT DEFAULT '',
+                    tags       TEXT DEFAULT '[]',
+                    last_seen  FLOAT DEFAULT 0,
+                    extra      TEXT DEFAULT '{}'
+                )
+            """)
             conn.commit()
             cur.close()
             conn.close()
@@ -99,6 +109,98 @@ def _init_messages_db():
         import sys; print(f"[DB Init Error] {e}", file=sys.stderr)
 
 _init_messages_db()
+
+# ── Supabase 客戶資料存取 ─────────────────────────────────
+
+def _pg_upsert_customer(key, **fields):
+    if not DATABASE_URL or not fields: return
+    try:
+        cols = ", ".join(fields.keys())
+        vals = ", ".join(["%s"] * len(fields))
+        updates = ", ".join(f"{k}=EXCLUDED.{k}" for k in fields)
+        with _db_lock:
+            conn = _pg_conn(); cur = conn.cursor()
+            cur.execute(
+                f"INSERT INTO customer_data (key,{cols}) VALUES (%s,{vals}) ON CONFLICT (key) DO UPDATE SET {updates}",
+                [key] + list(fields.values())
+            )
+            conn.commit(); cur.close(); conn.close()
+    except Exception as e:
+        import sys; print(f"[PG Upsert Error] {e}", file=sys.stderr)
+
+def _pg_get_customer(key):
+    if not DATABASE_URL: return {}
+    try:
+        conn = _pg_conn(); cur = conn.cursor()
+        cur.execute("SELECT status,note,tags,last_seen,extra FROM customer_data WHERE key=%s", (key,))
+        row = cur.fetchone(); cur.close(); conn.close()
+        if not row: return {}
+        return {"status": row[0] or "bot", "note": row[1] or "", "tags": json.loads(row[2] or "[]"),
+                "last_seen": row[3] or 0, "extra": json.loads(row[4] or "{}")}
+    except Exception:
+        return {}
+
+def _pg_load_all_customers():
+    if not DATABASE_URL: return {}
+    try:
+        conn = _pg_conn(); cur = conn.cursor()
+        cur.execute("SELECT key,status,note,tags,last_seen,extra FROM customer_data")
+        rows = cur.fetchall(); cur.close(); conn.close()
+        result = {}
+        for r in rows:
+            result[r[0]] = {"status": r[1] or "bot", "note": r[2] or "",
+                            "tags": json.loads(r[3] or "[]"), "last_seen": r[4] or 0,
+                            "extra": json.loads(r[5] or "{}")}
+        return result
+    except Exception:
+        return {}
+
+_customer_cache = {}
+
+def _load_customer_cache():
+    global _customer_cache
+    _customer_cache = _pg_load_all_customers()
+
+threading.Thread(target=_load_customer_cache, daemon=True).start()
+
+def _pg_get_status(key):
+    return _customer_cache.get(key, {}).get("status", "bot")
+
+def _pg_set_status(key, status):
+    _customer_cache.setdefault(key, {})["status"] = status
+    threading.Thread(target=_pg_upsert_customer, args=(key,), kwargs={"status": status}, daemon=True).start()
+
+def _pg_get_tags(key):
+    return _customer_cache.get(key, {}).get("tags", [])
+
+def _pg_set_tags(key, tags):
+    _customer_cache.setdefault(key, {})["tags"] = tags
+    threading.Thread(target=_pg_upsert_customer, args=(key,), kwargs={"tags": json.dumps(tags, ensure_ascii=False)}, daemon=True).start()
+
+def _pg_get_note(key):
+    return _customer_cache.get(key, {}).get("note", "")
+
+def _pg_set_note(key, note):
+    _customer_cache.setdefault(key, {})["note"] = note
+    threading.Thread(target=_pg_upsert_customer, args=(key,), kwargs={"note": note}, daemon=True).start()
+
+def _pg_get_last_seen(key):
+    return _customer_cache.get(key, {}).get("last_seen", 0)
+
+def _pg_set_last_seen(key, ts):
+    _customer_cache.setdefault(key, {})["last_seen"] = ts
+    threading.Thread(target=_pg_upsert_customer, args=(key,), kwargs={"last_seen": ts}, daemon=True).start()
+
+def _pg_get_all_statuses():
+    return {k: v.get("status","bot") for k, v in _customer_cache.items()}
+
+def _pg_get_customer_extra(key):
+    return _customer_cache.get(key, {}).get("extra", {})
+
+def _pg_save_customer_extra(key, pf, uid, data):
+    _customer_cache.setdefault(key, {})["extra"] = data
+    threading.Thread(target=_pg_upsert_customer, args=(key,),
+                     kwargs={"extra": json.dumps(data, ensure_ascii=False)}, daemon=True).start()
 
 _DEFAULT_TEMPLATES = [
     ("打招呼","你好，我是JSIMPLE高架床專員，請問有什麼可以幫您？",""),
@@ -348,10 +450,11 @@ manual_takeover = set()
 ALL_TAGS = ["高架床","雙層床","客製需求","詢價中","高意願","已報價","待回訪","已成交","小坪數","樓梯款","爬梯款","書桌需求","收納需求"]
 STATUS_OPTIONS = ["bot","human","waiting","followup","closed","sold"]
 
-# 啟動時從 db 同步 human 狀態到 manual_takeover
+# 啟動時從 Supabase 同步 human 狀態到 manual_takeover
 def _sync_status_from_db():
+    import time as _t; _t.sleep(2)  # 等 customer_cache 載入
     try:
-        statuses = _db.get_all_statuses()
+        statuses = _pg_get_all_statuses()
         for key, status in statuses.items():
             if status == "human":
                 manual_takeover.add(key)
@@ -364,21 +467,12 @@ threading.Thread(target=_sync_status_from_db, daemon=True).start()
 # 用戶資料快取 {"platform:user_id": {"name": "", "avatar": ""}}
 user_profiles = {}
 
-# 用戶備註 {"platform:user_id": "備註內容"}
-NOTES_FILE = "notes.json"
-def _load_notes():
-    try:
-        with open(NOTES_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except Exception:
-        return {}
-user_notes = _load_notes()
-def _save_notes():
-    try:
-        with open(NOTES_FILE, "w", encoding="utf-8") as f:
-            json.dump(user_notes, f, ensure_ascii=False)
-    except Exception:
-        pass
+# 用戶備註 — 從 Supabase customer_cache 讀寫
+def _get_note(key):
+    return _pg_get_note(key)
+
+def _set_note(key, note):
+    _pg_set_note(key, note)
 
 # 貼文指定回覆 {post_id: {"reply": str, "image_url": str, "enabled": bool}}
 fb_post_replies: dict = {}
@@ -399,24 +493,8 @@ def _save_templates():
     except Exception:
         pass
 
-# 對話標籤 {"platform:user_id": ["待跟進", "已成交", ...]}
-TAGS_FILE = "conv_tags.json"
-def _load_tags():
-    try:
-        with open(TAGS_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except Exception:
-        return {}
-conv_tags = _load_tags()
-def _save_tags():
-    try:
-        with open(TAGS_FILE, "w", encoding="utf-8") as f:
-            json.dump(conv_tags, f, ensure_ascii=False)
-    except Exception:
-        pass
-
-# 最後查看時間 {"platform:user_id": timestamp}
-last_seen = {}
+# 標籤與 last_seen 皆由 Supabase customer_cache 提供
+last_seen = {}  # 保留為 in-memory 快取，寫入由 _pg_set_last_seen 非同步處理
 
 # ── 核心邏輯 ─────────────────────────────────────────────
 
@@ -2371,7 +2449,7 @@ def api_status():
     status = data.get("status","bot")
     if not key or status not in STATUS_OPTIONS:
         return jsonify({"error": "invalid"}), 400
-    _db.set_status(key, status)
+    _pg_set_status(key, status)
     if status == "human":
         manual_takeover.add(key)
     else:
@@ -2391,12 +2469,12 @@ def api_customer():
     if not key:
         return jsonify({"error": "missing key"}), 400
     if request.method == "GET":
-        return jsonify(_db.get_customer(key))
+        return jsonify(_pg_get_customer_extra(key))
     data = request.get_json(silent=True) or {}
     parts = key.split(":",1)
     pf = parts[0] if len(parts)>1 else ""
     uid = parts[1] if len(parts)>1 else key
-    _db.save_customer(key, pf, uid, data)
+    _pg_save_customer_extra(key, pf, uid, data)
     return jsonify({"ok": True})
 
 @app.route("/api/tag", methods=["POST"])
@@ -2413,8 +2491,7 @@ def api_tag():
     tags = data.get("tags", [])
     if not key:
         return jsonify({"error": "missing key"}), 400
-    _db.save_tags(key, tags)
-    conv_tags[key] = tags
+    _pg_set_tags(key, tags)
     return jsonify({"ok": True})
 
 @app.route("/api/templates", methods=["GET"])
@@ -2485,19 +2562,19 @@ def api_conversations():
                           "last_time": l.get("time",""), "last_msg": l.get("msg",""),
                           "last_message": l.get("msg",""),
                           "manual": key in manual_takeover,
-                          "status": _db.get_status(key),
+                          "status": _pg_get_status(key),
                           "name": profile.get("name",""),
                           "user_name": profile.get("name","") or uid,
                           "avatar": profile.get("avatar",""),
                           "user_avatar": profile.get("avatar",""),
-                          "note": user_notes.get(key,""),
-                          "tags": _db.get_tags(key),
+                          "note": _pg_get_note(key),
+                          "tags": _pg_get_tags(key),
                           "unread": 0}
         convs[key]["messages"].append(l)
         convs[key]["last_time"] = l.get("time","")
         convs[key]["last_msg"] = l.get("msg","")
         convs[key]["last_message"] = l.get("msg","")
-        seen_ts = last_seen.get(key, 0)
+        seen_ts = _pg_get_last_seen(key)
         try:
             msg_ts = time.mktime(time.strptime(l.get("time",""), "%Y/%m/%d %H:%M:%S"))
             if msg_ts > seen_ts and l.get("user_id","") != "ADMIN" and l.get("sent_by","") != "admin":
@@ -2524,9 +2601,8 @@ def api_note():
     note = data.get("note","")
     if not user_id:
         return jsonify({"error": "missing user_id"}), 400
-    key = f"{platform}:{user_id}"
-    user_notes[key] = note
-    _save_notes()
+    key = data.get("key","") or f"{platform}:{user_id}"
+    _set_note(key, note)
     return jsonify({"ok": True})
 
 @app.route("/api/reply", methods=["POST"])
@@ -2670,8 +2746,7 @@ def api_tags():
     user_id = data.get("user_id", "")
     tags = data.get("tags", [])
     key = f"{platform}:{user_id}"
-    conv_tags[key] = tags
-    _save_tags()
+    _pg_set_tags(key, tags)
     return jsonify({"ok": True})
 
 # ── 已讀標記 API ─────────────────────────────────────────
@@ -2688,7 +2763,7 @@ def api_seen():
         user_id = data.get("user_id", "")
         key = f"{platform}:{user_id}"
     if key:
-        last_seen[key] = time.time()
+        _pg_set_last_seen(key, time.time())
     return jsonify({"ok": True})
 
 @app.route("/api/mark-unread", methods=["POST"])
@@ -2703,7 +2778,7 @@ def api_mark_unread():
         user_id = data.get("user_id", "")
         key = f"{platform}:{user_id}"
     if key:
-        last_seen[key] = 0
+        _pg_set_last_seen(key, 0)
     return jsonify({"ok": True})
 
 @app.route("/api/github-diag")
