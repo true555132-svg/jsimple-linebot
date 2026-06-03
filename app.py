@@ -976,6 +976,15 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
 .input-area textarea:focus{border-color:#0d6efd}
 .btn-icon{width:36px;height:36px;border-radius:50%;border:1.5px solid #e8eaed;background:#fff;cursor:pointer;display:flex;align-items:center;justify-content:center;font-size:16px;flex-shrink:0;transition:.15s}
 .btn-icon:hover{background:#f0f8ff;border-color:#0d6efd}
+.img-lib-panel{display:none;border-top:1px solid #e8eaed;padding:10px 12px;background:#fff;max-height:220px;overflow-y:auto}
+.img-lib-panel.open{display:block}
+.img-lib-grid{display:flex;flex-wrap:wrap;gap:8px}
+.img-lib-item{position:relative;width:80px;height:80px;border-radius:8px;overflow:hidden;cursor:pointer;border:2px solid transparent;transition:.15s}
+.img-lib-item:hover{border-color:#0d6efd}
+.img-lib-item img{width:100%;height:100%;object-fit:cover}
+.img-lib-del{position:absolute;top:2px;right:2px;background:rgba(0,0,0,.55);color:#fff;border:none;border-radius:50%;width:18px;height:18px;font-size:11px;cursor:pointer;display:flex;align-items:center;justify-content:center;padding:0}
+.img-lib-add{width:80px;height:80px;border-radius:8px;border:2px dashed #c5cdd6;display:flex;flex-direction:column;align-items:center;justify-content:center;cursor:pointer;color:#9aa0a6;font-size:22px;background:#fafafa;transition:.15s;flex-shrink:0}
+.img-lib-add:hover{border-color:#0d6efd;color:#0d6efd}
 .btn-send{background:#0d6efd;border-color:#0d6efd;color:#fff}
 .btn-send:hover{background:#0b5ed7;border-color:#0b5ed7}
 
@@ -1073,10 +1082,15 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
     <div class="tpl-cats" id="tplCats"></div>
     <div class="tpl-list" id="tplList"></div>
   </div>
+  <div class="img-lib-panel" id="imgLibPanel">
+    <div class="img-lib-grid" id="imgLibGrid"></div>
+    <input type="file" id="imgLibInput" accept="image/*" style="display:none" onchange="saveToLibrary(this)">
+  </div>
   <div class="input-area">
     <button class="btn-icon" onclick="toggleTpl()" title="快速回覆">&#9889;</button>
-    <label class="btn-icon" title="傳送圖片/影片" style="cursor:pointer">
-      &#128247;
+    <button class="btn-icon" onclick="toggleImgLib()" title="快速圖庫">&#128247;</button>
+    <label class="btn-icon" title="傳送圖片/影片" style="cursor:pointer;font-size:13px">
+      &#128190;
       <input type="file" id="imgInput" accept="image/*,video/*" style="display:none" onchange="uploadImg(this)">
     </label>
     <textarea id="replyInput" placeholder="輸入訊息..." rows="1"
@@ -1421,6 +1435,79 @@ function showTplCat(cat){
 function toggleTpl(){
   const p = document.getElementById('tplPanel');
   p.classList.toggle('open');
+  document.getElementById('imgLibPanel').classList.remove('open');
+}
+
+// ── 快速圖庫 ──────────────────────────────────────────────
+let quickImages = [];
+
+async function toggleImgLib(){
+  const panel = document.getElementById('imgLibPanel');
+  const isOpen = panel.classList.contains('open');
+  panel.classList.toggle('open');
+  document.getElementById('tplPanel').classList.remove('open');
+  if(!isOpen) await loadQuickImages();
+}
+
+async function loadQuickImages(){
+  try{
+    const r = await fetch(`/api/quick-images?key=${KEY}`);
+    quickImages = await r.json();
+    renderImgLib();
+  }catch(e){ console.error(e); }
+}
+
+function renderImgLib(){
+  const grid = document.getElementById('imgLibGrid');
+  const items = quickImages.map(img=>`
+    <div class="img-lib-item" onclick="sendQuickImg('${img.url}')">
+      <img src="${img.url}" loading="lazy">
+      <button class="img-lib-del" onclick="deleteQuickImg(event,'${img.name}')" title="刪除">✕</button>
+    </div>`).join('');
+  grid.innerHTML = items + `<div class="img-lib-add" onclick="document.getElementById('imgLibInput').click()">
+    <span>＋</span><span style="font-size:10px;margin-top:2px">新增</span></div>`;
+}
+
+async function sendQuickImg(url){
+  if(!curKey){ toast('請先選擇對話'); return; }
+  document.getElementById('imgLibPanel').classList.remove('open');
+  toast('傳送中...');
+  try{
+    await fetch('/api/reply',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({key:curKey,admin_key:KEY,image_url:url})});
+    await loadMsgs(curKey);
+  }catch(e){ toast('傳送失敗：'+e.message); }
+}
+
+async function saveToLibrary(input){
+  if(!input.files[0]) return;
+  const file = input.files[0];
+  toast('儲存圖片中...');
+  const reader = new FileReader();
+  reader.onload = async e=>{
+    const b64 = e.target.result.split(',')[1];
+    try{
+      const r = await fetch('/api/save-quick-image',{method:'POST',
+        headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({admin_key:KEY,filename:file.name,content:b64})});
+      const d = await r.json();
+      if(d.ok){ toast('已儲存到圖庫'); await loadQuickImages(); }
+      else toast('儲存失敗：'+(d.error||''));
+    }catch(e){ toast('儲存失敗：'+e.message); }
+  };
+  reader.readAsDataURL(file);
+  input.value='';
+}
+
+async function deleteQuickImg(evt, name){
+  evt.stopPropagation();
+  if(!confirm('確定刪除這張圖片？')) return;
+  try{
+    await fetch('/api/delete-quick-image',{method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({admin_key:KEY,name})});
+    await loadQuickImages();
+  }catch(e){ toast('刪除失敗'); }
 }
 
 function useTpl(text){
@@ -2420,6 +2507,85 @@ def api_fb_diag():
     result["fb_messages_in_log"] = len(fb_msgs)
     result["latest_fb"] = fb_msgs[0] if fb_msgs else None
     return jsonify(result)
+
+# ── 快速圖庫 API ──────────────────────────────────────────
+
+@app.route("/api/quick-images", methods=["GET"])
+def api_quick_images():
+    ok, _ = auth_required()
+    if not ok:
+        return jsonify({"error": "unauthorized"}), 403
+    if not SUPABASE_SERVICE_KEY:
+        return jsonify([])
+    try:
+        list_url = f"{SUPABASE_URL}/storage/v1/object/list/{SUPABASE_BUCKET}"
+        req = urllib.request.Request(
+            list_url,
+            data=json.dumps({"prefix": "library/", "limit": 200}).encode(),
+            method="POST",
+            headers={
+                "Authorization": f"Bearer {SUPABASE_SERVICE_KEY}",
+                "Content-Type": "application/json",
+            }
+        )
+        with urllib.request.urlopen(req, timeout=10) as r:
+            files = json.loads(r.read())
+        result = []
+        for f in files:
+            name = f.get("name", "")
+            if not name:
+                continue
+            url = f"{SUPABASE_URL}/storage/v1/object/public/{SUPABASE_BUCKET}/library/{name}"
+            result.append({"name": name, "url": url})
+        return jsonify(result)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route("/api/save-quick-image", methods=["POST"])
+def api_save_quick_image():
+    ok, _ = auth_required()
+    if not ok:
+        return jsonify({"error": "unauthorized"}), 403
+    data = request.get_json(silent=True) or {}
+    filename = data.get("filename", "")
+    content_b64 = data.get("content", "")
+    if not filename or not content_b64:
+        return jsonify({"error": "missing params"}), 400
+    import re as _re
+    safe = _re.sub(r"[^a-zA-Z0-9._-]", "_", filename)
+    img_data = base64.b64decode(content_b64)
+    ext = safe.rsplit(".", 1)[-1].lower() if "." in safe else "jpg"
+    ct = "image/jpeg" if ext in ("jpg","jpeg") else f"image/{ext}"
+    url, err = upload_image_to_supabase(f"library/{safe}", img_data, ct)
+    if not url:
+        return jsonify({"error": err}), 500
+    return jsonify({"ok": True, "url": url, "name": safe})
+
+@app.route("/api/delete-quick-image", methods=["POST"])
+def api_delete_quick_image():
+    ok, _ = auth_required()
+    if not ok:
+        return jsonify({"error": "unauthorized"}), 403
+    data = request.get_json(silent=True) or {}
+    name = data.get("name", "")
+    if not name or not SUPABASE_SERVICE_KEY:
+        return jsonify({"error": "missing params"}), 400
+    try:
+        del_url = f"{SUPABASE_URL}/storage/v1/object/{SUPABASE_BUCKET}"
+        req = urllib.request.Request(
+            del_url,
+            data=json.dumps({"prefixes": [f"library/{name}"]}).encode(),
+            method="DELETE",
+            headers={
+                "Authorization": f"Bearer {SUPABASE_SERVICE_KEY}",
+                "Content-Type": "application/json",
+            }
+        )
+        with urllib.request.urlopen(req, timeout=10) as r:
+            r.read()
+        return jsonify({"ok": True})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
