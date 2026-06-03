@@ -49,6 +49,9 @@ LOGS_FILE = "logs.json"
 DATABASE_URL = os.getenv("DATABASE_URL", "")
 GOOGLE_SHEET_ID = os.getenv("GOOGLE_SHEET_ID", "")
 GOOGLE_SERVICE_ACCOUNT_JSON = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON", "")
+SUPABASE_URL = os.getenv("SUPABASE_URL", "https://lrslleetqyaerstrlbap.supabase.co")
+SUPABASE_SERVICE_KEY = os.getenv("SUPABASE_SERVICE_KEY", "")
+SUPABASE_BUCKET = "chat-images"
 
 _db_lock = threading.Lock()
 
@@ -449,7 +452,10 @@ def handle_line_image(event):
         with urllib.request.urlopen(req, timeout=10) as r:
             data = r.read()
         filename = f"{int(time.time())}_{msg_id}.jpg"
-        image_url, _ = upload_image_to_github(filename, data)
+        if SUPABASE_SERVICE_KEY:
+            image_url, _ = upload_image_to_supabase(filename, data)
+        else:
+            image_url, _ = upload_image_to_github(filename, data)
     except Exception:
         pass
     now = time.strftime("%Y/%m/%d %H:%M:%S", time.gmtime(time.time() + 8*3600))
@@ -669,6 +675,29 @@ def line_push_image(user_id: str, image_url: str):
     except Exception:
         pass
 
+def upload_image_to_supabase(filename: str, data: bytes, content_type: str = "image/jpeg") -> tuple:
+    """Upload image to Supabase Storage. Returns (public_url, error_msg)."""
+    if not SUPABASE_SERVICE_KEY:
+        return "", "SUPABASE_SERVICE_KEY 未設定"
+    try:
+        upload_url = f"{SUPABASE_URL}/storage/v1/object/{SUPABASE_BUCKET}/{filename}"
+        req = urllib.request.Request(
+            upload_url,
+            data=data,
+            method="POST",
+            headers={
+                "Authorization": f"Bearer {SUPABASE_SERVICE_KEY}",
+                "Content-Type": content_type,
+                "x-upsert": "true",
+            }
+        )
+        with urllib.request.urlopen(req, timeout=15) as r:
+            r.read()
+        public_url = f"{SUPABASE_URL}/storage/v1/object/public/{SUPABASE_BUCKET}/{filename}"
+        return public_url, ""
+    except Exception as e:
+        return "", str(e)
+
 def upload_image_to_github(filename: str, data: bytes) -> tuple:
     """Returns (url, error_msg). url is empty string on failure."""
     import sys
@@ -746,15 +775,16 @@ def upload_image(platform):
     ok, _ = check_auth()
     if not ok:
         return jsonify({"error": "unauthorized"}), 403
-    if not GITHUB_TOKEN:
-        return jsonify({"error": "GITHUB_TOKEN 未設定"}), 500
     f = request.files.get("file")
     if not f:
         return jsonify({"error": "no file"}), 400
     import re, time as _time
     safe = re.sub(r"[^a-zA-Z0-9._-]", "_", f.filename)
     filename = f"{int(_time.time())}_{safe}"
-    image_url, err = upload_image_to_github(filename, f.read())
+    if SUPABASE_SERVICE_KEY:
+        image_url, err = upload_image_to_supabase(filename, f.read())
+    else:
+        image_url, err = upload_image_to_github(filename, f.read())
     if not image_url:
         return jsonify({"error": err or "上傳失敗"}), 500
     intent_key = request.form.get("intent_key", "")
