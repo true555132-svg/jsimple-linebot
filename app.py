@@ -1015,6 +1015,20 @@ INBOX_HTML = """<!DOCTYPE html>
 *{box-sizing:border-box;margin:0;padding:0}
 body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#f0f2f5;color:#1a1a1a;height:100vh;overflow:hidden}
 .crm-wrap{display:grid;grid-template-columns:300px 1fr 320px;height:100vh}
+.mobile-back{display:none}
+@media(max-width:768px){
+  .crm-wrap{grid-template-columns:1fr;grid-template-rows:1fr;position:relative;overflow:hidden}
+  .sidebar{position:absolute;inset:0;z-index:20;transform:translateX(0);transition:transform .22s ease}
+  .sidebar.mobile-hidden{transform:translateX(-100%)}
+  .chat-main{position:absolute;inset:0;z-index:10;transform:translateX(100%);transition:transform .22s ease}
+  .chat-main.mobile-show{transform:translateX(0)}
+  .right-panel{display:none!important}
+  .mobile-back{display:flex;align-items:center;justify-content:center;width:34px;height:34px;border:none;background:none;font-size:20px;cursor:pointer;flex-shrink:0;color:#555}
+  .status-select{font-size:10px;padding:3px 4px}
+  .takeover-btn{font-size:10px;padding:4px 8px}
+  .conv-item{padding:10px 12px}
+  .btn-icon{width:34px;height:34px}
+}
 
 /* LEFT SIDEBAR */
 .sidebar{background:#fff;border-right:1px solid #e8eaed;display:flex;flex-direction:column;overflow:hidden}
@@ -1222,6 +1236,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
 <!-- MIDDLE CHAT -->
 <div class="chat-main">
   <div class="chat-header" id="chatHeader" style="display:none">
+    <button class="mobile-back" onclick="mobileBack()" title="返回列表">&#8249;</button>
     <div class="chat-header-avatar" id="hdrAvatar"></div>
     <div class="chat-header-info">
       <div class="chat-header-name" id="hdrName"></div>
@@ -1335,6 +1350,19 @@ let allConvs = [], curKey = null, curStatus = 'bot', filterStatus = 'all', filte
 let curTags = [], curCustomer = {}, noteTimer = null;
 
 // INIT
+const isMobile = ()=> window.innerWidth <= 768;
+
+function mobileShowChat(){
+  if(!isMobile()) return;
+  document.querySelector('.sidebar').classList.add('mobile-hidden');
+  document.querySelector('.chat-main').classList.add('mobile-show');
+}
+
+function mobileBack(){
+  document.querySelector('.sidebar').classList.remove('mobile-hidden');
+  document.querySelector('.chat-main').classList.remove('mobile-show');
+}
+
 async function init(){
   buildTagFilter();
   await loadConvs();
@@ -1451,6 +1479,7 @@ async function toggleRead(evt, key){
 
 async function openConv(key){
   curKey = key;
+  mobileShowChat();
   document.querySelectorAll('.conv-item').forEach(el=>el.classList.remove('active'));
   document.querySelector(`.conv-item[onclick="openConv('${key}')"]`)?.classList.add('active');
 
@@ -1593,10 +1622,34 @@ async function generateVideoThumb(file){
   });
 }
 
+async function compressImage(file, maxW=1600, maxH=1600, quality=0.82){
+  if(!file.type.startsWith('image/') || file.type==='image/gif') return file;
+  return new Promise(resolve=>{
+    const img = new Image();
+    const blobUrl = URL.createObjectURL(file);
+    img.onload = ()=>{
+      let w = img.naturalWidth, h = img.naturalHeight;
+      URL.revokeObjectURL(blobUrl);
+      if(w<=maxW && h<=maxH){ resolve(file); return; }
+      const ratio = Math.min(maxW/w, maxH/h);
+      w = Math.round(w*ratio); h = Math.round(h*ratio);
+      const canvas = document.createElement('canvas');
+      canvas.width = w; canvas.height = h;
+      canvas.getContext('2d').drawImage(img, 0, 0, w, h);
+      canvas.toBlob(blob=>{
+        resolve(new File([blob], file.name.replace(/\.\w+$/, '.jpg'), {type:'image/jpeg'}));
+      }, 'image/jpeg', quality);
+    };
+    img.onerror = ()=>{ URL.revokeObjectURL(blobUrl); resolve(file); };
+    img.src = blobUrl;
+  });
+}
+
 async function uploadImg(input){
   if(!input.files[0]||!curKey) return;
-  const file=input.files[0];
+  let file=input.files[0];
   const isVideo=file.type.startsWith('video/');
+  if(!isVideo) file = await compressImage(file);
   toast(isVideo?'影片上傳中...':'圖片上傳中...');
   const reader=new FileReader();
   reader.onload=async e=>{
@@ -1658,8 +1711,9 @@ async function handlePaste(e){
     if(item.type.startsWith('image/')){
       e.preventDefault();
       if(!curKey){ toast('請先選擇對話'); return; }
-      const file = item.getAsFile();
+      let file = item.getAsFile();
       if(!file) return;
+      file = await compressImage(file);
       toast('圖片上傳中...');
       const reader = new FileReader();
       reader.onload = async re=>{
