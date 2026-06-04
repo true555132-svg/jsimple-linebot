@@ -1298,7 +1298,8 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
     </label>
     <textarea id="replyInput" placeholder="輸入訊息..." rows="1"
       oninput="autoResize(this)"
-      onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();sendReply()}"></textarea>
+      onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();sendReply()}"
+      onpaste="handlePaste(event)"></textarea>
     <button class="btn-icon btn-send" onclick="sendReply()" title="送出">&#10148;</button>
   </div>
 </div>
@@ -1648,6 +1649,35 @@ async function uploadFile(input){
   };
   reader.readAsDataURL(file);
   input.value='';
+}
+
+async function handlePaste(e){
+  const items = e.clipboardData?.items;
+  if(!items) return;
+  for(const item of items){
+    if(item.type.startsWith('image/')){
+      e.preventDefault();
+      if(!curKey){ toast('請先選擇對話'); return; }
+      const file = item.getAsFile();
+      if(!file) return;
+      toast('圖片上傳中...');
+      const reader = new FileReader();
+      reader.onload = async re=>{
+        const b64 = re.target.result.split(',')[1];
+        try{
+          const up = await fetch('/api/upload_image',{method:'POST',headers:{'Content-Type':'application/json'},
+            body:JSON.stringify({key:curKey,admin_key:KEY,filename:'paste.jpg',content:b64})});
+          const ud = await up.json();
+          if(!ud.url){ toast('上傳失敗：'+(ud.error||'')); return; }
+          await fetch('/api/reply',{method:'POST',headers:{'Content-Type':'application/json'},
+            body:JSON.stringify({key:curKey,admin_key:KEY,image_url:ud.url})});
+          await loadMsgs(curKey);
+        }catch(err){ toast('上傳失敗：'+err.message); }
+      };
+      reader.readAsDataURL(file);
+      return;
+    }
+  }
 }
 
 // ── 快捷模板 ──────────────────────────────────────────────
