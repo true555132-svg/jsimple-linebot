@@ -1016,18 +1016,19 @@ INBOX_HTML = """<!DOCTYPE html>
 body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#f0f2f5;color:#1a1a1a;height:100vh;overflow:hidden}
 .crm-wrap{display:grid;grid-template-columns:300px 1fr 320px;height:100vh}
 .mobile-back{display:none}
-@media(max-width:768px){
-  .crm-wrap{grid-template-columns:1fr;grid-template-rows:1fr;position:relative;overflow:hidden}
-  .sidebar{position:absolute;inset:0;z-index:20;transform:translateX(0);transition:transform .22s ease}
-  .sidebar.mobile-hidden{transform:translateX(-100%)}
-  .chat-main{position:absolute;inset:0;z-index:10;transform:translateX(100%);transition:transform .22s ease}
-  .chat-main.mobile-show{transform:translateX(0)}
+@media(max-width:820px){
+  body{overflow:hidden}
+  .crm-wrap{display:flex;flex-direction:row;width:200vw;height:100vh;transition:transform .25s ease;grid-template-columns:unset}
+  .crm-wrap.mobile-chat{transform:translateX(-100vw)}
+  .sidebar{width:100vw;min-width:100vw;max-width:100vw;flex-shrink:0;overflow-y:auto}
+  .chat-main{width:100vw;min-width:100vw;max-width:100vw;flex-shrink:0;display:flex!important}
   .right-panel{display:none!important}
-  .mobile-back{display:flex;align-items:center;justify-content:center;width:34px;height:34px;border:none;background:none;font-size:20px;cursor:pointer;flex-shrink:0;color:#555}
-  .status-select{font-size:10px;padding:3px 4px}
-  .takeover-btn{font-size:10px;padding:4px 8px}
-  .conv-item{padding:10px 12px}
-  .btn-icon{width:34px;height:34px}
+  .mobile-back{display:flex;align-items:center;justify-content:center;width:36px;height:36px;border:none;background:none;font-size:26px;cursor:pointer;flex-shrink:0;color:#333;line-height:1}
+  .chat-header{padding:8px 10px;gap:6px;flex-wrap:nowrap}
+  .status-select{font-size:11px;padding:3px 5px;max-width:80px}
+  .takeover-btn{font-size:11px;padding:4px 8px}
+  .btn-icon{width:34px;height:34px;font-size:15px}
+  .input-area{padding:6px 8px;gap:4px}
 }
 
 /* LEFT SIDEBAR */
@@ -1350,17 +1351,15 @@ let allConvs = [], curKey = null, curStatus = 'bot', filterStatus = 'all', filte
 let curTags = [], curCustomer = {}, noteTimer = null;
 
 // INIT
-const isMobile = ()=> window.innerWidth <= 768;
+const isMobile = ()=> window.innerWidth <= 820;
 
 function mobileShowChat(){
   if(!isMobile()) return;
-  document.querySelector('.sidebar').classList.add('mobile-hidden');
-  document.querySelector('.chat-main').classList.add('mobile-show');
+  document.querySelector('.crm-wrap').classList.add('mobile-chat');
 }
 
 function mobileBack(){
-  document.querySelector('.sidebar').classList.remove('mobile-hidden');
-  document.querySelector('.chat-main').classList.remove('mobile-show');
+  document.querySelector('.crm-wrap').classList.remove('mobile-chat');
 }
 
 async function init(){
