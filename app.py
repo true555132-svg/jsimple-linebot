@@ -780,6 +780,35 @@ def line_push_image(user_id: str, image_url: str):
     except Exception:
         pass
 
+def line_push_file(user_id: str, file_url: str, filename: str, file_size: int = 0):
+    url = "https://api.line.me/v2/bot/message/push"
+    payload = json.dumps({"to": user_id, "messages": [{
+        "type": "file",
+        "originalContentUrl": file_url,
+        "fileName": filename,
+        "fileSize": file_size
+    }]}).encode()
+    req = urllib.request.Request(url, data=payload, headers={
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {LINE_CHANNEL_ACCESS_TOKEN}"
+    })
+    try:
+        urllib.request.urlopen(req)
+    except Exception:
+        # fallback: send as text link
+        line_push(user_id, f"📎 {filename}\n{file_url}")
+
+def fb_send_file(psid: str, file_url: str):
+    url = f"https://graph.facebook.com/v22.0/me/messages?access_token={FB_PAGE_ACCESS_TOKEN}"
+    payload = json.dumps({"recipient": {"id": psid}, "message": {
+        "attachment": {"type": "file", "payload": {"url": file_url, "is_reusable": True}}
+    }}).encode()
+    req = urllib.request.Request(url, data=payload, headers={"Content-Type": "application/json"})
+    try:
+        urllib.request.urlopen(req)
+    except Exception:
+        pass
+
 def upload_image_to_supabase(filename: str, data: bytes, content_type: str = "image/jpeg") -> tuple:
     """Upload image to Supabase Storage. Returns (public_url, error_msg)."""
     if not SUPABASE_SERVICE_KEY:
@@ -1107,6 +1136,11 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
 .input-area textarea:focus{border-color:#0d6efd}
 .btn-icon{width:36px;height:36px;border-radius:50%;border:1.5px solid #e8eaed;background:#fff;cursor:pointer;display:flex;align-items:center;justify-content:center;font-size:16px;flex-shrink:0;transition:.15s}
 .btn-icon:hover{background:#f0f8ff;border-color:#0d6efd}
+.file-bubble{display:flex;align-items:center;gap:8px;background:#f0f4ff;border:1px solid #c5d5fb;border-radius:10px;padding:8px 12px;max-width:220px;cursor:pointer;text-decoration:none;color:#1a1a1a}
+.file-bubble-icon{font-size:22px;flex-shrink:0}
+.file-bubble-info{min-width:0}
+.file-bubble-name{font-size:12px;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.file-bubble-size{font-size:10px;color:#9aa0a6}
 .img-lib-panel{display:none;border-top:1px solid #e8eaed;padding:10px 12px;background:#fff;max-height:220px;overflow-y:auto}
 .img-lib-panel.open{display:block}
 .img-lib-grid{display:flex;flex-wrap:wrap;gap:8px}
@@ -1257,6 +1291,10 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
     <label class="btn-icon" title="傳送圖片/影片" style="cursor:pointer;font-size:13px">
       &#128190;
       <input type="file" id="imgInput" accept="image/*,video/*" style="display:none" onchange="uploadImg(this)">
+    </label>
+    <label class="btn-icon" title="傳送檔案（PDF等）" style="cursor:pointer;font-size:15px">
+      &#128206;
+      <input type="file" id="fileInput" accept="*/*" style="display:none" onchange="uploadFile(this)">
     </label>
     <textarea id="replyInput" placeholder="輸入訊息..." rows="1"
       oninput="autoResize(this)"
@@ -1456,10 +1494,26 @@ function renderMsgs(msgs){
     const isMe = m.role==='admin';
     const time = m.ts ? new Date(m.ts*1000).toLocaleTimeString('zh-TW',{hour:'2-digit',minute:'2-digit'}) : '';
     let content = '';
-    if(m.image_url){
-      const isVid=/\.(mp4|mov|avi|webm|m4v)(\?|$)/i.test(m.image_url);
-      if(isVid) content=`<video src="${m.image_url}" controls style="max-width:220px;border-radius:12px;display:block"></video>`;
-      else content=`<img class="msg-img" src="${m.image_url}" onclick="window.open(this.src)">`;
+    const fileMatch = (m.content||'').match(/^\[檔案\] (.+)$/);
+    if(fileMatch && m.role==='admin'){
+      // admin sent file - show link from log
+      content = `<span>📎 ${escHtml(fileMatch[1])}</span>`;
+    } else if(m.image_url){
+      const imgUrl = m.image_url;
+      const isVid=/\.(mp4|mov|avi|webm|m4v)(\?|$)/i.test(imgUrl);
+      const isFile=/\/(files)\//i.test(imgUrl) || /\.(pdf|doc|docx|xls|xlsx|ppt|pptx|zip|rar|txt|csv)(\?|$)/i.test(imgUrl);
+      if(isVid) content=`<video src="${imgUrl}" controls style="max-width:220px;border-radius:12px;display:block"></video>`;
+      else if(isFile){
+        const fname = imgUrl.split('/').pop().split('?')[0].replace(/^\d+_/,'');
+        const ext = fname.split('.').pop().toUpperCase();
+        const icons = {PDF:'📕',DOC:'📘',DOCX:'📘',XLS:'📗',XLSX:'📗',PPT:'📙',PPTX:'📙',ZIP:'🗜️',RAR:'🗜️',TXT:'📄',CSV:'📊'};
+        const icon = icons[ext]||'📎';
+        content=`<a href="${imgUrl}" target="_blank" class="file-bubble">
+          <span class="file-bubble-icon">${icon}</span>
+          <div class="file-bubble-info"><div class="file-bubble-name">${escHtml(fname)}</div><div class="file-bubble-size">${ext} 點擊下載</div></div>
+        </a>`;
+      }
+      else content=`<img class="msg-img" src="${imgUrl}" onclick="window.open(this.src)">`;
     } else if(m.sticker_url) content = `<img class="msg-sticker" src="${m.sticker_url}">`;
     else content = escHtml(m.content||'');
     return `<div class="msg-row ${isMe?'me':'them'}">
@@ -1569,6 +1623,28 @@ async function uploadImg(input){
       }
       await loadMsgs(curKey);
     }catch(e){ toast('上傳失敗：'+e.message); }
+  };
+  reader.readAsDataURL(file);
+  input.value='';
+}
+
+async function uploadFile(input){
+  if(!input.files[0]||!curKey) return;
+  const file = input.files[0];
+  toast('檔案上傳中...');
+  const reader = new FileReader();
+  reader.onload = async e=>{
+    const b64 = e.target.result.split(',')[1];
+    try{
+      const up = await fetch('/api/upload_file',{method:'POST',headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({key:curKey,admin_key:KEY,filename:file.name,content:b64})});
+      const ud = await up.json();
+      if(!ud.url){ toast('上傳失敗：'+(ud.error||'未知錯誤')); return; }
+      await fetch('/api/reply',{method:'POST',headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({key:curKey,admin_key:KEY,file_url:ud.url,filename:ud.filename||file.name,file_size:ud.size||0})});
+      await loadMsgs(curKey);
+      toast('檔案已傳送');
+    }catch(e){ toast('傳送失敗：'+e.message); }
   };
   reader.readAsDataURL(file);
   input.value='';
@@ -2644,22 +2720,26 @@ def api_reply():
     else:
         platform = data.get("platform", "").upper()
         user_id = data.get("user_id", "")
-    # support both 'message' and 'text' fields
     text = (data.get("message", "") or data.get("text", "")).strip()
     image_url = data.get("image_url", "").strip()
     video_url = data.get("video_url", "").strip()
     preview_url = data.get("preview_url", "").strip()
-    if not user_id or (not text and not image_url and not video_url):
+    file_url = data.get("file_url", "").strip()
+    filename = data.get("filename", "檔案").strip()
+    file_size = int(data.get("file_size", 0))
+    if not user_id or (not text and not image_url and not video_url and not file_url):
         return jsonify({"error": "missing fields"}), 400
     try:
         if platform == "LINE":
             if text: line_push(user_id, text)
             if image_url: line_push_image(user_id, image_url)
             if video_url: line_push_video(user_id, video_url, preview_url or video_url)
+            if file_url: line_push_file(user_id, file_url, filename, file_size)
         elif platform == "FB":
             if text: fb_send(user_id, text)
             if image_url: fb_send_image(user_id, image_url)
             if video_url: fb_send_video(user_id, video_url)
+            if file_url: fb_send_file(user_id, file_url)
         else:
             return jsonify({"error": "unsupported platform"}), 400
         now = time.strftime("%Y/%m/%d %H:%M:%S", time.gmtime(time.time() + 8*3600))
@@ -2674,6 +2754,10 @@ def api_reply():
             log_message({"time": now, "platform": platform, "user_id": user_id,
                          "msg": "", "intent": "manual", "reply": "", "replied": True,
                          "image_url": video_url, "sent_by": "admin"})
+        if file_url:
+            log_message({"time": now, "platform": platform, "user_id": user_id,
+                         "msg": "", "intent": "manual", "reply": f"[檔案] {filename}", "replied": True,
+                         "sent_by": "admin"})
         return jsonify({"ok": True})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
@@ -2701,6 +2785,29 @@ def api_upload_image():
     if not url:
         return jsonify({"error": err or "上傳失敗"}), 500
     return jsonify({"url": url})
+
+@app.route("/api/upload_file", methods=["POST"])
+def api_upload_file():
+    ok, _ = auth_required()
+    if not ok:
+        return jsonify({"error": "unauthorized"}), 403
+    data = request.get_json(silent=True) or {}
+    filename = data.get("filename", "file")
+    content_b64 = data.get("content", "")
+    if not content_b64:
+        return jsonify({"error": "no content"}), 400
+    import re as _re, mimetypes as _mt
+    safe = _re.sub(r"[^a-zA-Z0-9._-]", "_", filename)
+    fname = f"files/{int(time.time())}_{safe}"
+    try:
+        raw = base64.b64decode(content_b64)
+    except Exception:
+        return jsonify({"error": "invalid base64"}), 400
+    ct = _mt.guess_type(filename)[0] or "application/octet-stream"
+    url, err = upload_image_to_supabase(fname, raw, ct)
+    if not url:
+        return jsonify({"error": err or "上傳失敗"}), 500
+    return jsonify({"url": url, "filename": safe, "size": len(raw)})
 
 @app.route("/api/takeover", methods=["POST"])
 def api_takeover():
