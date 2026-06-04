@@ -2655,7 +2655,7 @@ def api_messages():
             continue
         ts = 0
         try:
-            ts = int(time.mktime(time.strptime(l.get("time", ""), "%Y/%m/%d %H:%M:%S")))
+            ts = int(time.mktime(time.strptime(l.get("time", ""), "%Y/%m/%d %H:%M:%S")) - 8*3600)
         except Exception:
             pass
         if l.get("sent_by") == "admin":
@@ -2706,14 +2706,14 @@ def api_conversations():
         convs[key]["last_message"] = l.get("msg","")
         seen_ts = _pg_get_last_seen(key)
         try:
-            msg_ts = time.mktime(time.strptime(l.get("time",""), "%Y/%m/%d %H:%M:%S"))
+            msg_ts = time.mktime(time.strptime(l.get("time",""), "%Y/%m/%d %H:%M:%S")) - 8*3600
             if msg_ts > seen_ts and l.get("user_id","") != "ADMIN" and l.get("sent_by","") != "admin":
                 convs[key]["unread"] += 1
         except Exception:
             pass
     for v in convs.values():
         try:
-            ts = time.mktime(time.strptime(v.get("last_time",""), "%Y/%m/%d %H:%M:%S"))
+            ts = time.mktime(time.strptime(v.get("last_time",""), "%Y/%m/%d %H:%M:%S")) - 8*3600
             v["last_time"] = int(ts)
         except Exception:
             v["last_time"] = 0
