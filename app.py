@@ -116,11 +116,18 @@ def _init_messages_db():
                     ai_name     TEXT DEFAULT '',
                     ai_desc     TEXT DEFAULT '',
                     ai_keywords TEXT DEFAULT '',
-                    error_msg   TEXT DEFAULT '',
-                    created_at  FLOAT DEFAULT 0,
-                    updated_at  FLOAT DEFAULT 0
+                    error_msg        TEXT DEFAULT '',
+                    created_at       FLOAT DEFAULT 0,
+                    updated_at       FLOAT DEFAULT 0
                 )
             """)
+            # migration：補 Phase 2 欄位（已存在則忽略）
+            for col_sql in [
+                "ALTER TABLE product_jobs ADD COLUMN IF NOT EXISTS processed_images TEXT DEFAULT '[]'",
+                "ALTER TABLE product_jobs ADD COLUMN IF NOT EXISTS img_status TEXT DEFAULT ''",
+            ]:
+                try: cur.execute(col_sql)
+                except Exception: pass
             conn.commit()
             cur.close()
             conn.close()
@@ -3661,13 +3668,13 @@ def _pj_get(job_id):
     try:
         conn = _pg_conn(); cur = conn.cursor()
         cur.execute(
-            "SELECT id,url,platform,status,raw_title,raw_desc,raw_images,raw_price,ai_name,ai_desc,ai_keywords,error_msg,created_at FROM product_jobs WHERE id=%s",
+            "SELECT id,url,platform,status,raw_title,raw_desc,raw_images,raw_price,ai_name,ai_desc,ai_keywords,error_msg,created_at,processed_images,img_status FROM product_jobs WHERE id=%s",
             (job_id,)
         )
         row = cur.fetchone(); cur.close(); conn.close()
         if not row:
             return None
-        return {"id":row[0],"url":row[1],"platform":row[2],"status":row[3],"raw_title":row[4],"raw_desc":row[5],"raw_images":json.loads(row[6] or "[]"),"raw_price":row[7],"ai_name":row[8],"ai_desc":row[9],"ai_keywords":row[10],"error_msg":row[11],"created_at":row[12]}
+        return {"id":row[0],"url":row[1],"platform":row[2],"status":row[3],"raw_title":row[4],"raw_desc":row[5],"raw_images":json.loads(row[6] or "[]"),"raw_price":row[7],"ai_name":row[8],"ai_desc":row[9],"ai_keywords":row[10],"error_msg":row[11],"created_at":row[12],"processed_images":json.loads(row[13] or "[]"),"img_status":row[14] or ""}
     except Exception:
         return None
 
@@ -3906,6 +3913,72 @@ def _process_product_job(job_id, url, platform):
 
     _pj_update(job_id, status="done", ai_name=ai.get("name",""), ai_desc=ai.get("desc",""), ai_keywords=ai.get("keywords",""))
 
+# ── 圖片處理（Phase 2A）────────────────────────────────────────
+
+def _download_image(url):
+    """下載圖片，回傳 bytes 或 None。"""
+    try:
+        if url.startswith("//"):
+            url = "https:" + url
+        req = urllib.request.Request(url, headers={
+            "User-Agent": "Mozilla/5.0",
+            "Referer": "https://www.1688.com/",
+        })
+        with urllib.request.urlopen(req, timeout=15) as r:
+            return r.read()
+    except Exception:
+        return None
+
+def _process_to_white_bg(img_bytes, size=800):
+    """將圖片加白底、正方形裁切、壓縮。回傳 JPEG bytes 或 None。"""
+    try:
+        from PIL import Image
+        import io
+        img = Image.open(io.BytesIO(img_bytes)).convert("RGBA")
+        # 建立白色底圖
+        bg = Image.new("RGBA", img.size, (255, 255, 255, 255))
+        bg.paste(img, mask=img.split()[3] if img.mode == "RGBA" else None)
+        bg = bg.convert("RGB")
+        # 等比例縮放到 size x size
+        bg.thumbnail((size, size), Image.LANCZOS)
+        canvas = Image.new("RGB", (size, size), (255, 255, 255))
+        offset = ((size - bg.width) // 2, (size - bg.height) // 2)
+        canvas.paste(bg, offset)
+        out = io.BytesIO()
+        canvas.save(out, format="JPEG", quality=85, optimize=True)
+        return out.getvalue()
+    except Exception:
+        return None
+
+def _process_images_for_job(job_id):
+    """背景 thread：下載 raw_images → 白底處理 → 上傳 Supabase → 存 processed_images。"""
+    job = _pj_get(job_id)
+    if not job:
+        return
+    raw_imgs = job.get("raw_images", [])
+    if not raw_imgs:
+        _pj_update(job_id, img_status="no_images")
+        return
+
+    _pj_update(job_id, img_status="processing")
+    processed = []
+    for i, url in enumerate(raw_imgs[:10]):
+        img_bytes = _download_image(url)
+        if not img_bytes:
+            continue
+        result = _process_to_white_bg(img_bytes)
+        if not result:
+            continue
+        filename = f"products/{job_id}_{i+1}.jpg"
+        pub_url, err = upload_image_to_supabase(filename, result, "image/jpeg")
+        if pub_url:
+            processed.append(pub_url)
+
+    _pj_update(job_id,
+        processed_images=json.dumps(processed, ensure_ascii=False),
+        img_status="done" if processed else "failed"
+    )
+
 # ── HTML 模板 ─────────────────────────────────────────────────
 
 PRODUCTS_HTML = """<!DOCTYPE html>
@@ -3986,6 +4059,25 @@ body{font-family:-apple-system,sans-serif;background:#f5f5f5;color:#333}
 .hidden{display:none}
 .toast{position:fixed;bottom:28px;left:50%;transform:translateX(-50%);background:#333;color:#fff;padding:9px 20px;border-radius:20px;font-size:14px;z-index:999;opacity:0;transition:opacity .3s;pointer-events:none}
 .toast.show{opacity:1}
+/* 編輯模式 */
+.edit-ta{width:100%;border:1.5px solid #ddd;border-radius:10px;padding:10px 12px;font-size:14px;line-height:1.6;resize:vertical;font-family:-apple-system,sans-serif;outline:none;background:#fff}
+.edit-ta:focus{border-color:#1a1a1a}
+.edit-ta.name{height:52px}
+.edit-ta.desc{height:200px}
+.edit-ta.kw{height:52px}
+.edit-bar{display:flex;gap:8px;margin-top:10px}
+.btn-save{background:#1a1a1a;color:#fff;border:none;border-radius:9px;padding:8px 18px;font-size:13px;font-weight:700;cursor:pointer;font-family:-apple-system,sans-serif}
+.btn-save:hover{background:#333}
+.btn-cancel{background:#f5f5f5;color:#555;border:none;border-radius:9px;padding:8px 16px;font-size:13px;cursor:pointer;font-family:-apple-system,sans-serif}
+.btn-cancel:hover{background:#eee}
+.btn-edit{background:#f0f0f0;color:#333;border:none;border-radius:9px;padding:6px 14px;font-size:13px;cursor:pointer;font-family:-apple-system,sans-serif;margin-left:auto}
+.btn-edit:hover{background:#e0e0e0}
+/* 批次輸入 */
+.url-ta{width:100%;border:1.5px solid #ddd;border-radius:10px;padding:10px 14px;font-size:13px;height:90px;resize:vertical;font-family:-apple-system,sans-serif;outline:none}
+.url-ta:focus{border-color:#1a1a1a}
+.batch-hint{font-size:12px;color:#aaa;margin-top:6px}
+.progress-bar-wrap{background:#f0f0f0;border-radius:10px;height:6px;margin-top:10px;overflow:hidden;display:none}
+.progress-bar{background:#1a1a1a;height:100%;border-radius:10px;transition:width .3s}
 </style>
 </head>
 <body>
@@ -3998,12 +4090,14 @@ body{font-family:-apple-system,sans-serif;background:#f5f5f5;color:#333}
 
 <div class="wrap">
   <div class="card">
-    <h3>貼上商品連結</h3>
-    <div class="url-row">
-      <input id="urlInput" type="text" placeholder="https://detail.1688.com/... 或 https://item.taobao.com/...">
+    <h3>貼上商品連結（一行一個，可多筆）</h3>
+    <textarea class="url-ta" id="urlInput" placeholder="https://detail.1688.com/offer/xxx.html&#10;https://item.taobao.com/item.htm?id=xxx&#10;（一行一個連結）"></textarea>
+    <div class="batch-hint" id="batchHint"></div>
+    <div class="progress-bar-wrap" id="progressWrap"><div class="progress-bar" id="progressBar" style="width:0%"></div></div>
+    <div style="margin-top:10px;display:flex;gap:10px;align-items:center">
       <button class="btn-primary" id="addBtn" onclick="submitUrl()">開始搬運</button>
+      <div class="err-msg" id="addErr" style="margin:0"></div>
     </div>
-    <div class="err-msg" id="addErr"></div>
   </div>
 
   <div class="filter-row">
@@ -4093,19 +4187,34 @@ function setFilter(f,btn){
 }
 
 async function submitUrl(){
-  const input=document.getElementById("urlInput");
+  const ta=document.getElementById("urlInput");
   const errEl=document.getElementById("addErr");
   const btn=document.getElementById("addBtn");
-  const url=input.value.trim();
+  const hint=document.getElementById("batchHint");
+  const pWrap=document.getElementById("progressWrap");
+  const pBar=document.getElementById("progressBar");
   errEl.style.display="none";
-  if(!url){errEl.textContent="請貼上商品連結";errEl.style.display="block";return;}
-  btn.disabled=true; btn.textContent="提交中...";
-  try{
-    const r=await api("/api/products",{method:"POST",body:JSON.stringify({url})});
-    if(r.error){errEl.textContent=r.error;errEl.style.display="block";}
-    else{input.value="";toast("已加入搬運隊列");loadJobs();}
-  }catch(e){errEl.textContent="提交失敗，請稍後再試";errEl.style.display="block";}
-  finally{btn.disabled=false;btn.textContent="開始搬運";}
+  const urls=ta.value.split("\n").map(s=>s.trim()).filter(Boolean);
+  if(!urls.length){errEl.textContent="請貼上商品連結";errEl.style.display="block";return;}
+  btn.disabled=true;
+  let done=0,failed=0;
+  pWrap.style.display="block";
+  for(const url of urls){
+    btn.textContent=`搬運中 ${done+failed+1}/${urls.length}...`;
+    hint.textContent=`已提交 ${done} 筆${failed?`，失敗 ${failed} 筆`:""}`;
+    pBar.style.width=((done+failed)/urls.length*100)+"%";
+    try{
+      const r=await api("/api/products",{method:"POST",body:JSON.stringify({url})});
+      if(r.error) failed++;
+      else done++;
+    }catch(e){failed++;}
+  }
+  pBar.style.width="100%";
+  hint.textContent=`完成：${done} 筆${failed?`，失敗：${failed} 筆`:""}`;
+  if(done>0) ta.value="";
+  btn.disabled=false; btn.textContent="開始搬運";
+  loadJobs();
+  setTimeout(()=>{pWrap.style.display="none"; hint.textContent="";},4000);
 }
 
 async function openJob(id){
@@ -4118,7 +4227,7 @@ async function openJob(id){
   }catch(e){document.getElementById("modalBody").innerHTML='<div class="err-box">載入失敗</div>';}
 }
 
-function renderModal(j){
+function renderModal(j, editMode=false){
   document.getElementById("modalTitle").textContent = j.ai_name||j.raw_title||"商品詳情";
   let h="";
   if(j.status==="error"){
@@ -4134,15 +4243,31 @@ function renderModal(j){
     if(openId===j.id) setTimeout(()=>{if(openId===j.id)openJob(j.id);},2000);
     return;
   }
-  // done
-  if(j.ai_name) h+=`<div class="section"><div class="slabel">商品名稱</div><div class="rbox">${esc(j.ai_name)}<button class="copy-btn" onclick='cp(this,${JSON.stringify(j.ai_name)})'>複製</button></div></div>`;
-  if(j.ai_keywords){
-    const kws=j.ai_keywords.split(",").map(s=>s.trim()).filter(Boolean);
-    h+=`<div class="section"><div class="slabel">SEO 關鍵字</div><div class="kw-row">${kws.map(k=>`<span class="kw">${esc(k)}</span>`).join("")}</div><div style="margin-top:8px"><button class="btn-sm" onclick='cp(this,${JSON.stringify(j.ai_keywords)})'>複製全部</button></div></div>`;
+  // done — 編輯模式 / 檢視模式
+  if(editMode){
+    h+=`<div class="section"><div class="slabel">商品名稱</div><textarea class="edit-ta name" id="edit_name">${esc(j.ai_name||"")}</textarea></div>`;
+    h+=`<div class="section"><div class="slabel">SEO 關鍵字（逗號分隔）</div><textarea class="edit-ta kw" id="edit_kw">${esc(j.ai_keywords||"")}</textarea></div>`;
+    h+=`<div class="section"><div class="slabel">商品描述</div><textarea class="edit-ta desc" id="edit_desc">${esc(j.ai_desc||"")}</textarea></div>`;
+    h+=`<div class="edit-bar"><button class="btn-save" onclick="saveEdit(${j.id})">儲存</button><button class="btn-cancel" onclick="openJob(${j.id})">取消</button></div>`;
+  } else {
+    const editBtn=`<button class="btn-edit" onclick="enterEdit(${j.id})">編輯文案</button>`;
+    if(j.ai_name) h+=`<div class="section"><div class="slabel" style="display:flex;align-items:center">商品名稱 ${editBtn}</div><div class="rbox">${esc(j.ai_name)}<button class="copy-btn" onclick='cp(this,${JSON.stringify(j.ai_name)})'>複製</button></div></div>`;
+    if(j.ai_keywords){
+      const kws=j.ai_keywords.split(",").map(s=>s.trim()).filter(Boolean);
+      h+=`<div class="section"><div class="slabel">SEO 關鍵字</div><div class="kw-row">${kws.map(k=>`<span class="kw">${esc(k)}</span>`).join("")}</div><div style="margin-top:8px"><button class="btn-sm" onclick='cp(this,${JSON.stringify(j.ai_keywords)})'>複製全部</button></div></div>`;
+    }
+    if(j.ai_desc) h+=`<div class="section"><div class="slabel">商品描述</div><div class="rbox" style="max-height:320px;overflow-y:auto">${esc(j.ai_desc)}<button class="copy-btn" onclick='cp(this,${JSON.stringify(j.ai_desc)})'>複製</button></div></div>`;
   }
-  if(j.ai_desc) h+=`<div class="section"><div class="slabel">商品描述</div><div class="rbox" style="max-height:320px;overflow-y:auto">${esc(j.ai_desc)}<button class="copy-btn" onclick='cp(this,${JSON.stringify(j.ai_desc)})'>複製</button></div></div>`;
   if(j.raw_images&&j.raw_images.length){
-    h+=`<div class="section"><div class="slabel">商品圖片（${j.raw_images.length} 張）</div><div class="imgs-row">${j.raw_images.map(img=>`<img src="${esc(img)}" loading="lazy" onerror="this.style.display='none'">`).join("")}</div></div>`;
+    const imgStatusMap={"processing":"處理中...","done":"處理完成","failed":"處理失敗","no_images":"無圖片"};
+    const imgStatusLabel=imgStatusMap[j.img_status]||"";
+    const processBtn=j.img_status==="processing"
+      ? `<span style="font-size:12px;color:#888"><span class="spinner"></span>${imgStatusLabel}</span>`
+      : `<button class="btn-sm" onclick="processImgs(${j.id})" style="margin-left:8px">白底處理</button>${imgStatusLabel?`<span style="font-size:12px;color:#888;margin-left:6px">${imgStatusLabel}</span>`:""}`;
+    h+=`<div class="section"><div class="slabel" style="display:flex;align-items:center;gap:6px">原始圖片（${j.raw_images.length} 張）${processBtn}</div><div class="imgs-row">${j.raw_images.map(img=>`<img src="${esc(img)}" loading="lazy" onerror="this.style.display='none'">`).join("")}</div></div>`;
+  }
+  if(j.processed_images&&j.processed_images.length){
+    h+=`<div class="section"><div class="slabel">已處理圖片（白底，${j.processed_images.length} 張）</div><div class="imgs-row">${j.processed_images.map(img=>`<a href="${esc(img)}" target="_blank"><img src="${esc(img)}" loading="lazy" onerror="this.style.display='none'"></a>`).join("")}</div></div>`;
   }
   h+=`<hr class="divider">`;
   h+=imgFormHtml(j.id, j.raw_images||[]);
@@ -4153,6 +4278,20 @@ function renderModal(j){
   if(j.raw_desc)  h+=`<div class="section"><div class="slabel">原始描述</div><div class="rbox" style="max-height:180px;overflow-y:auto">${esc(j.raw_desc.slice(0,1200))}${j.raw_desc.length>1200?"…":""}</div></div>`;
   h+=`</div>`;
   document.getElementById("modalBody").innerHTML=h;
+}
+
+async function enterEdit(id){
+  const j=await api("/api/products/"+id);
+  renderModal(j, true);
+}
+
+async function saveEdit(id){
+  const name=document.getElementById("edit_name").value.trim();
+  const kw=document.getElementById("edit_kw").value.trim();
+  const desc=document.getElementById("edit_desc").value.trim();
+  const r=await api("/api/products/"+id,{method:"PUT",body:JSON.stringify({ai_name:name,ai_keywords:kw,ai_desc:desc})});
+  if(r.ok){toast("已儲存");openJob(id);}
+  else toast("儲存失敗："+r.error);
 }
 
 function imgFormHtml(id, existing){
@@ -4169,6 +4308,12 @@ async function saveImgs(id){
   const r=await api("/api/products/"+id+"/images",{method:"POST",body:JSON.stringify({urls})});
   if(r.ok) toast("圖片已儲存");
   else toast("儲存失敗："+r.error);
+}
+
+async function processImgs(id){
+  const r=await api("/api/products/"+id+"/process-images",{method:"POST",body:"{}"});
+  if(r.ok){toast("圖片處理開始，請稍候...");setTimeout(()=>openJob(id),3000);}
+  else toast("失敗："+r.error);
 }
 
 function toggleRaw(btn){
@@ -4273,6 +4418,36 @@ def api_products_images(job_id):
     cleaned = _clean_images(urls)
     _pj_update(job_id, raw_images=json.dumps(cleaned, ensure_ascii=False))
     return jsonify({"ok": True, "count": len(cleaned)})
+
+@app.route("/api/products/<int:job_id>", methods=["PUT"])
+def api_products_update(job_id):
+    ok, _ = auth_required()
+    if not ok:
+        return jsonify({"error": "unauthorized"}), 403
+    data = request.get_json(silent=True) or {}
+    allowed = {"ai_name", "ai_desc", "ai_keywords"}
+    fields = {k: v for k, v in data.items() if k in allowed}
+    if not fields:
+        return jsonify({"error": "no valid fields"}), 400
+    _pj_update(job_id, **fields)
+    return jsonify({"ok": True})
+
+@app.route("/api/products/<int:job_id>/process-images", methods=["POST"])
+def api_products_process_images(job_id):
+    ok, _ = auth_required()
+    if not ok:
+        return jsonify({"error": "unauthorized"}), 403
+    job = _pj_get(job_id)
+    if not job:
+        return jsonify({"error": "not found"}), 404
+    if not job.get("raw_images"):
+        return jsonify({"error": "沒有圖片可處理"}), 400
+    try:
+        from PIL import Image  # 確認 Pillow 可用
+    except ImportError:
+        return jsonify({"error": "Pillow 未安裝，請在 requirements.txt 加上 Pillow"}), 500
+    threading.Thread(target=_process_images_for_job, args=(job_id,), daemon=True).start()
+    return jsonify({"ok": True})
 
 
 if __name__ == "__main__":
