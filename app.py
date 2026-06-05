@@ -1347,6 +1347,15 @@ const TPL_DATA = {
   '成交':['感謝您的訂購，我馬上幫您安排出貨，請確認收件地址是否正確。','訂單已確認，預計X月X日出貨，有任何問題請隨時告訴我。']
 };
 
+function fmtConvTime(ts){
+  if(!ts) return '';
+  const d = new Date(ts*1000);
+  const now = new Date();
+  const isToday = d.getFullYear()===now.getFullYear() && d.getMonth()===now.getMonth() && d.getDate()===now.getDate();
+  if(isToday) return d.toLocaleTimeString('zh-TW',{hour:'2-digit',minute:'2-digit'});
+  return d.getFullYear()+'/'+(d.getMonth()+1)+'/'+d.getDate();
+}
+
 let allConvs = [], curKey = null, curStatus = 'bot', filterStatus = 'all', filterTag = null, searchQ = '';
 let curTags = [], curCustomer = {}, noteTimer = null;
 
@@ -1429,7 +1438,7 @@ function renderList(){
     const unread = c.unread||0;
     const tags = (c.tags||[]).slice(0,3).map(t=>`<span class="tag-pill">${t}</span>`).join('');
     const pb = c.platform?.toLowerCase()==='fb'?'<span class="platform-badge pb-fb">FB</span>':'<span class="platform-badge pb-line">LINE</span>';
-    const timeStr = c.last_time ? new Date(c.last_time*1000).toLocaleTimeString('zh-TW',{hour:'2-digit',minute:'2-digit'}) : '';
+    const timeStr = c.last_time ? fmtConvTime(c.last_time) : '';
     const avatarEl = c.user_avatar
       ? `<img class="conv-avatar" src="${c.user_avatar}" onerror="this.style.display='none'">`
       : `<div class="conv-avatar-placeholder">&#128100;</div>`;
@@ -2337,6 +2346,416 @@ button{width:100%;background:#00c300;color:#fff;border:none;border-radius:8px;pa
   </form>
   {% if error %}<p class="err">{{ error }}</p>{% endif %}
 </div>
+</body></html>"""
+
+PLATFORM_HTML = """<!DOCTYPE html>
+<html lang="zh-TW"><head><meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>{{ pname }} 管理</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:-apple-system,sans-serif;background:#f5f5f5;color:#333;font-size:15px}
+.header{background:#1a1a1a;color:#fff;padding:13px 18px;display:flex;align-items:center;gap:12px}
+.back{color:#aaa;text-decoration:none;font-size:20px;line-height:1}
+.header h1{font-size:16px;font-weight:700;flex:1}
+.toggle-wrap{display:flex;align-items:center;gap:8px}
+.toggle-label{font-size:13px}
+.toggle{position:relative;width:46px;height:26px}
+.toggle input{opacity:0;width:0;height:0}
+.slider{position:absolute;inset:0;border-radius:26px;background:#555;cursor:pointer;transition:.3s}
+.slider:before{content:"";position:absolute;width:20px;height:20px;left:3px;bottom:3px;background:#fff;border-radius:50%;transition:.3s}
+input:checked+.slider{background:#00c300}
+input:checked+.slider:before{transform:translateX(20px)}
+.tabs{display:flex;background:#fff;border-bottom:2px solid #eee;overflow-x:auto;scrollbar-width:none}
+.tabs::-webkit-scrollbar{display:none}
+.tab{padding:11px 18px;cursor:pointer;white-space:nowrap;font-weight:600;color:#999;border-bottom:3px solid transparent;margin-bottom:-2px;font-size:14px}
+.tab.active{color:var(--ac);border-bottom-color:var(--ac)}
+.tab-content{display:none}
+.tab-content.active{display:block}
+.container{max-width:860px;margin:18px auto;padding:0 14px 90px}
+.badge{font-size:11px;color:#999;background:#f0f0f0;padding:2px 8px;border-radius:8px;font-weight:600}
+textarea{width:100%;border:1px solid #e0e0e0;border-radius:8px;padding:10px;font-size:14px;line-height:1.75;resize:vertical;font-family:inherit}
+textarea:focus{outline:none;border-color:var(--ac);box-shadow:0 0 0 3px rgba(var(--ac-rgb),.08)}
+input[type=text]{width:100%;border:1px solid #e0e0e0;border-radius:8px;padding:9px 11px;font-size:14px;font-family:inherit}
+input[type=text]:focus{outline:none;border-color:var(--ac)}
+.hint{font-size:12px;color:#bbb;margin-top:5px}
+.intent-card{background:#fff;border-radius:12px;margin-bottom:10px;box-shadow:0 1px 4px rgba(0,0,0,.07);overflow:hidden;transition:opacity .2s}
+.intent-card.disabled{opacity:.38}
+.ic-head{display:flex;align-items:center;justify-content:space-between;padding:10px 14px;background:#fafafa;border-bottom:1px solid #efefef}
+.ic-name{display:flex;align-items:center;gap:7px;font-size:14px;font-weight:700}
+.ic-body{display:grid;grid-template-columns:1fr 1.7fr}
+.ic-left{padding:14px;border-right:1px solid #f0f0f0;display:flex;flex-direction:column;gap:12px}
+.ic-right{padding:14px;display:flex;flex-direction:column;gap:8px}
+.col-label{font-size:11px;color:#aaa;font-weight:700;letter-spacing:.5px;text-transform:uppercase;margin-bottom:5px}
+.ic-del{display:flex;justify-content:flex-end;margin-top:4px}
+.del-btn{border:none;background:none;color:#e57373;cursor:pointer;font-size:12px;padding:4px 8px;border-radius:6px}
+.del-btn:hover{background:#fdecea}
+.card{background:#fff;border-radius:12px;padding:16px;margin-bottom:12px;box-shadow:0 1px 4px rgba(0,0,0,.07)}
+.card-title{font-size:15px;font-weight:700;margin-bottom:10px}
+.add-card{border:2px dashed #e0e0e0;border-radius:12px;padding:18px;margin-bottom:12px;background:none}
+.add-card:hover{border-color:var(--ac)}
+.add-title{font-size:14px;font-weight:700;color:#888;margin-bottom:12px}
+.field{margin-bottom:10px}
+.field label{font-size:13px;color:#888;display:block;margin-bottom:4px}
+.btn-add{width:100%;padding:11px;background:var(--ac);color:#fff;border:none;border-radius:8px;font-size:14px;font-weight:600;cursor:pointer;margin-top:4px}
+.btn-add:hover{opacity:.85}
+.btn-row{position:fixed;bottom:0;left:0;right:0;background:#fff;border-top:1px solid #eee;padding:10px 14px;display:flex;gap:10px;justify-content:center;z-index:100}
+.btn{padding:10px 22px;border:none;border-radius:8px;font-size:14px;font-weight:600;cursor:pointer}
+.btn:hover{opacity:.85}
+.btn-save{background:var(--ac);color:#fff}
+.test-input{width:100%;border:1px solid #ddd;border-radius:8px;padding:11px;font-size:15px;font-family:inherit}
+.test-input:focus{outline:none;border-color:var(--ac)}
+.btn-test{width:100%;margin-top:10px;padding:11px;background:var(--ac);color:#fff;border:none;border-radius:8px;font-size:14px;font-weight:600;cursor:pointer}
+.test-result{margin-top:14px;display:none}
+.intent-badge{display:inline-block;padding:3px 10px;border-radius:10px;font-size:12px;font-weight:600;margin-bottom:8px;background:rgba(var(--ac-rgb),.12);color:var(--ac)}
+.reply-pre{background:#f5f5f5;border-radius:8px;padding:12px;font-size:14px;line-height:1.7;white-space:pre-wrap}
+.log-table{width:100%;border-collapse:collapse;font-size:12px}
+.log-table th{text-align:left;padding:8px 10px;background:#f9f9f9;color:#888;font-weight:600;border-bottom:2px solid #eee;white-space:nowrap}
+.log-table td{padding:8px 10px;border-bottom:1px solid #f0f0f0;vertical-align:top;word-break:break-all}
+.log-table tr:last-child td{border-bottom:none}
+.replied-yes{color:#00b050;font-weight:600;font-size:12px}
+.replied-no{color:#bbb;font-size:12px}
+.log-reply{color:#555;font-size:11px;background:#f7f7f7;padding:4px 6px;border-radius:4px;margin-top:3px;max-height:60px;overflow:hidden;white-space:pre-wrap}
+.log-uid{font-size:10px;color:#bbb;font-family:monospace}
+.empty{text-align:center;color:#ccc;padding:40px;font-size:14px}
+.flash{padding:10px 16px;border-radius:8px;margin-bottom:12px;font-size:14px}
+.ok{background:#e8f5e9;color:#2e7d32}
+.err{background:#fdecea;color:#c62828}
+.mini-toggle{position:relative;width:38px;height:22px;flex-shrink:0}
+.mini-toggle input{opacity:0;width:0;height:0;position:absolute}
+.m-slider{position:absolute;inset:0;border-radius:22px;background:#ccc;cursor:pointer;transition:.25s}
+.m-slider:before{content:"";position:absolute;width:16px;height:16px;left:3px;bottom:3px;background:#fff;border-radius:50%;transition:.25s;box-shadow:0 1px 3px rgba(0,0,0,.2)}
+.mini-toggle input:checked+.m-slider{background:var(--ac)}
+.mini-toggle input:checked+.m-slider:before{transform:translateX(16px)}
+@media(max-width:640px){
+  .ic-body{grid-template-columns:1fr}
+  .ic-left{border-right:none;border-bottom:1px solid #f0f0f0}
+  .tab{padding:9px 12px;font-size:13px}
+  .btn{padding:9px 14px;font-size:13px}
+}
+</style>
+</head>
+<body style="--ac:{{ ac }};--ac-rgb:{{ ac_rgb }}">
+<div class="header">
+  <a class="back" href="/admin?key={{ key }}">‹</a>
+  <h1>{{ pname }}</h1>
+  <div class="toggle-wrap">
+    <span class="toggle-label">{{ '開啟' if cfg.enabled else '關閉' }}</span>
+    <form method="POST" action="/admin/{{ platform }}/toggle?key={{ key }}" style="display:inline">
+      <label class="toggle">
+        <input type="checkbox" onchange="this.form.submit()" {{ 'checked' if cfg.enabled }}>
+        <span class="slider"></span>
+      </label>
+    </form>
+  </div>
+</div>
+
+<div class="tabs">
+  <div class="tab active" onclick="switchTab('replies',this)">💬 回覆管理</div>
+  <div class="tab" onclick="switchTab('add',this)">➕ 新增</div>
+  <div class="tab" onclick="switchTab('test',this)">🧪 測試</div>
+  <div class="tab" onclick="switchTab('logs',this)">📋 紀錄</div>
+</div>
+
+<div class="container">
+  {% if flash %}<div class="flash {{ flash_type }}">{{ flash }}</div>{% endif %}
+
+  <div id="tab-replies" class="tab-content active">
+    <form method="POST" action="/admin/{{ platform }}/save?key={{ key }}">
+      {% for id, label in cfg.labels.items() %}
+      {% set intent_on = cfg.enabled_intents.get(id, True) %}
+      {% set img = cfg.image_urls.get(id,'') %}
+      <div class="intent-card{{ '' if intent_on else ' disabled' }}" id="card-{{ id }}">
+        <div class="ic-head">
+          <div class="ic-name">
+            <span class="badge">{{ id }}</span>
+            {{ label }}
+          </div>
+          <label class="mini-toggle">
+            <input type="checkbox" name="enabled_{{ id }}" {{ 'checked' if intent_on }} onchange="toggleCard('{{ id }}',this)">
+            <span class="m-slider"></span>
+          </label>
+        </div>
+        <div class="ic-body">
+          <div class="ic-left">
+            <div>
+              <div class="col-label">觸發關鍵字</div>
+              {% if id != 'default' %}
+              <input type="text" name="kw_{{ id }}" value="{{ cfg.keywords.get(id,[])|join(', ') }}" placeholder="關鍵字1, 關鍵字2, ...">
+              <div class="hint">逗號分隔，不分大小寫</div>
+              {% else %}
+              <div style="font-size:13px;color:#bbb;padding:6px 0">無關鍵字命中時自動觸發</div>
+              {% endif %}
+            </div>
+            <div>
+              <div class="col-label">圖片回覆（選填）</div>
+              {% if img %}
+              <div id="img-preview-{{ id }}" style="margin-bottom:8px">
+                <img src="{{ img }}" style="max-width:90px;max-height:64px;border-radius:6px;border:1px solid #eee;display:block;margin-bottom:5px">
+                <button type="button" onclick="clearImage('{{ id }}')" style="border:none;background:none;color:#e57373;cursor:pointer;font-size:12px">✕ 移除圖片</button>
+              </div>
+              {% else %}
+              <div id="img-preview-{{ id }}" style="display:none;margin-bottom:8px">
+                <img id="img-thumb-{{ id }}" src="" style="max-width:90px;max-height:64px;border-radius:6px;border:1px solid #eee;display:block;margin-bottom:5px">
+                <button type="button" onclick="clearImage('{{ id }}')" style="border:none;background:none;color:#e57373;cursor:pointer;font-size:12px">✕ 移除圖片</button>
+              </div>
+              {% endif %}
+              <input type="hidden" name="img_{{ id }}" id="img-url-{{ id }}" value="{{ img }}">
+              <label style="display:inline-flex;align-items:center;gap:5px;background:#f5f5f5;border:1px solid #ddd;border-radius:7px;padding:6px 11px;cursor:pointer;font-size:12px;color:#555">
+                📷 上傳圖片
+                <input type="file" accept="image/*" style="display:none" onchange="uploadImg('{{ id }}',this)">
+              </label>
+            </div>
+          </div>
+          <div class="ic-right">
+            {% if platform == 'fb_comment' %}
+            <div>
+              <div class="col-label">公開回覆（所有人看得到）</div>
+              <textarea name="reply_{{ id }}" style="min-height:90px">{{ cfg.replies.get(id,'') }}</textarea>
+            </div>
+            <div>
+              <div class="col-label">私訊內容（只有留言者收到）</div>
+              <textarea name="private_reply_{{ id }}" style="min-height:110px">{{ cfg.get('private_replies', {}).get(id,'') }}</textarea>
+            </div>
+            {% else %}
+            <div>
+              <div class="col-label">自動回覆內容</div>
+              <textarea name="reply_{{ id }}" style="min-height:160px">{{ cfg.replies.get(id,'') }}</textarea>
+            </div>
+            {% endif %}
+            {% if id not in builtin_intents %}
+            <div class="ic-del">
+              <button type="button" class="del-btn" onclick="delIntent('{{ id }}')">✕ 刪除類別</button>
+            </div>
+            {% endif %}
+          </div>
+        </div>
+      </div>
+      {% endfor %}
+      <div class="btn-row">
+        <button class="btn btn-save" type="submit" name="action" value="save">💾 儲存</button>
+        <button class="btn btn-save" type="submit" name="action" value="deploy" style="background:#1a1a1a">🚀 部署</button>
+      </div>
+    </form>
+  </div>
+
+  <div id="tab-add" class="tab-content">
+    <form method="POST" action="/admin/{{ platform }}/add-intent?key={{ key }}">
+      <div class="add-card">
+        <div class="add-title">➕ 新增回覆類別</div>
+        <div class="field">
+          <label>識別碼（英文，不可重複）</label>
+          <input type="text" name="intent_key" placeholder="例如：assembly" required pattern="[a-z_]+">
+        </div>
+        <div class="field">
+          <label>顯示名稱</label>
+          <input type="text" name="intent_label" placeholder="例如：安裝教學" required>
+        </div>
+        <div class="field">
+          <label>觸發關鍵字（逗號分隔）</label>
+          <input type="text" name="intent_keywords" placeholder="例如：怎麼裝,安裝步驟,組裝說明" required>
+        </div>
+        <div class="field">
+          <label>回覆內容</label>
+          <textarea name="intent_reply" style="min-height:80px" placeholder="輸入回覆文字..." required></textarea>
+        </div>
+        <button type="submit" class="btn-add">新增</button>
+      </div>
+    </form>
+  </div>
+
+  <div id="tab-test" class="tab-content">
+    <div class="card">
+      <div class="card-title" style="margin-bottom:12px">模擬用戶訊息</div>
+      <input class="test-input" id="test-input" type="text" placeholder="輸入訊息，例如：這個有現貨嗎" onkeydown="if(event.key==='Enter')runTest()">
+      <button class="btn-test" onclick="runTest()">送出測試</button>
+      <div class="test-result" id="test-result">
+        <div class="intent-badge" id="test-intent"></div>
+        <div class="reply-pre" id="test-reply"></div>
+      </div>
+    </div>
+  </div>
+
+  <div id="tab-logs" class="tab-content">
+    <div class="card" style="padding:0;overflow:hidden">
+      <div id="log-content"><div class="empty">載入中...</div></div>
+    </div>
+  </div>
+</div>
+
+<form id="del-form" method="POST" action="/admin/{{ platform }}/del-intent?key={{ key }}">
+  <input type="hidden" name="intent_key" id="del-key">
+</form>
+
+<script>
+const KEY="{{ key }}",PLATFORM="{{ platform }}";
+function switchTab(name,el){
+  document.querySelectorAll('.tab-content').forEach(t=>t.classList.remove('active'));
+  document.querySelectorAll('.tab').forEach(t=>t.classList.remove('active'));
+  document.getElementById('tab-'+name).classList.add('active');
+  el.classList.add('active');
+  if(name==='logs')loadLogs();
+}
+function runTest(){
+  const text=document.getElementById('test-input').value.trim();
+  if(!text)return;
+  fetch('/api/test?key='+KEY,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({text,platform:PLATFORM})})
+    .then(r=>r.json()).then(d=>{
+      document.getElementById('test-intent').textContent=d.label+'（'+d.intent+'）';
+      document.getElementById('test-reply').textContent=d.reply;
+      document.getElementById('test-result').style.display='block';
+    });
+}
+function loadLogs(){
+  fetch('/api/logs?key='+KEY+'&platform='+PLATFORM).then(r=>r.json()).then(logs=>{
+    if(!logs.length){document.getElementById('log-content').innerHTML='<div class="empty">尚無訊息紀錄</div>';return;}
+    let h='<table class="log-table"><thead><tr><th>時間</th><th>平台</th><th>用戶</th><th>用戶訊息</th><th>意圖</th><th>Bot 回覆</th><th>狀態</th></tr></thead><tbody>';
+    logs.forEach(l=>{
+      const rep=l.replied?'<span class="replied-yes">✓ 已回覆</span>':'<span class="replied-no">冷卻中</span>';
+      const uid=l.user_id?`<div class="log-uid">${l.user_id.slice(0,12)}...</div>`:'';
+      const reply=l.reply?`<div class="log-reply">${l.reply.slice(0,80)}${l.reply.length>80?'…':''}</div>`:'<span style="color:#ddd">—</span>';
+      const pf=l.platform||'';
+      const pfColor=pf==='LINE'?'#00c300':pf==='FB'?'#1877f2':'#e91e63';
+      const pfBadge=`<span style="font-size:11px;font-weight:700;color:${pfColor}">${pf}</span>`;
+      h+=`<tr><td style="white-space:nowrap">${l.time}</td><td>${pfBadge}</td><td>${uid}</td><td>${l.msg}</td><td>${l.intent}</td><td>${reply}</td><td>${rep}</td></tr>`;
+    });
+    h+='</tbody></table>';
+    document.getElementById('log-content').innerHTML=h;
+  });
+}
+function uploadImg(intentKey, input){
+  const file = input.files[0];
+  if(!file) return;
+  const fd = new FormData();
+  fd.append('file', file);
+  fd.append('intent_key', intentKey);
+  fetch('/admin/'+PLATFORM+'/upload-image?key='+KEY, {method:'POST', body:fd})
+    .then(r=>r.json()).then(d=>{
+      if(d.url){
+        const prev = document.getElementById('img-preview-'+intentKey);
+        const thumb = document.getElementById('img-thumb-'+intentKey);
+        if(thumb) thumb.src = d.url;
+        prev.style.display = 'block';
+        document.getElementById('img-url-'+intentKey).value = d.url;
+      } else alert('上傳失敗：'+(d.error||''));
+    });
+}
+function clearImage(intentKey){
+  document.getElementById('img-url-'+intentKey).value='';
+  const prev=document.getElementById('img-preview-'+intentKey);
+  prev.style.display='none';
+}
+function delIntent(key){
+  if(!confirm('確定刪除「'+key+'」這個類別？'))return;
+  document.getElementById('del-key').value=key;
+  document.getElementById('del-form').submit();
+}
+function toggleCard(id,cb){
+  const card=document.getElementById('card-'+id);
+  if(card){card.classList.toggle('disabled',!cb.checked);}
+}
+</script>
+</body></html>"""
+
+FB_POSTS_HTML = """<!DOCTYPE html>
+<html lang="zh-TW"><head><meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>FB 貼文指定回覆</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:-apple-system,sans-serif;background:#f5f5f5;color:#333;font-size:15px}
+.header{background:#1a1a1a;color:#fff;padding:13px 18px;display:flex;align-items:center;gap:12px}
+.back{color:#aaa;text-decoration:none;font-size:20px}
+.header h1{font-size:16px;font-weight:700}
+.container{max-width:700px;margin:20px auto;padding:0 14px 100px}
+.card{background:#fff;border-radius:12px;padding:16px;margin-bottom:12px;box-shadow:0 1px 4px rgba(0,0,0,.07)}
+.card-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:12px}
+.card-title{font-size:14px;font-weight:700}
+.badge{font-size:11px;color:#999;background:#f0f0f0;padding:2px 8px;border-radius:8px;font-family:monospace}
+label{font-size:12px;color:#888;display:block;margin-bottom:4px;margin-top:10px}
+textarea,input[type=text]{width:100%;border:1px solid #e0e0e0;border-radius:8px;padding:9px 11px;font-size:14px;font-family:inherit}
+textarea{min-height:80px;resize:vertical;line-height:1.7}
+textarea:focus,input[type=text]:focus{outline:none;border-color:#e91e63}
+.hint{font-size:12px;color:#bbb;margin-top:4px}
+.del-btn{border:none;background:none;color:#e57373;cursor:pointer;font-size:12px;padding:4px 8px;border-radius:6px}
+.del-btn:hover{background:#fdecea}
+.add-card{border:2px dashed #e0e0e0;border-radius:12px;padding:18px;margin-bottom:12px}
+.add-card:hover{border-color:#e91e63}
+.add-title{font-size:14px;font-weight:700;color:#888;margin-bottom:12px}
+.btn-row{position:fixed;bottom:0;left:0;right:0;background:#fff;border-top:1px solid #eee;padding:10px 14px;display:flex;gap:10px;justify-content:center;z-index:100}
+.btn{padding:10px 22px;border:none;border-radius:8px;font-size:14px;font-weight:600;cursor:pointer}
+.btn-save{background:#e91e63;color:#fff}
+.btn-add{width:100%;padding:11px;background:#e91e63;color:#fff;border:none;border-radius:8px;font-size:14px;font-weight:600;cursor:pointer;margin-top:8px}
+.flash{padding:10px 16px;border-radius:8px;margin-bottom:12px;font-size:14px}
+.ok{background:#e8f5e9;color:#2e7d32}
+.err{background:#fdecea;color:#c62828}
+.toggle{position:relative;width:40px;height:22px}
+.toggle input{opacity:0;width:0;height:0;position:absolute}
+.t-slider{position:absolute;inset:0;border-radius:22px;background:#ccc;cursor:pointer;transition:.25s}
+.t-slider:before{content:"";position:absolute;width:16px;height:16px;left:3px;bottom:3px;background:#fff;border-radius:50%;transition:.25s}
+.toggle input:checked+.t-slider{background:#e91e63}
+.toggle input:checked+.t-slider:before{transform:translateX(18px)}
+.row{display:flex;align-items:center;gap:8px}
+</style></head>
+<body>
+<div class="header">
+  <a class="back" href="/admin?key={{ key }}">‹</a>
+  <h1>📌 FB 貼文指定回覆</h1>
+</div>
+<div class="container">
+  {% if flash %}<div class="flash ok">{{ flash }}</div>{% endif %}
+
+  {% for pid, cfg in posts.items() %}
+  <form method="POST" action="/admin/fb-posts/save?key={{ key }}">
+    <input type="hidden" name="post_id" value="{{ pid }}">
+    <div class="card">
+      <div class="card-head">
+        <div>
+          <div class="card-title">貼文 ID</div>
+          <span class="badge">{{ pid }}</span>
+        </div>
+        <div class="row">
+          <label class="toggle" style="margin:0">
+            <input type="checkbox" name="enabled" {{ 'checked' if cfg.enabled }}>
+            <span class="t-slider"></span>
+          </label>
+          <button type="button" class="del-btn" onclick="delPost('{{ pid }}')">✕ 刪除</button>
+        </div>
+      </div>
+      <label>公開回覆內容（所有人看得到）</label>
+      <textarea name="reply">{{ cfg.reply }}</textarea>
+      <label>圖片網址（選填）</label>
+      <input type="text" name="image_url" value="{{ cfg.image_url }}" placeholder="https://...">
+      <button type="submit" class="btn btn-add" style="margin-top:12px">💾 儲存此貼文</button>
+    </div>
+  </form>
+  {% else %}
+  <div style="text-align:center;color:#bbb;padding:40px;font-size:14px">尚未設定任何貼文，新增後即可指定回覆</div>
+  {% endfor %}
+
+  <form method="POST" action="/admin/fb-posts/add?key={{ key }}">
+    <div class="add-card">
+      <div class="add-title">➕ 新增貼文指定回覆</div>
+      <label>貼文 ID（從貼文網址最後一串數字）</label>
+      <input type="text" name="post_id" placeholder="例如：1234567890123456" required>
+      <label>公開回覆內容</label>
+      <textarea name="reply" placeholder="有人留言此貼文時自動回覆..." required></textarea>
+      <label>圖片網址（選填）</label>
+      <input type="text" name="image_url" placeholder="https://...">
+      <button type="submit" class="btn-add">新增</button>
+    </div>
+  </form>
+</div>
+<form id="del-form" method="POST" action="/admin/fb-posts/del?key={{ key }}">
+  <input type="hidden" name="post_id" id="del-pid">
+</form>
+<script>
+function delPost(pid){
+  if(!confirm('確定刪除此貼文設定？'))return;
+  document.getElementById('del-pid').value=pid;
+  document.getElementById('del-form').submit();
+}
+</script>
 </body></html>"""
 
 _flash = {}
