@@ -125,6 +125,7 @@ def _init_messages_db():
             for col_sql in [
                 "ALTER TABLE product_jobs ADD COLUMN IF NOT EXISTS processed_images TEXT DEFAULT '[]'",
                 "ALTER TABLE product_jobs ADD COLUMN IF NOT EXISTS img_status TEXT DEFAULT ''",
+                "ALTER TABLE product_jobs ADD COLUMN IF NOT EXISTS raw_extra TEXT DEFAULT '{}'",
             ]:
                 try: cur.execute(col_sql)
                 except Exception: pass
@@ -3668,13 +3669,13 @@ def _pj_get(job_id):
     try:
         conn = _pg_conn(); cur = conn.cursor()
         cur.execute(
-            "SELECT id,url,platform,status,raw_title,raw_desc,raw_images,raw_price,ai_name,ai_desc,ai_keywords,error_msg,created_at,processed_images,img_status FROM product_jobs WHERE id=%s",
+            "SELECT id,url,platform,status,raw_title,raw_desc,raw_images,raw_price,ai_name,ai_desc,ai_keywords,error_msg,created_at,processed_images,img_status,raw_extra FROM product_jobs WHERE id=%s",
             (job_id,)
         )
         row = cur.fetchone(); cur.close(); conn.close()
         if not row:
             return None
-        return {"id":row[0],"url":row[1],"platform":row[2],"status":row[3],"raw_title":row[4],"raw_desc":row[5],"raw_images":json.loads(row[6] or "[]"),"raw_price":row[7],"ai_name":row[8],"ai_desc":row[9],"ai_keywords":row[10],"error_msg":row[11],"created_at":row[12],"processed_images":json.loads(row[13] or "[]"),"img_status":row[14] or ""}
+        return {"id":row[0],"url":row[1],"platform":row[2],"status":row[3],"raw_title":row[4],"raw_desc":row[5],"raw_images":json.loads(row[6] or "[]"),"raw_price":row[7],"ai_name":row[8],"ai_desc":row[9],"ai_keywords":row[10],"error_msg":row[11],"created_at":row[12],"processed_images":json.loads(row[13] or "[]"),"img_status":row[14] or "","raw_extra":json.loads(row[15] or "{}")}
     except Exception:
         return None
 
@@ -3912,6 +3913,29 @@ def _process_product_job(job_id, url, platform):
         return
 
     _pj_update(job_id, status="done", ai_name=ai.get("name",""), ai_desc=ai.get("desc",""), ai_keywords=ai.get("keywords",""))
+
+# ── AI 改寫（可被 server-side 和 local worker 共用）────────────
+
+def _run_ai_rewrite_for_job(job_id):
+    """從 DB 讀取 raw data，執行 AI 改寫，寫回結果。"""
+    job = _pj_get(job_id)
+    if not job:
+        return
+    raw_title = job.get("raw_title", "")
+    raw_desc  = job.get("raw_desc", "")
+    raw_price = job.get("raw_price", "")
+
+    if not raw_title and not raw_desc:
+        _pj_update(job_id, status="error", error_msg="無法取得商品資料（頁面可能需要登入）")
+        return
+
+    _pj_update(job_id, status="rewriting")
+    ai = _ai_rewrite(raw_title, raw_desc, raw_price)
+    if "error" in ai:
+        _pj_update(job_id, status="error", error_msg=f"AI 改寫失敗：{ai['error']}")
+        return
+    _pj_update(job_id, status="done",
+        ai_name=ai.get("name",""), ai_desc=ai.get("desc",""), ai_keywords=ai.get("keywords",""))
 
 # ── 圖片處理（Phase 2A）────────────────────────────────────────
 
@@ -4380,7 +4404,7 @@ def api_products_add():
     job_id = _pj_insert(url, platform)
     if not job_id:
         return jsonify({"error": "建立任務失敗，請確認資料庫連線"}), 500
-    threading.Thread(target=_process_product_job, args=(job_id, url, platform), daemon=True).start()
+    # 任務建立後等待本機 Worker 爬取（不在 Render 端自動爬取）
     return jsonify({"ok": True, "id": job_id, "platform": platform})
 
 @app.route("/api/products", methods=["GET"])
@@ -4447,6 +4471,50 @@ def api_products_process_images(job_id):
     except ImportError:
         return jsonify({"error": "Pillow 未安裝，請在 requirements.txt 加上 Pillow"}), 500
     threading.Thread(target=_process_images_for_job, args=(job_id,), daemon=True).start()
+    return jsonify({"ok": True})
+
+# ── 本機 Worker API ───────────────────────────────────────────
+
+@app.route("/api/products/pending", methods=["GET"])
+def api_products_pending():
+    """本機 Worker 輪詢：取得待爬取的任務列表。"""
+    ok, _ = auth_required()
+    if not ok:
+        return jsonify({"error": "unauthorized"}), 403
+    if not DATABASE_URL:
+        return jsonify({"jobs": []})
+    try:
+        conn = _pg_conn(); cur = conn.cursor()
+        cur.execute(
+            "SELECT id, url, platform FROM product_jobs WHERE status='pending' ORDER BY created_at ASC LIMIT 10"
+        )
+        rows = cur.fetchall(); cur.close(); conn.close()
+        jobs = [{"id": r[0], "url": r[1], "platform": r[2]} for r in rows]
+        return jsonify({"jobs": jobs})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route("/api/products/<int:job_id>/scrape-result", methods=["POST"])
+def api_products_scrape_result(job_id):
+    """本機 Worker 回傳爬取結果，觸發 AI 改寫。"""
+    ok, _ = auth_required()
+    if not ok:
+        return jsonify({"error": "unauthorized"}), 403
+    data = request.get_json(silent=True) or {}
+
+    if data.get("error"):
+        _pj_update(job_id, status="error", error_msg=f"本機爬取失敗：{data['error']}")
+        return jsonify({"ok": True})
+
+    _pj_update(job_id,
+        status="scraping",
+        raw_title  = data.get("raw_title", ""),
+        raw_desc   = data.get("raw_desc", ""),
+        raw_images = json.dumps(data.get("raw_images", []), ensure_ascii=False),
+        raw_price  = data.get("raw_price", ""),
+        raw_extra  = data.get("raw_extra", "{}"),
+    )
+    threading.Thread(target=_run_ai_rewrite_for_job, args=(job_id,), daemon=True).start()
     return jsonify({"ok": True})
 
 
