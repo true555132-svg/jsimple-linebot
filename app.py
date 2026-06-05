@@ -4194,7 +4194,7 @@ async function submitUrl(){
   const pWrap=document.getElementById("progressWrap");
   const pBar=document.getElementById("progressBar");
   errEl.style.display="none";
-  const urls=ta.value.split("\n").map(s=>s.trim()).filter(Boolean);
+  const urls=ta.value.split("\\n").map(s=>s.trim()).filter(Boolean);
   if(!urls.length){errEl.textContent="請貼上商品連結";errEl.style.display="block";return;}
   btn.disabled=true;
   let done=0,failed=0;
