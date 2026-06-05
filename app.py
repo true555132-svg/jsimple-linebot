@@ -52,6 +52,7 @@ GOOGLE_SERVICE_ACCOUNT_JSON = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON", "")
 SUPABASE_URL = os.getenv("SUPABASE_URL", "https://lrslleetqyaerstrlbap.supabase.co")
 SUPABASE_SERVICE_KEY = os.getenv("SUPABASE_SERVICE_KEY", "")
 SUPABASE_BUCKET = "chat-images"
+ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
 
 _db_lock = threading.Lock()
 
@@ -100,6 +101,24 @@ def _init_messages_db():
                     tags       TEXT DEFAULT '[]',
                     last_seen  FLOAT DEFAULT 0,
                     extra      TEXT DEFAULT '{}'
+                )
+            """)
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS product_jobs (
+                    id          SERIAL PRIMARY KEY,
+                    url         TEXT DEFAULT '',
+                    platform    TEXT DEFAULT '',
+                    status      TEXT DEFAULT 'pending',
+                    raw_title   TEXT DEFAULT '',
+                    raw_desc    TEXT DEFAULT '',
+                    raw_images  TEXT DEFAULT '[]',
+                    raw_price   TEXT DEFAULT '',
+                    ai_name     TEXT DEFAULT '',
+                    ai_desc     TEXT DEFAULT '',
+                    ai_keywords TEXT DEFAULT '',
+                    error_msg   TEXT DEFAULT '',
+                    created_at  FLOAT DEFAULT 0,
+                    updated_at  FLOAT DEFAULT 0
                 )
             """)
             conn.commit()
@@ -2309,6 +2328,18 @@ body{font-family:-apple-system,sans-serif;background:#f5f5f5;color:#333}
     </div>
   </a>
   <div style="margin:8px 0 4px;font-size:12px;color:#aaa;font-weight:700;letter-spacing:.5px">工具</div>
+  <a class="card" href="/admin/products?key={{ key }}">
+    <div class="card-left">
+      <div class="icon" style="background:#e8f5e9">🛒</div>
+      <div>
+        <div class="card-title">AI 商品搬運中心</div>
+        <div class="card-sub">1688 / 淘寶 → AI 改寫台灣文案</div>
+      </div>
+    </div>
+    <div style="display:flex;align-items:center;gap:10px">
+      <span class="arrow">›</span>
+    </div>
+  </a>
   <a class="card" href="https://image-processor-t1gd.onrender.com" target="_blank">
     <div class="card-left">
       <div class="icon" style="background:#f3e5f5">🖼️</div>
@@ -3573,6 +3604,676 @@ def api_delete_quick_image():
         return jsonify({"ok": True})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+
+# ═══════════════════════════════════════════════════════════
+# AI 商品搬運中心 — Phase 1
+# ═══════════════════════════════════════════════════════════
+
+# ── DB helpers ───────────────────────────────────────────────
+
+def _pj_insert(url, platform):
+    if not DATABASE_URL:
+        return None
+    try:
+        with _db_lock:
+            conn = _pg_conn(); cur = conn.cursor()
+            cur.execute(
+                "INSERT INTO product_jobs (url,platform,status,created_at,updated_at) VALUES (%s,%s,'pending',%s,%s) RETURNING id",
+                (url, platform, time.time(), time.time())
+            )
+            job_id = cur.fetchone()[0]
+            conn.commit(); cur.close(); conn.close()
+            return job_id
+    except Exception as e:
+        import sys; print(f"[PJ Insert] {e}", file=sys.stderr)
+        return None
+
+def _pj_update(job_id, **fields):
+    if not DATABASE_URL or not fields:
+        return
+    try:
+        fields["updated_at"] = time.time()
+        set_clause = ", ".join(f"{k}=%s" for k in fields)
+        with _db_lock:
+            conn = _pg_conn(); cur = conn.cursor()
+            cur.execute(f"UPDATE product_jobs SET {set_clause} WHERE id=%s", list(fields.values()) + [job_id])
+            conn.commit(); cur.close(); conn.close()
+    except Exception as e:
+        import sys; print(f"[PJ Update] {e}", file=sys.stderr)
+
+def _pj_list(limit=50):
+    if not DATABASE_URL:
+        return []
+    try:
+        conn = _pg_conn(); cur = conn.cursor()
+        cur.execute(
+            "SELECT id,url,platform,status,raw_title,ai_name,ai_desc,ai_keywords,error_msg,created_at FROM product_jobs ORDER BY created_at DESC LIMIT %s",
+            (limit,)
+        )
+        rows = cur.fetchall(); cur.close(); conn.close()
+        return [{"id":r[0],"url":r[1],"platform":r[2],"status":r[3],"raw_title":r[4],"ai_name":r[5],"ai_desc":r[6],"ai_keywords":r[7],"error_msg":r[8],"created_at":r[9]} for r in rows]
+    except Exception:
+        return []
+
+def _pj_get(job_id):
+    if not DATABASE_URL:
+        return None
+    try:
+        conn = _pg_conn(); cur = conn.cursor()
+        cur.execute(
+            "SELECT id,url,platform,status,raw_title,raw_desc,raw_images,raw_price,ai_name,ai_desc,ai_keywords,error_msg,created_at FROM product_jobs WHERE id=%s",
+            (job_id,)
+        )
+        row = cur.fetchone(); cur.close(); conn.close()
+        if not row:
+            return None
+        return {"id":row[0],"url":row[1],"platform":row[2],"status":row[3],"raw_title":row[4],"raw_desc":row[5],"raw_images":json.loads(row[6] or "[]"),"raw_price":row[7],"ai_name":row[8],"ai_desc":row[9],"ai_keywords":row[10],"error_msg":row[11],"created_at":row[12]}
+    except Exception:
+        return None
+
+def _pj_delete(job_id):
+    if not DATABASE_URL:
+        return
+    try:
+        with _db_lock:
+            conn = _pg_conn(); cur = conn.cursor()
+            cur.execute("DELETE FROM product_jobs WHERE id=%s", (job_id,))
+            conn.commit(); cur.close(); conn.close()
+    except Exception:
+        pass
+
+# ── 圖片處理工具 ─────────────────────────────────────────────
+
+def _clean_images(urls):
+    """去重、補 https:、過濾 icon/小圖，最多保留 10 張。"""
+    import re
+    seen = set()
+    result = []
+    skip_patterns = re.compile(r'icon|logo|_\d{2}x\d{2}[_.]|_30x|_50x|_60x|_80x|\.ico$', re.IGNORECASE)
+    priority_patterns = re.compile(r'_800x|_600x|_790x|_750x|_700x|_[89]\d{2}x|imgextra|mainimg', re.IGNORECASE)
+
+    cleaned = []
+    for u in urls:
+        u = u.strip()
+        if not u:
+            continue
+        if u.startswith("//"):
+            u = "https:" + u
+        if not u.startswith("http"):
+            continue
+        if skip_patterns.search(u):
+            continue
+        if u not in seen:
+            seen.add(u)
+            cleaned.append(u)
+
+    # 優先排高解析度
+    priority = [u for u in cleaned if priority_patterns.search(u)]
+    others   = [u for u in cleaned if not priority_patterns.search(u)]
+    return (priority + others)[:10]
+
+# ── 圖片爬取（三層 fallback）────────────────────────────────
+
+def _extract_meta_img(html):
+    """第一層：og:image, twitter:image"""
+    import re
+    results = []
+    for prop in ("og:image", "twitter:image"):
+        for pat in [
+            rf'<meta[^>]+(?:property|name)=["\']?{re.escape(prop)}["\']?[^>]+content=["\']([^"\']+)["\']',
+            rf'<meta[^>]+content=["\']([^"\']+)["\'][^>]+(?:property|name)=["\']?{re.escape(prop)}["\']?',
+        ]:
+            m = re.search(pat, html, re.IGNORECASE)
+            if m:
+                results.append(m.group(1).strip())
+                break
+    return results
+
+def _extract_alicdn_imgs(html):
+    """第二層：regex 掃 alicdn.com 系列圖片 URL"""
+    import re
+    pattern = re.compile(
+        r'(?:https?:)?//[^"\'<>\s]*?\.alicdn\.com/[^"\'<>\s]+?\.(?:jpg|jpeg|png|webp)(?:\?[^"\'<>\s]*)?',
+        re.IGNORECASE
+    )
+    return list(pattern.findall(html))
+
+def _scrape_images(html):
+    """執行三層 fallback，回傳清理後的圖片 URL 列表。"""
+    urls = []
+    urls += _extract_meta_img(html)          # 第一層
+    urls += _extract_alicdn_imgs(html)        # 第二層
+    return _clean_images(urls)
+
+# ── 爬取函數 ─────────────────────────────────────────────────
+
+def _detect_platform(url):
+    if "1688.com" in url:
+        return "1688"
+    if "taobao.com" in url:
+        return "taobao"
+    return "unknown"
+
+def _extract_meta_text(html, prop):
+    import re
+    for pat in [
+        rf'<meta[^>]+(?:property|name)=["\']?{re.escape(prop)}["\']?[^>]+content=["\']([^"\']+)["\']',
+        rf'<meta[^>]+content=["\']([^"\']+)["\'][^>]+(?:property|name)=["\']?{re.escape(prop)}["\']?',
+    ]:
+        m = re.search(pat, html, re.IGNORECASE)
+        if m:
+            return m.group(1).strip()
+    return ""
+
+def _extract_title_tag(html):
+    import re
+    m = re.search(r"<title[^>]*>([^<]+)</title>", html, re.IGNORECASE)
+    return m.group(1).strip() if m else ""
+
+def _fetch_html(url):
+    """GET 頁面 HTML，帶 browser-like headers。"""
+    req = urllib.request.Request(url, headers={
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "zh-TW,zh;q=0.9,en;q=0.8",
+        "Referer": "https://www.google.com/",
+    })
+    with urllib.request.urlopen(req, timeout=20) as r:
+        charset = "utf-8"
+        ct = r.headers.get("Content-Type", "")
+        if "charset=" in ct:
+            charset = ct.split("charset=")[-1].strip().split(";")[0].strip()
+        return r.read().decode(charset, errors="ignore")
+
+def _scrape_product(url, platform):
+    """爬取 1688 或 淘寶 商品頁面，回傳原始資料 dict。"""
+    import re
+    result = {"title": "", "desc": "", "images": [], "price": "", "error": ""}
+    try:
+        html = _fetch_html(url)
+
+        # 標題
+        result["title"] = (
+            _extract_meta_text(html, "og:title")
+            or _extract_title_tag(html)
+        )
+        # 移除標題末尾的網站名稱（常見於淘寶/1688）
+        for suffix in ["-1688.com", "- 1688", "- 淘寶網", "-淘寶網", "- Taobao", "_淘寶搜索"]:
+            if result["title"].endswith(suffix):
+                result["title"] = result["title"][:-len(suffix)].strip()
+
+        # 描述
+        result["desc"] = _extract_meta_text(html, "og:description") or _extract_meta_text(html, "description")
+
+        # 圖片
+        result["images"] = _scrape_images(html)
+
+        # 價格（簡單 regex）
+        price_m = re.search(r'["\']price["\']\s*:\s*["\']?([\d.,]+)["\']?', html)
+        if price_m:
+            result["price"] = price_m.group(1)
+
+    except Exception as e:
+        result["error"] = str(e)
+    return result
+
+# ── Claude AI 改寫 ────────────────────────────────────────────
+
+def _ai_rewrite(raw_title, raw_desc, price=""):
+    """呼叫 Claude API，改寫成官網專業風格。回傳 dict。"""
+    if not ANTHROPIC_API_KEY:
+        return {"error": "ANTHROPIC_API_KEY 未設定"}
+
+    parts = []
+    if raw_title:
+        parts.append(f"原始標題：{raw_title}")
+    if price:
+        parts.append(f"參考價格：{price}")
+    if raw_desc:
+        parts.append(f"原始描述：{raw_desc[:1500]}")
+
+    prompt = f"""你是台灣家具電商品牌的文案編輯，請將以下中國電商商品資料改寫成台灣官網風格。
+
+{chr(10).join(parts)}
+
+輸出格式（只輸出 JSON，不要其他文字）：
+{{
+  "name": "商品名稱（簡潔、專業、官網感，30字以內，繁體中文，不要堆砌關鍵字）",
+  "desc": "商品描述（200-400字，條列式，繁體中文，口語但不隨便，用具體數字，不要感嘆號堆疊，不要：喔、恩、那個、就是說、其實、基本上、保證、一定、絕對）",
+  "keywords": "關鍵字1,關鍵字2,關鍵字3,關鍵字4,關鍵字5"
+}}"""
+
+    try:
+        req_data = json.dumps({
+            "model": "claude-haiku-4-5-20251001",
+            "max_tokens": 1024,
+            "messages": [{"role": "user", "content": prompt}]
+        }).encode()
+        req = urllib.request.Request(
+            "https://api.anthropic.com/v1/messages",
+            data=req_data,
+            method="POST",
+            headers={
+                "x-api-key": ANTHROPIC_API_KEY,
+                "anthropic-version": "2023-06-01",
+                "content-type": "application/json",
+            }
+        )
+        with urllib.request.urlopen(req, timeout=60) as r:
+            resp = json.loads(r.read().decode())
+        text = resp["content"][0]["text"].strip()
+        import re
+        m = re.search(r'\{[\s\S]*\}', text)
+        if m:
+            result = json.loads(m.group())
+            return {"name": result.get("name",""), "desc": result.get("desc",""), "keywords": result.get("keywords","")}
+        return {"error": f"AI 回傳格式錯誤: {text[:200]}"}
+    except Exception as e:
+        return {"error": str(e)}
+
+# ── 背景任務處理 ──────────────────────────────────────────────
+
+def _process_product_job(job_id, url, platform):
+    """背景 thread：爬取 → AI 改寫 → 寫回 DB。"""
+    _pj_update(job_id, status="scraping")
+    scraped = _scrape_product(url, platform)
+
+    if scraped.get("error") and not scraped.get("title"):
+        _pj_update(job_id, status="error", error_msg=f"爬取失敗：{scraped['error']}")
+        return
+
+    raw_title  = scraped.get("title", "")
+    raw_desc   = scraped.get("desc", "")
+    raw_images = scraped.get("images", [])
+    raw_price  = scraped.get("price", "")
+
+    _pj_update(job_id,
+        status="rewriting",
+        raw_title=raw_title,
+        raw_desc=raw_desc,
+        raw_images=json.dumps(raw_images, ensure_ascii=False),
+        raw_price=raw_price,
+    )
+
+    if not raw_title and not raw_desc:
+        _pj_update(job_id, status="error", error_msg="無法取得商品資料（頁面可能需要登入）")
+        return
+
+    ai = _ai_rewrite(raw_title, raw_desc, raw_price)
+    if "error" in ai:
+        _pj_update(job_id, status="error", error_msg=f"AI 改寫失敗：{ai['error']}")
+        return
+
+    _pj_update(job_id, status="done", ai_name=ai.get("name",""), ai_desc=ai.get("desc",""), ai_keywords=ai.get("keywords",""))
+
+# ── HTML 模板 ─────────────────────────────────────────────────
+
+PRODUCTS_HTML = """<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>AI 商品搬運中心</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:-apple-system,sans-serif;background:#f5f5f5;color:#333}
+.header{background:#1a1a1a;color:#fff;padding:14px 20px;display:flex;align-items:center;gap:14px}
+.header a{color:#888;text-decoration:none;font-size:14px;flex-shrink:0}
+.header a:hover{color:#fff}
+.header-title{font-size:17px;font-weight:700;flex:1}
+.header-status{font-size:12px;color:#666}
+.wrap{max-width:800px;margin:0 auto;padding:20px 16px}
+/* input card */
+.card{background:#fff;border-radius:14px;padding:20px;margin-bottom:16px;box-shadow:0 1px 4px rgba(0,0,0,.08)}
+.card h3{font-size:14px;font-weight:700;color:#666;margin-bottom:12px;letter-spacing:.3px}
+.url-row{display:flex;gap:10px}
+.url-row input{flex:1;border:1.5px solid #ddd;border-radius:10px;padding:10px 14px;font-size:14px;outline:none;font-family:-apple-system,sans-serif}
+.url-row input:focus{border-color:#1a1a1a}
+.btn-primary{background:#1a1a1a;color:#fff;border:none;border-radius:10px;padding:10px 22px;font-size:14px;font-weight:700;cursor:pointer;white-space:nowrap;font-family:-apple-system,sans-serif}
+.btn-primary:hover{background:#333}
+.btn-primary:disabled{background:#aaa;cursor:default}
+.err-msg{color:#c62828;font-size:13px;margin-top:8px;display:none}
+/* filter */
+.filter-row{display:flex;gap:8px;margin-bottom:14px;flex-wrap:wrap}
+.fbtn{border:1.5px solid #ddd;background:#fff;border-radius:20px;padding:5px 14px;font-size:13px;cursor:pointer;font-family:-apple-system,sans-serif}
+.fbtn.active{background:#1a1a1a;color:#fff;border-color:#1a1a1a}
+/* job cards */
+.job{background:#fff;border-radius:12px;padding:15px 16px;margin-bottom:9px;box-shadow:0 1px 3px rgba(0,0,0,.07);cursor:pointer;border:1.5px solid transparent;transition:all .15s}
+.job:hover{border-color:#e0e0e0;box-shadow:0 3px 10px rgba(0,0,0,.1)}
+.job-top{display:flex;align-items:center;gap:8px}
+.badge{font-size:11px;font-weight:700;padding:3px 8px;border-radius:8px;flex-shrink:0}
+.pf-1688{background:#fff0f0;color:#c62828}
+.pf-taobao{background:#fff4e5;color:#e65100}
+.st-pending{background:#f5f5f5;color:#999}
+.st-scraping{background:#e3f2fd;color:#1565c0}
+.st-rewriting{background:#fff8e1;color:#f57f17}
+.st-done{background:#e8f5e9;color:#2e7d32}
+.st-error{background:#fdecea;color:#c62828}
+.job-title{flex:1;font-size:14px;font-weight:700;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.job-url{font-size:12px;color:#bbb;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;margin-top:4px}
+.job-time{font-size:11px;color:#ccc;margin-top:3px}
+.del-btn{background:none;border:none;color:#ddd;cursor:pointer;font-size:18px;line-height:1;padding:2px 4px;border-radius:6px;flex-shrink:0}
+.del-btn:hover{color:#e53935;background:#fdecea}
+.empty{text-align:center;padding:50px 20px;color:#ccc;font-size:15px}
+.spinner{display:inline-block;width:12px;height:12px;border:2px solid #ddd;border-top-color:#666;border-radius:50%;animation:spin .8s linear infinite;vertical-align:middle;margin-right:4px}
+@keyframes spin{to{transform:rotate(360deg)}}
+/* modal */
+.backdrop{position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:100;display:flex;align-items:center;justify-content:center;padding:16px}
+.modal{background:#fff;border-radius:16px;width:100%;max-width:660px;max-height:90vh;overflow-y:auto;box-shadow:0 8px 40px rgba(0,0,0,.2)}
+.modal-hd{padding:18px 20px;border-bottom:1px solid #f0f0f0;display:flex;align-items:center;justify-content:space-between;position:sticky;top:0;background:#fff;z-index:1}
+.modal-title{font-size:16px;font-weight:700}
+.close-btn{background:none;border:none;font-size:24px;cursor:pointer;color:#bbb;line-height:1;padding:0 2px}
+.modal-body{padding:20px}
+.section{margin-bottom:20px}
+.slabel{font-size:11px;font-weight:700;color:#aaa;letter-spacing:.5px;text-transform:uppercase;margin-bottom:6px}
+.rbox{background:#f8f8f8;border-radius:10px;padding:14px;font-size:14px;line-height:1.7;white-space:pre-wrap;word-break:break-all;position:relative;padding-right:70px}
+.copy-btn{position:absolute;top:8px;right:8px;background:#1a1a1a;color:#fff;border:none;border-radius:8px;padding:4px 10px;font-size:12px;cursor:pointer;opacity:.7;font-family:-apple-system,sans-serif}
+.copy-btn:hover{opacity:1}
+.copy-btn.ok{background:#2e7d32}
+.kw-row{display:flex;gap:6px;flex-wrap:wrap}
+.kw{background:#e3f2fd;color:#1565c0;border-radius:12px;padding:4px 12px;font-size:13px;font-weight:600}
+.imgs-row{display:flex;gap:8px;flex-wrap:wrap;margin-top:8px}
+.imgs-row img{width:80px;height:80px;object-fit:cover;border-radius:8px;border:1px solid #eee}
+.divider{border:none;border-top:1px solid #f0f0f0;margin:16px 0}
+.err-box{background:#fdecea;color:#c62828;border-radius:10px;padding:12px 14px;font-size:13px;margin-bottom:14px}
+.raw-toggle{background:none;border:none;color:#bbb;font-size:12px;cursor:pointer;font-family:-apple-system,sans-serif;text-decoration:underline;padding:0}
+/* 手動補圖 */
+.img-form{margin-top:14px}
+.img-form textarea{width:100%;border:1.5px solid #ddd;border-radius:10px;padding:10px;font-size:13px;height:90px;resize:vertical;font-family:-apple-system,sans-serif;outline:none}
+.img-form textarea:focus{border-color:#1a1a1a}
+.btn-sm{background:#333;color:#fff;border:none;border-radius:8px;padding:6px 14px;font-size:13px;cursor:pointer;font-family:-apple-system,sans-serif;margin-top:6px}
+.btn-sm:hover{background:#555}
+.hidden{display:none}
+.toast{position:fixed;bottom:28px;left:50%;transform:translateX(-50%);background:#333;color:#fff;padding:9px 20px;border-radius:20px;font-size:14px;z-index:999;opacity:0;transition:opacity .3s;pointer-events:none}
+.toast.show{opacity:1}
+</style>
+</head>
+<body>
+
+<div class="header">
+  <a href="/admin?key={{ key }}">← 返回</a>
+  <div class="header-title">AI 商品搬運中心</div>
+  <div class="header-status" id="hStatus"></div>
+</div>
+
+<div class="wrap">
+  <div class="card">
+    <h3>貼上商品連結</h3>
+    <div class="url-row">
+      <input id="urlInput" type="text" placeholder="https://detail.1688.com/... 或 https://item.taobao.com/...">
+      <button class="btn-primary" id="addBtn" onclick="submitUrl()">開始搬運</button>
+    </div>
+    <div class="err-msg" id="addErr"></div>
+  </div>
+
+  <div class="filter-row">
+    <button class="fbtn active" onclick="setFilter('all',this)">全部</button>
+    <button class="fbtn" onclick="setFilter('done',this)">完成</button>
+    <button class="fbtn" onclick="setFilter('error',this)">失敗</button>
+    <button class="fbtn" onclick="setFilter('processing',this)">進行中</button>
+  </div>
+
+  <div id="jobList"></div>
+  <div id="emptyMsg" class="empty hidden">還沒有任務，貼上連結開始搬運</div>
+</div>
+
+<!-- Detail Modal -->
+<div class="backdrop hidden" id="modal" onclick="bgClose(event)">
+  <div class="modal" id="modalBox">
+    <div class="modal-hd">
+      <div class="modal-title" id="modalTitle">商品詳情</div>
+      <button class="close-btn" onclick="closeModal()">×</button>
+    </div>
+    <div class="modal-body" id="modalBody"></div>
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+const KEY = "{{ key }}";
+let jobs = [], filter = "all", pollTimer = null, openId = null;
+
+const api = (url, opts={}) => fetch(url+(url.includes("?")?"&":"?")+"key="+KEY, {headers:{"Content-Type":"application/json"},...opts}).then(r=>r.json());
+
+async function loadJobs(){
+  try{
+    const d = await api("/api/products");
+    jobs = d.jobs||[];
+    render();
+    schedulePoll();
+  }catch(e){console.error(e)}
+}
+
+function schedulePoll(){
+  clearTimeout(pollTimer);
+  const active = jobs.some(j=>["pending","scraping","rewriting"].includes(j.status));
+  document.getElementById("hStatus").textContent = active ? "更新中..." : "";
+  if(active) pollTimer = setTimeout(loadJobs, 2500);
+}
+
+function render(){
+  const list = document.getElementById("jobList");
+  const empty = document.getElementById("emptyMsg");
+  const filtered = jobs.filter(j=>{
+    if(filter==="all") return true;
+    if(filter==="processing") return ["pending","scraping","rewriting"].includes(j.status);
+    return j.status===filter;
+  });
+  if(!filtered.length){ list.innerHTML=""; empty.classList.remove("hidden"); return; }
+  empty.classList.add("hidden");
+  list.innerHTML = filtered.map(jobCard).join("");
+}
+
+function jobCard(j){
+  const pfLabel = {1688:"1688",taobao:"淘寶"}[j.platform]||j.platform;
+  const stLabel = {pending:"等待中",scraping:"爬取中",rewriting:"改寫中",done:"完成",error:"失敗"}[j.status]||j.status;
+  const isActive = ["pending","scraping","rewriting"].includes(j.status);
+  const spin = isActive ? '<span class="spinner"></span>' : "";
+  const title = esc(j.ai_name||j.raw_title||j.url);
+  const urlShort = j.url.length>65 ? j.url.slice(0,65)+"…" : j.url;
+  const ts = j.created_at ? new Date(j.created_at*1000).toLocaleString("zh-TW",{month:"2-digit",day:"2-digit",hour:"2-digit",minute:"2-digit"}) : "";
+  return `<div class="job" onclick="openJob(${j.id})">
+    <div class="job-top">
+      <span class="badge pf-${j.platform}">${pfLabel}</span>
+      <span class="badge st-${j.status}">${spin}${stLabel}</span>
+      <div class="job-title">${title}</div>
+      <button class="del-btn" onclick="delJob(event,${j.id})" title="刪除">×</button>
+    </div>
+    <div class="job-url">${esc(urlShort)}</div>
+    ${ts?`<div class="job-time">${ts}</div>`:""}
+  </div>`;
+}
+
+function setFilter(f,btn){
+  filter=f;
+  document.querySelectorAll(".fbtn").forEach(b=>b.classList.remove("active"));
+  btn.classList.add("active");
+  render();
+}
+
+async function submitUrl(){
+  const input=document.getElementById("urlInput");
+  const errEl=document.getElementById("addErr");
+  const btn=document.getElementById("addBtn");
+  const url=input.value.trim();
+  errEl.style.display="none";
+  if(!url){errEl.textContent="請貼上商品連結";errEl.style.display="block";return;}
+  btn.disabled=true; btn.textContent="提交中...";
+  try{
+    const r=await api("/api/products",{method:"POST",body:JSON.stringify({url})});
+    if(r.error){errEl.textContent=r.error;errEl.style.display="block";}
+    else{input.value="";toast("已加入搬運隊列");loadJobs();}
+  }catch(e){errEl.textContent="提交失敗，請稍後再試";errEl.style.display="block";}
+  finally{btn.disabled=false;btn.textContent="開始搬運";}
+}
+
+async function openJob(id){
+  openId=id;
+  document.getElementById("modal").classList.remove("hidden");
+  document.getElementById("modalBody").innerHTML='<div style="text-align:center;padding:40px"><span class="spinner" style="width:18px;height:18px"></span></div>';
+  try{
+    const j=await api("/api/products/"+id);
+    renderModal(j);
+  }catch(e){document.getElementById("modalBody").innerHTML='<div class="err-box">載入失敗</div>';}
+}
+
+function renderModal(j){
+  document.getElementById("modalTitle").textContent = j.ai_name||j.raw_title||"商品詳情";
+  let h="";
+  if(j.status==="error"){
+    h+=`<div class="err-box">${esc(j.error_msg||"未知錯誤")}</div>`;
+    if(j.raw_title) h+=`<div class="section"><div class="slabel">原始標題</div><div class="rbox">${esc(j.raw_title)}</div></div>`;
+    h+=imgFormHtml(j.id,[]);
+    document.getElementById("modalBody").innerHTML=h; return;
+  }
+  if(["pending","scraping","rewriting"].includes(j.status)){
+    const msg={pending:"等待爬取...",scraping:"正在爬取商品資料...",rewriting:"AI 正在改寫文案，請稍候..."};
+    h+=`<div style="text-align:center;padding:30px;color:#888"><span class="spinner" style="width:16px;height:16px;border-top-color:#555"></span> ${msg[j.status]}</div>`;
+    document.getElementById("modalBody").innerHTML=h;
+    if(openId===j.id) setTimeout(()=>{if(openId===j.id)openJob(j.id);},2000);
+    return;
+  }
+  // done
+  if(j.ai_name) h+=`<div class="section"><div class="slabel">商品名稱</div><div class="rbox">${esc(j.ai_name)}<button class="copy-btn" onclick='cp(this,${JSON.stringify(j.ai_name)})'>複製</button></div></div>`;
+  if(j.ai_keywords){
+    const kws=j.ai_keywords.split(",").map(s=>s.trim()).filter(Boolean);
+    h+=`<div class="section"><div class="slabel">SEO 關鍵字</div><div class="kw-row">${kws.map(k=>`<span class="kw">${esc(k)}</span>`).join("")}</div><div style="margin-top:8px"><button class="btn-sm" onclick='cp(this,${JSON.stringify(j.ai_keywords)})'>複製全部</button></div></div>`;
+  }
+  if(j.ai_desc) h+=`<div class="section"><div class="slabel">商品描述</div><div class="rbox" style="max-height:320px;overflow-y:auto">${esc(j.ai_desc)}<button class="copy-btn" onclick='cp(this,${JSON.stringify(j.ai_desc)})'>複製</button></div></div>`;
+  if(j.raw_images&&j.raw_images.length){
+    h+=`<div class="section"><div class="slabel">商品圖片（${j.raw_images.length} 張）</div><div class="imgs-row">${j.raw_images.map(img=>`<img src="${esc(img)}" loading="lazy" onerror="this.style.display='none'">`).join("")}</div></div>`;
+  }
+  h+=`<hr class="divider">`;
+  h+=imgFormHtml(j.id, j.raw_images||[]);
+  h+=`<br><button class="raw-toggle" onclick="toggleRaw(this)">顯示原始資料 ▾</button>`;
+  h+=`<div id="rawSec" class="hidden" style="margin-top:12px">`;
+  if(j.raw_title) h+=`<div class="section"><div class="slabel">原始標題</div><div class="rbox">${esc(j.raw_title)}</div></div>`;
+  if(j.raw_price) h+=`<div class="section"><div class="slabel">原始價格</div><div class="rbox">${esc(j.raw_price)}</div></div>`;
+  if(j.raw_desc)  h+=`<div class="section"><div class="slabel">原始描述</div><div class="rbox" style="max-height:180px;overflow-y:auto">${esc(j.raw_desc.slice(0,1200))}${j.raw_desc.length>1200?"…":""}</div></div>`;
+  h+=`</div>`;
+  document.getElementById("modalBody").innerHTML=h;
+}
+
+function imgFormHtml(id, existing){
+  return `<div class="section img-form">
+    <div class="slabel">手動補圖片 URL（第三層，一行一張）</div>
+    <textarea id="imgTa" placeholder="https://img.alicdn.com/...">${existing.join("\\n")}</textarea>
+    <button class="btn-sm" onclick="saveImgs(${id})">儲存圖片</button>
+  </div>`;
+}
+
+async function saveImgs(id){
+  const ta=document.getElementById("imgTa");
+  const urls=ta.value.split("\\n").map(s=>s.trim()).filter(Boolean);
+  const r=await api("/api/products/"+id+"/images",{method:"POST",body:JSON.stringify({urls})});
+  if(r.ok) toast("圖片已儲存");
+  else toast("儲存失敗："+r.error);
+}
+
+function toggleRaw(btn){
+  const el=document.getElementById("rawSec");
+  if(el.classList.contains("hidden")){el.classList.remove("hidden");btn.textContent="隱藏原始資料 ▴";}
+  else{el.classList.add("hidden");btn.textContent="顯示原始資料 ▾";}
+}
+
+function bgClose(e){if(e.target===document.getElementById("modal"))closeModal();}
+function closeModal(){document.getElementById("modal").classList.add("hidden");openId=null;}
+
+async function delJob(e,id){
+  e.stopPropagation();
+  if(!confirm("確定刪除這筆任務？"))return;
+  await api("/api/products/"+id,{method:"DELETE"});
+  jobs=jobs.filter(j=>j.id!==id);
+  render();
+  toast("已刪除");
+}
+
+function cp(btn,text){
+  navigator.clipboard.writeText(text).then(()=>{
+    const orig=btn.textContent;
+    btn.textContent="已複製";btn.classList.add("ok");
+    setTimeout(()=>{btn.textContent=orig;btn.classList.remove("ok");},1500);
+    toast("已複製");
+  });
+}
+function toast(msg){
+  const t=document.getElementById("toast");
+  t.textContent=msg;t.classList.add("show");
+  setTimeout(()=>t.classList.remove("show"),2000);
+}
+function esc(s){return String(s||"").replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");}
+
+document.getElementById("urlInput").addEventListener("keydown",e=>{if(e.key==="Enter")submitUrl();});
+loadJobs();
+</script>
+</body></html>"""
+
+# ── 後台路由 ──────────────────────────────────────────────────
+
+@app.route("/admin/products")
+def admin_products():
+    ok, key = check_auth()
+    if not ok:
+        return render_template_string(LOGIN_HTML, next="/admin/products", error=None)
+    return render_template_string(PRODUCTS_HTML, key=key)
+
+# ── API 路由 ──────────────────────────────────────────────────
+
+@app.route("/api/products", methods=["POST"])
+def api_products_add():
+    ok, _ = auth_required()
+    if not ok:
+        return jsonify({"error": "unauthorized"}), 403
+    data = request.get_json(silent=True) or {}
+    url = (data.get("url") or "").strip()
+    if not url:
+        return jsonify({"error": "請提供商品連結"}), 400
+    platform = _detect_platform(url)
+    if platform == "unknown":
+        return jsonify({"error": "目前只支援 1688 和 淘寶 連結"}), 400
+    job_id = _pj_insert(url, platform)
+    if not job_id:
+        return jsonify({"error": "建立任務失敗，請確認資料庫連線"}), 500
+    threading.Thread(target=_process_product_job, args=(job_id, url, platform), daemon=True).start()
+    return jsonify({"ok": True, "id": job_id, "platform": platform})
+
+@app.route("/api/products", methods=["GET"])
+def api_products_list():
+    ok, _ = auth_required()
+    if not ok:
+        return jsonify({"error": "unauthorized"}), 403
+    return jsonify({"jobs": _pj_list(50)})
+
+@app.route("/api/products/<int:job_id>", methods=["GET"])
+def api_products_get(job_id):
+    ok, _ = auth_required()
+    if not ok:
+        return jsonify({"error": "unauthorized"}), 403
+    job = _pj_get(job_id)
+    if not job:
+        return jsonify({"error": "not found"}), 404
+    return jsonify(job)
+
+@app.route("/api/products/<int:job_id>", methods=["DELETE"])
+def api_products_delete(job_id):
+    ok, _ = auth_required()
+    if not ok:
+        return jsonify({"error": "unauthorized"}), 403
+    _pj_delete(job_id)
+    return jsonify({"ok": True})
+
+@app.route("/api/products/<int:job_id>/images", methods=["POST"])
+def api_products_images(job_id):
+    ok, _ = auth_required()
+    if not ok:
+        return jsonify({"error": "unauthorized"}), 403
+    data = request.get_json(silent=True) or {}
+    urls = data.get("urls", [])
+    cleaned = _clean_images(urls)
+    _pj_update(job_id, raw_images=json.dumps(cleaned, ensure_ascii=False))
+    return jsonify({"ok": True, "count": len(cleaned)})
+
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
