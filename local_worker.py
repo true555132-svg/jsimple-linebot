@@ -162,45 +162,71 @@ def scrape_1688(page, url):
     page.goto(url, wait_until="domcontentloaded", timeout=30000)
     page.wait_for_timeout(PAGE_WAIT)
 
-    for sel in [".title-text", ".mod-detail-title h1", "h1"]:
-        try:
-            t = page.text_content(sel, timeout=2000)
-            if t and t.strip():
-                result["raw_title"] = t.strip(); break
-        except Exception: pass
-    if not result["raw_title"]:
-        result["raw_title"] = page.title()
-    for s in ["-1688.com", "- 1688", "阿里巴巴找货"]:
-        result["raw_title"] = result["raw_title"].replace(s, "").strip()
-
-    for sel in [".price-value", ".m-price .price"]:
-        try:
-            p = page.text_content(sel, timeout=1500)
-            if p and p.strip():
-                result["raw_price"] = p.strip(); break
-        except Exception: pass
-
-    html = page.content()
-    result["raw_images"] = clean_images(extract_imgs(html))
-
+    # 優先從 JS 資料抓商品標題（最可靠）
     try:
-        extra = page.evaluate("""() => {
+        js_data = page.evaluate("""() => {
             try {
                 const d = window.__INIT_DATA__ || {};
                 const o = d.offerDetail || d.detail || {};
-                return { sku: o.skuModel?.skuProps || null, specs: o.attribute?.attributes || null };
+                const base = o.baseInfo || o.offerInfo || {};
+                return {
+                    title:  base.subject || base.title || o.subject || null,
+                    price:  base.priceInfo?.price || null,
+                    sku:    o.skuModel?.skuProps || null,
+                    specs:  o.attribute?.attributes || null,
+                };
             } catch(e) { return {}; }
         }""")
-        if extra:
-            result["raw_extra"].update({k: v for k, v in extra.items() if v})
-    except Exception: pass
+        if js_data.get("title"):
+            result["raw_title"] = js_data["title"].strip()
+        if js_data.get("price"):
+            result["raw_price"] = str(js_data["price"])
+        result["raw_extra"].update({k: v for k, v in js_data.items() if v and k in ("sku","specs")})
+    except Exception:
+        pass
 
-    for sel in [".mod-detail-description", ".detail-desc-content"]:
+    # DOM selector fallback（只用精確的 class，不用裸 h1）
+    if not result["raw_title"]:
+        for sel in [".title-text", ".mod-detail-title h1", ".offer-title", ".detail-title"]:
+            try:
+                t = page.text_content(sel, timeout=2000)
+                if t and t.strip() and len(t.strip()) > 4:
+                    result["raw_title"] = t.strip(); break
+            except Exception:
+                pass
+
+    # 最後才用 page.title()，並過濾掉廠商/公司名稱關鍵字
+    if not result["raw_title"]:
+        pt = page.title()
+        for s in ["-1688.com","- 1688","阿里巴巴找货","阿里巴巴","批发","_","1688"]:
+            pt = pt.replace(s, "").strip()
+        # 若標題含公司/廠字樣則放棄（可能抓到廠商名）
+        company_keywords = ["有限公司","材料厂","制造厂","加工厂","有限责任","工贸","商贸","实业"]
+        if not any(k in pt for k in company_keywords):
+            result["raw_title"] = pt
+
+    # 價格
+    if not result["raw_price"]:
+        for sel in [".price-value", ".m-price .price", ".price-text"]:
+            try:
+                p = page.text_content(sel, timeout=1500)
+                if p and p.strip():
+                    result["raw_price"] = p.strip(); break
+            except Exception:
+                pass
+
+    # 圖片
+    html = page.content()
+    result["raw_images"] = clean_images(extract_imgs(html))
+
+    # 描述
+    for sel in [".mod-detail-description", ".detail-desc-content", ".description-content"]:
         try:
             d = page.text_content(sel, timeout=2000)
             if d and d.strip():
                 result["raw_desc"] = d.strip()[:3000]; break
-        except Exception: pass
+        except Exception:
+            pass
 
     return result
 
