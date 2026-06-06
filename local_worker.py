@@ -78,6 +78,26 @@ def clean_images(urls, max_count=10):
     o = [u for u in result if not _PRIO.search(u)]
     return (p + o)[:max_count]
 
+_BADGE = re.compile(
+    r'wangpu|credit|level|certification|badge|guarantee|seal|'
+    r'icon|logo|avatar|brand|qrcode|qr_|star|tag|label|'
+    r'score|rank|medal|trophy|shield|trust|verify|auth',
+    re.I
+)
+def clean_images_strict(urls, max_count=10):
+    seen, result = set(), []
+    for u in urls:
+        u = u.strip()
+        if u.startswith("//"): u = "https:" + u
+        if not u.startswith("http"): continue
+        if _SKIP.search(u) or _BADGE.search(u): continue
+        if u not in seen:
+            seen.add(u); result.append(u)
+    p = [u for u in result if _PRIO.search(u)]
+    o = [u for u in result if not _PRIO.search(u)]
+    return (p + o)[:max_count]
+
+
 
 # ── 圖片處理：去背 + 白底 + 上傳 ────────────────────────────
 
@@ -215,9 +235,32 @@ def scrape_1688(page, url):
             except Exception:
                 pass
 
-    # 圖片
-    html = page.content()
-    result["raw_images"] = clean_images(extract_imgs(html))
+    # 圖片：優先從 JS 資料抓主圖，避免抓到徽章/認證圖示
+    try:
+        js_imgs = page.evaluate("""() => {
+            try {
+                const d = window.__INIT_DATA__ || {};
+                const o = d.offerDetail || d.detail || {};
+                const base = o.baseInfo || o.offerInfo || {};
+                // 主圖列表（最可靠）
+                const imgs = base.images || base.mainImages || base.imageList || [];
+                return imgs.map(i => typeof i === 'string' ? i : (i.url || i.src || '')).filter(Boolean);
+            } catch(e) { return []; }
+        }""")
+        if js_imgs:
+            cleaned = []
+            for u in js_imgs:
+                if u.startswith("//"): u = "https:" + u
+                if not u.startswith("http"): u = "https://img.alicdn.com/imgextra/" + u
+                cleaned.append(u)
+            result["raw_images"] = cleaned[:10]
+    except Exception:
+        pass
+
+    # Fallback：regex 掃 HTML，但加更嚴格的過濾
+    if not result["raw_images"]:
+        html = page.content()
+        result["raw_images"] = clean_images_strict(extract_imgs(html))
 
     # 描述
     for sel in [".mod-detail-description", ".detail-desc-content", ".description-content"]:
