@@ -126,6 +126,7 @@ def _init_messages_db():
                 "ALTER TABLE product_jobs ADD COLUMN IF NOT EXISTS processed_images TEXT DEFAULT '[]'",
                 "ALTER TABLE product_jobs ADD COLUMN IF NOT EXISTS img_status TEXT DEFAULT ''",
                 "ALTER TABLE product_jobs ADD COLUMN IF NOT EXISTS raw_extra TEXT DEFAULT '{}'",
+                "ALTER TABLE product_jobs ADD COLUMN IF NOT EXISTS brand TEXT DEFAULT ''",
             ]:
                 try: cur.execute(col_sql)
                 except Exception: pass
@@ -3617,17 +3618,39 @@ def api_delete_quick_image():
 # AI 商品搬運中心 — Phase 1
 # ═══════════════════════════════════════════════════════════
 
+# ── 品牌設定 ──────────────────────────────────────────────────
+BRAND_PROFILES = {
+    "jsimple": {
+        "name": "JSIMPLE",
+        "category": "高架床、系統家具",
+        "style": "簡潔、功能導向、現代風格。強調空間利用、承重規格、材質安全。",
+        "tone": "直接說明功能與規格，像設計師推薦，不像業務推銷。",
+    },
+    "lander": {
+        "name": "朗德燈具",
+        "category": "燈具、照明",
+        "style": "質感、設計感、氛圍營造。強調光線效果、設計美感、節能規格（W數、流明）。",
+        "tone": "有畫面感，讓人想像裝上後的居家氛圍。",
+    },
+    "filterbreath": {
+        "name": "濾呼吸",
+        "category": "空氣濾網、淨化設備",
+        "style": "健康、數據導向、信任感。強調過濾效率（等級）、適用機型、更換週期。",
+        "tone": "用具體數字說話，像健康產品的專業建議，不誇大。",
+    },
+}
+
 # ── DB helpers ───────────────────────────────────────────────
 
-def _pj_insert(url, platform):
+def _pj_insert(url, platform, brand=""):
     if not DATABASE_URL:
         return None
     try:
         with _db_lock:
             conn = _pg_conn(); cur = conn.cursor()
             cur.execute(
-                "INSERT INTO product_jobs (url,platform,status,created_at,updated_at) VALUES (%s,%s,'pending',%s,%s) RETURNING id",
-                (url, platform, time.time(), time.time())
+                "INSERT INTO product_jobs (url,platform,brand,status,created_at,updated_at) VALUES (%s,%s,%s,'pending',%s,%s) RETURNING id",
+                (url, platform, brand, time.time(), time.time())
             )
             job_id = cur.fetchone()[0]
             conn.commit(); cur.close(); conn.close()
@@ -3655,11 +3678,11 @@ def _pj_list(limit=50):
     try:
         conn = _pg_conn(); cur = conn.cursor()
         cur.execute(
-            "SELECT id,url,platform,status,raw_title,ai_name,ai_desc,ai_keywords,error_msg,created_at FROM product_jobs ORDER BY created_at DESC LIMIT %s",
+            "SELECT id,url,platform,status,raw_title,ai_name,ai_desc,ai_keywords,error_msg,created_at,brand FROM product_jobs ORDER BY created_at DESC LIMIT %s",
             (limit,)
         )
         rows = cur.fetchall(); cur.close(); conn.close()
-        return [{"id":r[0],"url":r[1],"platform":r[2],"status":r[3],"raw_title":r[4],"ai_name":r[5],"ai_desc":r[6],"ai_keywords":r[7],"error_msg":r[8],"created_at":r[9]} for r in rows]
+        return [{"id":r[0],"url":r[1],"platform":r[2],"status":r[3],"raw_title":r[4],"ai_name":r[5],"ai_desc":r[6],"ai_keywords":r[7],"error_msg":r[8],"created_at":r[9],"brand":r[10] or ""} for r in rows]
     except Exception:
         return []
 
@@ -3669,13 +3692,13 @@ def _pj_get(job_id):
     try:
         conn = _pg_conn(); cur = conn.cursor()
         cur.execute(
-            "SELECT id,url,platform,status,raw_title,raw_desc,raw_images,raw_price,ai_name,ai_desc,ai_keywords,error_msg,created_at,processed_images,img_status,raw_extra FROM product_jobs WHERE id=%s",
+            "SELECT id,url,platform,status,raw_title,raw_desc,raw_images,raw_price,ai_name,ai_desc,ai_keywords,error_msg,created_at,processed_images,img_status,raw_extra,brand FROM product_jobs WHERE id=%s",
             (job_id,)
         )
         row = cur.fetchone(); cur.close(); conn.close()
         if not row:
             return None
-        return {"id":row[0],"url":row[1],"platform":row[2],"status":row[3],"raw_title":row[4],"raw_desc":row[5],"raw_images":json.loads(row[6] or "[]"),"raw_price":row[7],"ai_name":row[8],"ai_desc":row[9],"ai_keywords":row[10],"error_msg":row[11],"created_at":row[12],"processed_images":json.loads(row[13] or "[]"),"img_status":row[14] or "","raw_extra":json.loads(row[15] or "{}")}
+        return {"id":row[0],"url":row[1],"platform":row[2],"status":row[3],"raw_title":row[4],"raw_desc":row[5],"raw_images":json.loads(row[6] or "[]"),"raw_price":row[7],"ai_name":row[8],"ai_desc":row[9],"ai_keywords":row[10],"error_msg":row[11],"created_at":row[12],"processed_images":json.loads(row[13] or "[]"),"img_status":row[14] or "","raw_extra":json.loads(row[15] or "{}"),"brand":row[16] or ""}
     except Exception:
         return None
 
@@ -3827,10 +3850,16 @@ def _scrape_product(url, platform):
 
 # ── Claude AI 改寫 ────────────────────────────────────────────
 
-def _ai_rewrite(raw_title, raw_desc, price=""):
+def _ai_rewrite(raw_title, raw_desc, price="", brand=""):
     """呼叫 Claude API，改寫成官網專業風格。回傳 dict。"""
     if not ANTHROPIC_API_KEY:
         return {"error": "ANTHROPIC_API_KEY 未設定"}
+
+    bp = BRAND_PROFILES.get(brand, {})
+    brand_name     = bp.get("name", "台灣電商品牌")
+    brand_category = bp.get("category", "商品")
+    brand_style    = bp.get("style", "簡潔、專業、官網風格。")
+    brand_tone     = bp.get("tone", "直接說明功能，不像業務推銷。")
 
     parts = []
     if raw_title:
@@ -3840,7 +3869,11 @@ def _ai_rewrite(raw_title, raw_desc, price=""):
     if raw_desc:
         parts.append(f"原始描述：{raw_desc[:1500]}")
 
-    prompt = f"""你是台灣家具電商品牌的文案編輯，請將以下中國電商商品資料改寫成台灣官網風格。
+    prompt = f"""你是「{brand_name}」品牌的文案編輯，負責{brand_category}類商品。
+品牌文案風格：{brand_style}
+語氣要求：{brand_tone}
+
+請將以下中國電商商品資料改寫成台灣官網風格。
 
 {chr(10).join(parts)}
 
@@ -3929,8 +3962,9 @@ def _run_ai_rewrite_for_job(job_id):
         _pj_update(job_id, status="error", error_msg="無法取得商品資料（頁面可能需要登入）")
         return
 
+    brand = job.get("brand", "")
     _pj_update(job_id, status="rewriting")
-    ai = _ai_rewrite(raw_title, raw_desc, raw_price)
+    ai = _ai_rewrite(raw_title, raw_desc, raw_price, brand)
     if "error" in ai:
         _pj_update(job_id, status="error", error_msg=f"AI 改寫失敗：{ai['error']}")
         return
@@ -4019,6 +4053,8 @@ body{font-family:-apple-system,sans-serif;background:#f5f5f5;color:#333}
 .header a:hover{color:#fff}
 .header-title{font-size:17px;font-weight:700;flex:1}
 .header-status{font-size:12px;color:#666}
+.export-btn{background:#2d2d2d;color:#fff;text-decoration:none;border-radius:8px;padding:5px 12px;font-size:12px;font-weight:700;white-space:nowrap}
+.export-btn:hover{background:#444}
 .wrap{max-width:800px;margin:0 auto;padding:20px 16px}
 /* input card */
 .card{background:#fff;border-radius:14px;padding:20px;margin-bottom:16px;box-shadow:0 1px 4px rgba(0,0,0,.08)}
@@ -4099,6 +4135,9 @@ body{font-family:-apple-system,sans-serif;background:#f5f5f5;color:#333}
 /* 批次輸入 */
 .url-ta{width:100%;border:1.5px solid #ddd;border-radius:10px;padding:10px 14px;font-size:13px;height:90px;resize:vertical;font-family:-apple-system,sans-serif;outline:none}
 .url-ta:focus{border-color:#1a1a1a}
+.brand-sel{border:1.5px solid #ddd;border-radius:10px;padding:8px 12px;font-size:13px;font-family:-apple-system,sans-serif;outline:none;background:#fff;color:#333;cursor:pointer;width:100%}
+.brand-sel:focus{border-color:#1a1a1a}
+.brand-badge{font-size:10px;font-weight:700;padding:2px 7px;border-radius:7px;background:#f3e5f5;color:#7b1fa2;flex-shrink:0}
 .batch-hint{font-size:12px;color:#aaa;margin-top:6px}
 .progress-bar-wrap{background:#f0f0f0;border-radius:10px;height:6px;margin-top:10px;overflow:hidden;display:none}
 .progress-bar{background:#1a1a1a;height:100%;border-radius:10px;transition:width .3s}
@@ -4110,12 +4149,24 @@ body{font-family:-apple-system,sans-serif;background:#f5f5f5;color:#333}
   <a href="/admin?key={{ key }}">← 返回</a>
   <div class="header-title">AI 商品搬運中心</div>
   <div class="header-status" id="hStatus"></div>
+  <div style="display:flex;gap:8px">
+    <a class="export-btn" href="/api/products/export?format=xlsx&key={{ key }}" title="匯出 Excel">⬇ Excel</a>
+    <a class="export-btn" href="/api/products/export?format=csv&key={{ key }}" title="匯出 CSV">⬇ CSV</a>
+  </div>
 </div>
 
 <div class="wrap">
   <div class="card">
     <h3>貼上商品連結（一行一個，可多筆）</h3>
     <textarea class="url-ta" id="urlInput" placeholder="https://detail.1688.com/offer/xxx.html&#10;https://item.taobao.com/item.htm?id=xxx&#10;（一行一個連結）"></textarea>
+    <div style="margin-top:8px">
+      <select id="brandSel" class="brand-sel">
+        <option value="">不指定品牌（通用風格）</option>
+        <option value="jsimple">JSIMPLE — 高架床 / 家具</option>
+        <option value="lander">朗德燈具 — 燈具 / 照明</option>
+        <option value="filterbreath">濾呼吸 — 空氣濾網</option>
+      </select>
+    </div>
     <div class="batch-hint" id="batchHint"></div>
     <div class="progress-bar-wrap" id="progressWrap"><div class="progress-bar" id="progressBar" style="width:0%"></div></div>
     <div style="margin-top:10px;display:flex;gap:10px;align-items:center">
@@ -4185,9 +4236,11 @@ function render(){
 
 function jobCard(j){
   const pfLabel = {1688:"1688",taobao:"淘寶"}[j.platform]||j.platform;
-  const stLabel = {pending:"等待中",scraping:"爬取中",rewriting:"改寫中",done:"完成",error:"失敗"}[j.status]||j.status;
+  const stLabel = {pending:"等待 Worker",scraping:"爬取中",rewriting:"改寫中",done:"完成",error:"失敗"}[j.status]||j.status;
   const isActive = ["pending","scraping","rewriting"].includes(j.status);
   const spin = isActive ? '<span class="spinner"></span>' : "";
+  const brandLabel = {jsimple:"JSIMPLE",lander:"朗德",filterbreath:"濾呼吸"}[j.brand]||"";
+  const brandBadge = brandLabel ? `<span class="brand-badge">${brandLabel}</span>` : "";
   const title = esc(j.ai_name||j.raw_title||j.url);
   const urlShort = j.url.length>65 ? j.url.slice(0,65)+"…" : j.url;
   const ts = j.created_at ? new Date(j.created_at*1000).toLocaleString("zh-TW",{month:"2-digit",day:"2-digit",hour:"2-digit",minute:"2-digit"}) : "";
@@ -4195,6 +4248,7 @@ function jobCard(j){
     <div class="job-top">
       <span class="badge pf-${j.platform}">${pfLabel}</span>
       <span class="badge st-${j.status}">${spin}${stLabel}</span>
+      ${brandBadge}
       <div class="job-title">${title}</div>
       <button class="del-btn" onclick="delJob(event,${j.id})" title="刪除">×</button>
     </div>
@@ -4228,7 +4282,8 @@ async function submitUrl(){
     hint.textContent=`已提交 ${done} 筆${failed?`，失敗 ${failed} 筆`:""}`;
     pBar.style.width=((done+failed)/urls.length*100)+"%";
     try{
-      const r=await api("/api/products",{method:"POST",body:JSON.stringify({url})});
+      const brand=document.getElementById("brandSel").value;
+      const r=await api("/api/products",{method:"POST",body:JSON.stringify({url,brand})});
       if(r.error) failed++;
       else done++;
     }catch(e){failed++;}
@@ -4291,7 +4346,8 @@ function renderModal(j, editMode=false){
     h+=`<div class="section"><div class="slabel" style="display:flex;align-items:center;gap:6px">原始圖片（${j.raw_images.length} 張）${processBtn}</div><div class="imgs-row">${j.raw_images.map(img=>`<img src="${esc(img)}" loading="lazy" onerror="this.style.display='none'">`).join("")}</div></div>`;
   }
   if(j.processed_images&&j.processed_images.length){
-    h+=`<div class="section"><div class="slabel">已處理圖片（白底，${j.processed_images.length} 張）</div><div class="imgs-row">${j.processed_images.map(img=>`<a href="${esc(img)}" target="_blank"><img src="${esc(img)}" loading="lazy" onerror="this.style.display='none'"></a>`).join("")}</div></div>`;
+    const zipUrl=`/api/products/${j.id}/images/zip?key=${KEY}`;
+    h+=`<div class="section"><div class="slabel" style="display:flex;align-items:center;gap:8px">已處理圖片（白底，${j.processed_images.length} 張）<a href="${zipUrl}" class="export-btn" style="font-size:11px">⬇ ZIP</a></div><div class="imgs-row">${j.processed_images.map(img=>`<a href="${esc(img)}" target="_blank"><img src="${esc(img)}" loading="lazy" onerror="this.style.display='none'"></a>`).join("")}</div></div>`;
   }
   h+=`<hr class="divider">`;
   h+=imgFormHtml(j.id, j.raw_images||[]);
@@ -4401,11 +4457,11 @@ def api_products_add():
     platform = _detect_platform(url)
     if platform == "unknown":
         return jsonify({"error": "目前只支援 1688 和 淘寶 連結"}), 400
-    job_id = _pj_insert(url, platform)
+    brand = (data.get("brand") or "").strip()
+    job_id = _pj_insert(url, platform, brand)
     if not job_id:
         return jsonify({"error": "建立任務失敗，請確認資料庫連線"}), 500
-    # 任務建立後等待本機 Worker 爬取（不在 Render 端自動爬取）
-    return jsonify({"ok": True, "id": job_id, "platform": platform})
+    return jsonify({"ok": True, "id": job_id, "platform": platform, "brand": brand})
 
 @app.route("/api/products", methods=["GET"])
 def api_products_list():
@@ -4475,6 +4531,134 @@ def api_products_process_images(job_id):
 
 # ── 本機 Worker API ───────────────────────────────────────────
 
+# ── 匯出 / 下載 ────────────────────────────────────────────────
+
+def _pj_list_done():
+    if not DATABASE_URL:
+        return []
+    try:
+        conn = _pg_conn(); cur = conn.cursor()
+        cur.execute(
+            "SELECT id,url,platform,raw_title,raw_price,ai_name,ai_desc,ai_keywords,raw_images,processed_images,created_at FROM product_jobs WHERE status='done' ORDER BY created_at DESC"
+        )
+        rows = cur.fetchall(); cur.close(); conn.close()
+        return [{"id":r[0],"url":r[1],"platform":r[2],"raw_title":r[3],"raw_price":r[4],
+                 "ai_name":r[5],"ai_desc":r[6],"ai_keywords":r[7],
+                 "raw_images":json.loads(r[8] or "[]"),
+                 "processed_images":json.loads(r[9] or "[]"),
+                 "created_at":r[10]} for r in rows]
+    except Exception:
+        return []
+
+def _export_csv(jobs):
+    import csv, io
+    from flask import Response
+    buf = io.StringIO()
+    w = csv.writer(buf)
+    w.writerow(["平台","AI商品名稱","AI商品描述","SEO關鍵字","原始標題","原始價格","來源URL","圖片URL_1","圖片URL_2","圖片URL_3"])
+    for j in jobs:
+        imgs = j.get("processed_images") or j.get("raw_images",[])
+        w.writerow([
+            j["platform"], j["ai_name"], j["ai_desc"], j["ai_keywords"],
+            j["raw_title"], j["raw_price"], j["url"],
+            imgs[0] if len(imgs)>0 else "",
+            imgs[1] if len(imgs)>1 else "",
+            imgs[2] if len(imgs)>2 else "",
+        ])
+    output = buf.getvalue().encode("utf-8-sig")
+    return Response(output, mimetype="text/csv",
+        headers={"Content-Disposition": "attachment; filename=products.csv"})
+
+def _export_xlsx(jobs):
+    try:
+        import openpyxl
+        from openpyxl.styles import Font, PatternFill, Alignment
+        import openpyxl.utils
+    except ImportError:
+        return jsonify({"error": "openpyxl 未安裝"}), 500
+    import io
+    from flask import Response
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "商品資料"
+    headers = ["平台","AI商品名稱","AI商品描述","SEO關鍵字","原始標題","原始價格","來源URL","圖片URL_1","圖片URL_2","圖片URL_3"]
+    hfill = PatternFill("solid", fgColor="1a1a1a")
+    hfont = Font(color="FFFFFF", bold=True)
+    for ci, h in enumerate(headers, 1):
+        cell = ws.cell(row=1, column=ci, value=h)
+        cell.fill = hfill; cell.font = hfont
+        cell.alignment = Alignment(horizontal="center", wrap_text=True)
+    col_widths = [10, 35, 60, 30, 35, 12, 55, 55, 55, 55]
+    for i, w in enumerate(col_widths, 1):
+        ws.column_dimensions[openpyxl.utils.get_column_letter(i)].width = w
+    for ri, j in enumerate(jobs, 2):
+        imgs = j.get("processed_images") or j.get("raw_images",[])
+        values = [
+            j["platform"], j["ai_name"], j["ai_desc"], j["ai_keywords"],
+            j["raw_title"], j["raw_price"], j["url"],
+            imgs[0] if len(imgs)>0 else "",
+            imgs[1] if len(imgs)>1 else "",
+            imgs[2] if len(imgs)>2 else "",
+        ]
+        for ci, v in enumerate(values, 1):
+            cell = ws.cell(row=ri, column=ci, value=v)
+            cell.alignment = Alignment(wrap_text=True, vertical="top")
+        ws.row_dimensions[ri].height = 60
+    buf = io.BytesIO()
+    wb.save(buf); buf.seek(0)
+    return Response(buf.getvalue(),
+        mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": "attachment; filename=products.xlsx"})
+
+@app.route("/api/products/export")
+def api_products_export():
+    ok, _ = auth_required()
+    if not ok:
+        return jsonify({"error": "unauthorized"}), 403
+    fmt = request.args.get("format", "xlsx")
+    jobs = _pj_list_done()
+    if not jobs:
+        return jsonify({"error": "沒有已完成的商品"}), 400
+    if fmt == "csv":
+        return _export_csv(jobs)
+    return _export_xlsx(jobs)
+
+@app.route("/api/products/<int:job_id>/images/zip")
+def api_products_images_zip(job_id):
+    ok, _ = auth_required()
+    if not ok:
+        return jsonify({"error": "unauthorized"}), 403
+    job = _pj_get(job_id)
+    if not job:
+        return jsonify({"error": "not found"}), 404
+    imgs = job.get("processed_images") or job.get("raw_images", [])
+    if not imgs:
+        return jsonify({"error": "沒有圖片可下載"}), 400
+    import io, zipfile, re as _re
+    from flask import Response
+    buf = io.BytesIO()
+    downloaded = 0
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        for i, img_url in enumerate(imgs[:10]):
+            try:
+                req = urllib.request.Request(img_url, headers={"User-Agent":"Mozilla/5.0","Referer":"https://www.1688.com/"})
+                with urllib.request.urlopen(req, timeout=12) as r:
+                    data = r.read()
+                ext = img_url.split(".")[-1].split("?")[0].lower()
+                if ext not in ("jpg","jpeg","png","webp"): ext = "jpg"
+                zf.writestr(f"img_{i+1:02d}.{ext}", data)
+                downloaded += 1
+            except Exception:
+                pass
+    if downloaded == 0:
+        return jsonify({"error": "圖片下載失敗"}), 500
+    buf.seek(0)
+    safe = _re.sub(r'[^\w]', '_', (job.get("ai_name") or "product")[:20])
+    return Response(buf.getvalue(), mimetype="application/zip",
+        headers={"Content-Disposition": f'attachment; filename="{safe}_images.zip"'})
+
+# ── 本機 Worker API ───────────────────────────────────────────
+
 @app.route("/api/products/pending", methods=["GET"])
 def api_products_pending():
     """本機 Worker 輪詢：取得待爬取的任務列表。"""
@@ -4506,13 +4690,16 @@ def api_products_scrape_result(job_id):
         _pj_update(job_id, status="error", error_msg=f"本機爬取失敗：{data['error']}")
         return jsonify({"ok": True})
 
+    processed = data.get("processed_images", [])
     _pj_update(job_id,
         status="scraping",
-        raw_title  = data.get("raw_title", ""),
-        raw_desc   = data.get("raw_desc", ""),
-        raw_images = json.dumps(data.get("raw_images", []), ensure_ascii=False),
-        raw_price  = data.get("raw_price", ""),
-        raw_extra  = data.get("raw_extra", "{}"),
+        raw_title         = data.get("raw_title", ""),
+        raw_desc          = data.get("raw_desc", ""),
+        raw_images        = json.dumps(data.get("raw_images", []), ensure_ascii=False),
+        raw_price         = data.get("raw_price", ""),
+        raw_extra         = data.get("raw_extra", "{}"),
+        processed_images  = json.dumps(processed, ensure_ascii=False),
+        img_status        = "done" if processed else "",
     )
     threading.Thread(target=_run_ai_rewrite_for_job, args=(job_id,), daemon=True).start()
     return jsonify({"ok": True})

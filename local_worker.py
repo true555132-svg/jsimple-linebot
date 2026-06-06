@@ -4,7 +4,7 @@ J SIMPLE 本機商品爬取 Worker
 架構：本機 Playwright + Chrome  →  Render Flask API
 
 需求：
-    pip install playwright requests
+    pip install playwright requests rembg pillow
     playwright install  （使用本機 Chrome，不需下載 Chromium）
 
 啟動流程：
@@ -13,16 +13,20 @@ J SIMPLE 本機商品爬取 Worker
     3. 執行 start_worker.bat  →  本機 Worker 開始輪詢
 """
 
-import re, json, time, sys
+import re, json, time, sys, io
 import requests
 from playwright.sync_api import sync_playwright
 
 # ── 設定（根據需要修改）──────────────────────────────────────
-SERVER_URL  = "https://jsimple-linebot.onrender.com"
-API_KEY     = "jsimple2024"
-CHROME_CDP  = "http://localhost:9222"   # Chrome debug port
-POLL_SEC    = 5                          # 輪詢間隔（秒）
-PAGE_WAIT   = 3000                       # 頁面載入等待（ms）
+SERVER_URL    = "https://jsimple-linebot.onrender.com"
+API_KEY       = "jsimple2024"
+CHROME_CDP    = "http://localhost:9222"   # Chrome debug port
+POLL_SEC      = 5                          # 輪詢間隔（秒）
+PAGE_WAIT     = 3000                       # 頁面載入等待（ms）
+SUPABASE_URL  = "https://lrslleetqyaerstrlbap.supabase.co"
+SUPABASE_KEY  = ""   # ← 填入 Render 環境變數 SUPABASE_SERVICE_KEY 的值
+SUPABASE_BUCKET = "chat-images"
+ENABLE_REMBG  = True   # 設為 False 可跳過去背，只做白底
 # ────────────────────────────────────────────────────────────
 
 
@@ -83,6 +87,87 @@ def clean_images(urls, max_count=10):
     others   = [u for u in result if not _PRIORITY_IMG.search(u)]
     return (priority + others)[:max_count]
 
+
+# ── 圖片處理：去背 + 白底 + 上傳 Supabase ────────────────────
+
+def _remove_bg(img_bytes):
+    """用 rembg 去除背景，回傳 RGBA bytes 或 None。"""
+    if not ENABLE_REMBG:
+        return None
+    try:
+        from rembg import remove
+        return remove(img_bytes)
+    except ImportError:
+        print("  [提示] rembg 未安裝，跳過去背。執行：pip install rembg")
+        return None
+    except Exception as e:
+        print(f"  [去背失敗] {e}")
+        return None
+
+def _to_white_bg(img_bytes, nobg_bytes=None, size=800):
+    """
+    去背後加白底，正方形 800×800，JPEG 壓縮。
+    nobg_bytes: rembg 處理後的 RGBA bytes（可選）
+    img_bytes:  原始圖片 bytes（fallback）
+    """
+    try:
+        from PIL import Image
+        src_bytes = nobg_bytes if nobg_bytes else img_bytes
+        img = Image.open(io.BytesIO(src_bytes)).convert("RGBA")
+        canvas = Image.new("RGB", (size, size), (255, 255, 255))
+        img.thumbnail((size, size), Image.LANCZOS)
+        offset = ((size - img.width) // 2, (size - img.height) // 2)
+        canvas.paste(img, offset, mask=img.split()[3])
+        out = io.BytesIO()
+        canvas.save(out, format="JPEG", quality=88, optimize=True)
+        return out.getvalue()
+    except Exception as e:
+        print(f"  [白底失敗] {e}")
+        return None
+
+def _upload_to_supabase(filename, data, content_type="image/jpeg"):
+    """上傳到 Supabase Storage，回傳公開 URL 或 None。"""
+    if not SUPABASE_KEY:
+        return None
+    try:
+        url = f"{SUPABASE_URL}/storage/v1/object/{SUPABASE_BUCKET}/{filename}"
+        r = requests.put(url, data=data, headers={
+            "Authorization": f"Bearer {SUPABASE_KEY}",
+            "Content-Type": content_type,
+            "x-upsert": "true",
+        }, timeout=20)
+        if r.status_code in (200, 201):
+            return f"{SUPABASE_URL}/storage/v1/object/public/{SUPABASE_BUCKET}/{filename}"
+        return None
+    except Exception:
+        return None
+
+def process_images(job_id, raw_images):
+    """下載原始圖片 → 去背 → 白底 → 上傳，回傳已處理 URL 列表。"""
+    if not raw_images:
+        return []
+    processed = []
+    print(f"  處理圖片（共 {len(raw_images)} 張）...")
+    for i, url in enumerate(raw_images[:8]):
+        try:
+            r = requests.get(url, headers={"User-Agent":"Mozilla/5.0","Referer":"https://www.1688.com/"}, timeout=12)
+            if r.status_code != 200:
+                continue
+            img_bytes = r.content
+            nobg = _remove_bg(img_bytes)
+            result = _to_white_bg(img_bytes, nobg)
+            if not result:
+                continue
+            filename = f"products/{job_id}_{i+1:02d}.jpg"
+            pub_url = _upload_to_supabase(filename, result)
+            if pub_url:
+                processed.append(pub_url)
+                print(f"    ✓ 圖{i+1} 上傳完成")
+            else:
+                print(f"    - 圖{i+1} 上傳跳過（未設定 SUPABASE_KEY）")
+        except Exception as e:
+            print(f"    ✗ 圖{i+1} 失敗: {e}")
+    return processed
 
 # ── 1688 爬取 ────────────────────────────────────────────────
 
@@ -284,10 +369,19 @@ def run():
                                 data.get("raw_extra", {}), ensure_ascii=False
                             )
 
+                            # 圖片處理（去背 + 白底 + 上傳）
+                            raw_imgs = data.get("raw_images", [])
+                            if raw_imgs and SUPABASE_KEY:
+                                processed = process_images(job_id, raw_imgs)
+                                data["processed_images"] = processed
+                            else:
+                                data["processed_images"] = []
+
                             r = post_result(job_id, data)
                             if r.get("ok"):
                                 title_preview = data["raw_title"][:30] or "(無標題)"
-                                print(f"  ✓ 完成：{title_preview} → AI 改寫中")
+                                proc_count = len(data.get("processed_images", []))
+                                print(f"  ✓ 完成：{title_preview} → AI 改寫中（已處理圖片 {proc_count} 張）")
                             else:
                                 print(f"  ✗ 回傳失敗: {r}")
 
