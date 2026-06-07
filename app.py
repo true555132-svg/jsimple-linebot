@@ -4585,19 +4585,29 @@ async function saveEdit(id){
 }
 
 function imgFormHtml(id, existing){
+  const joined = existing.join("\n");
   return `<div class="section img-form">
     <div class="slabel">手動補圖片 URL（第三層，一行一張）</div>
-    <textarea id="imgTa" placeholder="https://img.alicdn.com/...">${existing.join("\\n")}</textarea>
-    <button class="btn-sm" onclick="saveImgs(${id})">儲存圖片</button>
+    <textarea id="imgTa_${id}" rows="4" placeholder="https://img.alicdn.com/...">${joined}</textarea>
+    <button class="btn-sm" onclick="saveImgs(${id})" style="margin-top:6px">儲存圖片</button>
+    <span id="saveImgMsg_${id}" style="font-size:11px;color:#2e7d32;margin-left:8px"></span>
   </div>`;
 }
 
 async function saveImgs(id){
-  const ta=document.getElementById("imgTa");
-  const urls=ta.value.split("\\n").map(s=>s.trim()).filter(Boolean);
+  const ta=document.getElementById("imgTa_"+id);
+  if(!ta) return;
+  const urls=ta.value.split("\n").map(s=>s.trim()).filter(Boolean);
+  const msg=document.getElementById("saveImgMsg_"+id);
+  if(msg) msg.textContent="儲存中...";
   const r=await api("/api/products/"+id+"/images",{method:"POST",body:JSON.stringify({urls})});
-  if(r.ok) toast("圖片已儲存");
-  else toast("儲存失敗："+r.error);
+  if(r.ok){
+    if(msg) msg.textContent=`已儲存 ${r.count} 張`;
+    toast("圖片已儲存");
+  } else {
+    if(msg) msg.textContent="失敗";
+    toast("儲存失敗："+r.error);
+  }
 }
 
 async function processImgs(id){
