@@ -1,0 +1,16 @@
+# 上傳圖片（由 LINE bot 動態產生，不進 git）
+images/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.env
+
+# Playwright 登入狀態（本機）
+jsimple-worker-profile/
+
+# 測試輸出
+test_product_images.json
+test_log.txt
+test_log
