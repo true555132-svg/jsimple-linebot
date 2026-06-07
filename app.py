@@ -3772,13 +3772,22 @@ def _pj_get(job_id):
     try:
         conn = _pg_conn(); cur = conn.cursor()
         cur.execute(
-            "SELECT id,url,platform,status,raw_title,raw_desc,raw_images,raw_price,ai_name,ai_desc,ai_keywords,error_msg,created_at,processed_images,img_status,raw_extra,brand,product_images FROM product_jobs WHERE id=%s",
+            "SELECT id,url,platform,status,raw_title,raw_desc,raw_images,raw_price,ai_name,ai_desc,ai_keywords,error_msg,created_at,processed_images,img_status,raw_extra,brand FROM product_jobs WHERE id=%s",
             (job_id,)
         )
-        row = cur.fetchone(); cur.close(); conn.close()
+        row = cur.fetchone()
         if not row:
-            return None
-        return {"id":row[0],"url":row[1],"platform":row[2],"status":row[3],"raw_title":row[4],"raw_desc":row[5],"raw_images":json.loads(row[6] or "[]"),"raw_price":row[7],"ai_name":row[8],"ai_desc":row[9],"ai_keywords":row[10],"error_msg":row[11],"created_at":row[12],"processed_images":json.loads(row[13] or "[]"),"img_status":row[14] or "","raw_extra":json.loads(row[15] or "{}"),"brand":row[16] or "","product_images":json.loads(row[17] or "{}")}
+            cur.close(); conn.close(); return None
+        result = {"id":row[0],"url":row[1],"platform":row[2],"status":row[3],"raw_title":row[4],"raw_desc":row[5],"raw_images":json.loads(row[6] or "[]"),"raw_price":row[7],"ai_name":row[8],"ai_desc":row[9],"ai_keywords":row[10],"error_msg":row[11],"created_at":row[12],"processed_images":json.loads(row[13] or "[]"),"img_status":row[14] or "","raw_extra":json.loads(row[15] or "{}"),"brand":row[16] or ""}
+        # product_images 欄位可能尚未存在（migration 未完成）
+        try:
+            cur.execute("SELECT product_images FROM product_jobs WHERE id=%s", (job_id,))
+            pi_row = cur.fetchone()
+            result["product_images"] = json.loads((pi_row[0] if pi_row else None) or "{}")
+        except Exception:
+            result["product_images"] = {}
+        cur.close(); conn.close()
+        return result
     except Exception:
         return None
 
@@ -4928,12 +4937,14 @@ def api_products_from_extension():
     if not job_id:
         return jsonify({"error": "DB error"}), 500
     main_srcs = [i["src"] if isinstance(i, dict) else i for i in product_imgs.get("main_images", [])]
+    # 核心欄位先更新（確保 status 改變、AI thread 能跑）
     _pj_update(job_id,
-        status         = "scraping",
-        raw_title      = title,
-        raw_images     = json.dumps(main_srcs, ensure_ascii=False),
-        product_images = json.dumps(product_imgs, ensure_ascii=False),
+        status    = "scraping",
+        raw_title = title,
+        raw_images= json.dumps(main_srcs, ensure_ascii=False),
     )
+    # product_images 欄位分開更新（若 column 不存在不影響主流程）
+    _pj_update(job_id, product_images=json.dumps(product_imgs, ensure_ascii=False))
     threading.Thread(target=_run_ai_rewrite_for_job, args=(job_id,), daemon=True).start()
     return jsonify({"ok": True, "id": job_id})
 
