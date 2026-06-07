@@ -130,6 +130,37 @@ def _init_messages_db():
             ]:
                 try: cur.execute(col_sql)
                 except Exception: pass
+            # brand_profiles 表
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS brand_profiles (
+                    brand_key   TEXT PRIMARY KEY,
+                    name        TEXT NOT NULL DEFAULT '',
+                    category    TEXT NOT NULL DEFAULT '',
+                    style       TEXT NOT NULL DEFAULT '',
+                    tone        TEXT NOT NULL DEFAULT '',
+                    custom_prompt TEXT NOT NULL DEFAULT '',
+                    updated_at  FLOAT DEFAULT 0
+                )
+            """)
+            # 預設品牌資料（只在空表時插入）
+            cur.execute("SELECT COUNT(*) FROM brand_profiles")
+            if cur.fetchone()[0] == 0:
+                defaults = [
+                    ("jsimple",     "JSIMPLE",  "高架床、系統家具",
+                     "簡潔、功能導向、現代風格。強調空間利用、承重規格、材質安全。",
+                     "直接說明功能與規格，像設計師推薦，不像業務推銷。", ""),
+                    ("lander",      "朗德燈具",  "燈具、照明",
+                     "質感、設計感、氛圍營造。強調光線效果、設計美感、節能規格（W數、流明）。",
+                     "有畫面感，讓人想像裝上後的居家氛圍。", ""),
+                    ("filterbreath","濾呼吸",   "空氣濾網、淨化設備",
+                     "健康、數據導向、信任感。強調過濾效率（等級）、適用機型、更換週期。",
+                     "用具體數字說話，像健康產品的專業建議，不誇大。", ""),
+                ]
+                for row in defaults:
+                    cur.execute(
+                        "INSERT INTO brand_profiles(brand_key,name,category,style,tone,custom_prompt,updated_at) VALUES(%s,%s,%s,%s,%s,%s,%s)",
+                        (*row, 0)
+                    )
             conn.commit()
             cur.close()
             conn.close()
@@ -3640,6 +3671,54 @@ BRAND_PROFILES = {
     },
 }
 
+# ── Brand profile DB helpers ─────────────────────────────────
+
+def _bp_all():
+    """回傳所有品牌設定 list。DB 讀不到則 fallback BRAND_PROFILES。"""
+    if not DATABASE_URL:
+        return [{"brand_key": k, **v, "custom_prompt": ""} for k, v in BRAND_PROFILES.items()]
+    try:
+        conn = _pg_conn(); cur = conn.cursor()
+        cur.execute("SELECT brand_key,name,category,style,tone,custom_prompt FROM brand_profiles ORDER BY brand_key")
+        rows = cur.fetchall(); cur.close(); conn.close()
+        return [{"brand_key": r[0], "name": r[1], "category": r[2],
+                 "style": r[3], "tone": r[4], "custom_prompt": r[5] or ""} for r in rows]
+    except Exception:
+        return [{"brand_key": k, **v, "custom_prompt": ""} for k, v in BRAND_PROFILES.items()]
+
+def _bp_get(brand_key):
+    """取單一品牌設定，fallback 到 BRAND_PROFILES。"""
+    if not DATABASE_URL:
+        return BRAND_PROFILES.get(brand_key, {})
+    try:
+        conn = _pg_conn(); cur = conn.cursor()
+        cur.execute("SELECT name,category,style,tone,custom_prompt FROM brand_profiles WHERE brand_key=%s", (brand_key,))
+        row = cur.fetchone(); cur.close(); conn.close()
+        if row:
+            return {"name": row[0], "category": row[1], "style": row[2],
+                    "tone": row[3], "custom_prompt": row[4] or ""}
+    except Exception:
+        pass
+    return BRAND_PROFILES.get(brand_key, {})
+
+def _bp_save(brand_key, name, category, style, tone, custom_prompt=""):
+    if not DATABASE_URL:
+        return False
+    try:
+        conn = _pg_conn(); cur = conn.cursor()
+        cur.execute("""
+            INSERT INTO brand_profiles(brand_key,name,category,style,tone,custom_prompt,updated_at)
+            VALUES(%s,%s,%s,%s,%s,%s,%s)
+            ON CONFLICT(brand_key) DO UPDATE
+            SET name=%s,category=%s,style=%s,tone=%s,custom_prompt=%s,updated_at=%s
+        """, (brand_key, name, category, style, tone, custom_prompt, time.time(),
+              name, category, style, tone, custom_prompt, time.time()))
+        conn.commit(); cur.close(); conn.close()
+        return True
+    except Exception as e:
+        import sys; print(f"[BP Save] {e}", file=sys.stderr)
+        return False
+
 # ── DB helpers ───────────────────────────────────────────────
 
 def _pj_insert(url, platform, brand=""):
@@ -3855,11 +3934,12 @@ def _ai_rewrite(raw_title, raw_desc, price="", brand=""):
     if not ANTHROPIC_API_KEY:
         return {"error": "ANTHROPIC_API_KEY 未設定"}
 
-    bp = BRAND_PROFILES.get(brand, {})
+    bp = _bp_get(brand) if brand else {}
     brand_name     = bp.get("name", "台灣電商品牌")
     brand_category = bp.get("category", "商品")
     brand_style    = bp.get("style", "簡潔、專業、官網風格。")
     brand_tone     = bp.get("tone", "直接說明功能，不像業務推銷。")
+    custom_prompt  = bp.get("custom_prompt", "")
 
     parts = []
     if raw_title:
@@ -3869,13 +3949,20 @@ def _ai_rewrite(raw_title, raw_desc, price="", brand=""):
     if raw_desc:
         parts.append(f"原始描述：{raw_desc[:1500]}")
 
-    prompt = f"""你是「{brand_name}」品牌的文案編輯，負責{brand_category}類商品。
+    product_block = chr(10).join(parts)
+    if custom_prompt and custom_prompt.strip():
+        # 用自訂 prompt，支援 {product} 替換為商品資料
+        prompt = custom_prompt.replace("{product}", product_block)
+        if "{product}" not in custom_prompt:
+            prompt = custom_prompt + "\n\n" + product_block
+    else:
+        prompt = f"""你是「{brand_name}」品牌的文案編輯，負責{brand_category}類商品。
 品牌文案風格：{brand_style}
 語氣要求：{brand_tone}
 
 請將以下中國電商商品資料改寫成台灣官網風格。
 
-{chr(10).join(parts)}
+{product_block}
 
 輸出格式（只輸出 JSON，不要其他文字）：
 {{
@@ -4037,6 +4124,103 @@ def _process_images_for_job(job_id):
         img_status="done" if processed else "failed"
     )
 
+# ── 品牌設定 HTML ────────────────────────────────────────────
+
+BRAND_SETTINGS_HTML = """<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>品牌文案設定</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:-apple-system,sans-serif;background:#f5f7fa;color:#333;font-size:14px}
+.topbar{background:#1a1a2e;color:#fff;padding:12px 20px;display:flex;align-items:center;gap:16px}
+.topbar a{color:#aaa;text-decoration:none;font-size:13px}
+.topbar a:hover{color:#fff}
+.container{max-width:900px;margin:24px auto;padding:0 16px}
+.brand-card{background:#fff;border-radius:10px;padding:24px;margin-bottom:20px;box-shadow:0 1px 4px rgba(0,0,0,.08)}
+.brand-card h2{font-size:16px;font-weight:600;margin-bottom:16px;padding-bottom:10px;border-bottom:2px solid #e8eaf0;display:flex;align-items:center;gap:8px}
+.badge{font-size:11px;background:#e8f0fe;color:#1967d2;padding:2px 8px;border-radius:10px;font-weight:500}
+.field{margin-bottom:14px}
+.field label{display:block;font-size:12px;color:#666;margin-bottom:4px;font-weight:500}
+.field input,.field textarea{width:100%;border:1px solid #ddd;border-radius:6px;padding:8px 10px;font-size:13px;font-family:inherit;resize:vertical;transition:border .2s}
+.field input:focus,.field textarea:focus{outline:none;border-color:#4285f4}
+.field textarea{min-height:80px}
+.field .hint{font-size:11px;color:#999;margin-top:3px}
+.custom-area{background:#fffbe6;border:1px solid #ffe58f;border-radius:6px;padding:12px;margin-top:8px}
+.custom-area label{color:#ad6800;font-weight:600}
+.custom-area textarea{min-height:120px;background:#fff}
+.btn-save{background:#1a73e8;color:#fff;border:none;padding:9px 22px;border-radius:6px;cursor:pointer;font-size:13px;font-weight:500}
+.btn-save:hover{background:#1557b0}
+.saved-msg{display:none;color:#2e7d32;font-size:12px;margin-left:10px}
+.row2{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+@media(max-width:600px){.row2{grid-template-columns:1fr}}
+</style>
+</head>
+<body>
+<div class="topbar">
+  <strong>品牌文案設定</strong>
+  <a href="/admin/products">← 商品搬運</a>
+</div>
+<div class="container">
+  <p style="color:#666;font-size:13px;margin-bottom:20px">
+    每個品牌的 AI 文案風格獨立設定。<b>自訂 Prompt</b> 填寫後會完全覆蓋預設模板，支援 <code>{product}</code> 佔位符插入商品資料。
+  </p>
+  {% for p in profiles %}
+  <div class="brand-card" id="card-{{ p.brand_key }}">
+    <h2>{{ p.name }} <span class="badge">{{ p.brand_key }}</span></h2>
+    <div class="row2">
+      <div class="field">
+        <label>品牌名稱</label>
+        <input type="text" id="{{ p.brand_key }}_name" value="{{ p.name }}">
+      </div>
+      <div class="field">
+        <label>商品類別</label>
+        <input type="text" id="{{ p.brand_key }}_category" value="{{ p.category }}">
+      </div>
+    </div>
+    <div class="field">
+      <label>文案風格</label>
+      <textarea id="{{ p.brand_key }}_style">{{ p.style }}</textarea>
+      <div class="hint">描述這個品牌的寫作風格，例如：質感、設計感、強調規格...</div>
+    </div>
+    <div class="field">
+      <label>語氣要求</label>
+      <textarea id="{{ p.brand_key }}_tone">{{ p.tone }}</textarea>
+      <div class="hint">讀者應感受到的語氣，例如：像設計師推薦、有畫面感...</div>
+    </div>
+    <div class="custom-area">
+      <div class="field">
+        <label>自訂 Prompt（選填，填寫後覆蓋預設模板）</label>
+        <textarea id="{{ p.brand_key }}_custom" placeholder="留空使用預設模板。可用 {product} 代入商品資料。&#10;範例：&#10;你是台灣燈具品牌的文案師，請用詩意的語氣改寫以下商品資料：&#10;{product}&#10;輸出 JSON 格式：{&quot;name&quot;:&quot;...&quot;,&quot;desc&quot;:&quot;...&quot;,&quot;keywords&quot;:&quot;...&quot;}">{{ p.custom_prompt }}</textarea>
+      </div>
+    </div>
+    <div style="margin-top:14px;display:flex;align-items:center">
+      <button class="btn-save" onclick="save('{{ p.brand_key }}')">儲存</button>
+      <span class="saved-msg" id="msg-{{ p.brand_key }}">已儲存</span>
+    </div>
+  </div>
+  {% endfor %}
+</div>
+<script>
+const KEY = '{{ key }}';
+async function save(bk) {
+  const g = id => document.getElementById(bk+'_'+id)?.value || '';
+  const r = await fetch(`/api/brand-profiles/${bk}?key=${KEY}`, {
+    method:'PUT', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({name:g('name'),category:g('category'),style:g('style'),tone:g('tone'),custom_prompt:g('custom')})
+  });
+  const d = await r.json();
+  const msg = document.getElementById('msg-'+bk);
+  msg.style.display = 'inline';
+  msg.textContent = d.ok ? '已儲存 ✓' : '儲存失敗';
+  setTimeout(() => msg.style.display='none', 2500);
+}
+</script>
+</body>
+</html>"""
+
 # ── HTML 模板 ─────────────────────────────────────────────────
 
 PRODUCTS_HTML = """<!DOCTYPE html>
@@ -4150,6 +4334,7 @@ body{font-family:-apple-system,sans-serif;background:#f5f5f5;color:#333}
   <div class="header-title">AI 商品搬運中心</div>
   <div class="header-status" id="hStatus"></div>
   <div style="display:flex;gap:8px">
+    <a class="export-btn" href="/admin/brand-settings?key={{ key }}" title="品牌文案設定" style="background:#e8f0fe;color:#1967d2">品牌設定</a>
     <a class="export-btn" href="/api/products/export?format=xlsx&key={{ key }}" title="匯出 Excel">⬇ Excel</a>
     <a class="export-btn" href="/api/products/export?format=csv&key={{ key }}" title="匯出 CSV">⬇ CSV</a>
   </div>
@@ -4442,6 +4627,37 @@ def admin_products():
     if not ok:
         return render_template_string(LOGIN_HTML, next="/admin/products", error=None)
     return render_template_string(PRODUCTS_HTML, key=key)
+
+@app.route("/admin/brand-settings")
+def admin_brand_settings():
+    ok, key = check_auth()
+    if not ok:
+        return render_template_string(LOGIN_HTML, next="/admin/brand-settings", error=None)
+    profiles = _bp_all()
+    return render_template_string(BRAND_SETTINGS_HTML, key=key, profiles=profiles)
+
+@app.route("/api/brand-profiles", methods=["GET"])
+def api_brand_profiles_list():
+    ok, _ = auth_required()
+    if not ok:
+        return jsonify({"error": "unauthorized"}), 403
+    return jsonify({"profiles": _bp_all()})
+
+@app.route("/api/brand-profiles/<brand_key>", methods=["PUT"])
+def api_brand_profiles_save(brand_key):
+    ok, _ = auth_required()
+    if not ok:
+        return jsonify({"error": "unauthorized"}), 403
+    data = request.get_json(silent=True) or {}
+    success = _bp_save(
+        brand_key,
+        data.get("name", ""),
+        data.get("category", ""),
+        data.get("style", ""),
+        data.get("tone", ""),
+        data.get("custom_prompt", ""),
+    )
+    return jsonify({"ok": success})
 
 # ── API 路由 ──────────────────────────────────────────────────
 

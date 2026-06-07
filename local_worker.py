@@ -56,15 +56,28 @@ def post_result(job_id, data):
 
 # ── 圖片工具 ─────────────────────────────────────────────────
 
-_SKIP = re.compile(r'icon|logo|_\d{2}x\d{2}[_.]|_30x|_50x|_60x|_80x|\.ico$', re.I)
-_PRIO = re.compile(r'_800x|_790x|_750x|_600x|imgextra|mainimg', re.I)
+_SKIP = re.compile(r'icon|logo|_\d{2,3}x\d{2,3}[_.]|_30x|_50x|_60x|_80x|\.ico$|!!0-rate\.|tbvideo\.', re.I)
+_PRIO = re.compile(r'_800x|_790x|_750x|_600x|mainimg', re.I)
 _ALICDN = re.compile(
     r'(?:https?:)?//[^"\'<>\s]*?\.alicdn\.com/[^"\'<>\s]+?\.(?:jpg|jpeg|png|webp)(?:\?[^"\'<>\s]*)?',
     re.I
 )
+_TPS_SIZE = re.compile(r'-tps-(\d+)-(\d+)', re.I)
 
 def extract_imgs(html):
     return _ALICDN.findall(html)
+
+def _tps_ok(url, min_px=300, max_ratio=3.5):
+    """imgextra URL 含 tps-WIDTH-HEIGHT 格式，小圖或極端比例直接過濾。"""
+    m = _TPS_SIZE.search(url)
+    if not m:
+        return True
+    w, h = int(m.group(1)), int(m.group(2))
+    if w < min_px or h < min_px:
+        return False
+    if max(w, h) / min(w, h) > max_ratio:
+        return False
+    return True
 
 def clean_images(urls, max_count=10):
     seen, result = set(), []
@@ -72,11 +85,187 @@ def clean_images(urls, max_count=10):
         u = u.strip()
         if u.startswith("//"): u = "https:" + u
         if not u.startswith("http") or _SKIP.search(u): continue
+        if not _tps_ok(u): continue
         if u not in seen:
             seen.add(u); result.append(u)
     p = [u for u in result if _PRIO.search(u)]
     o = [u for u in result if not _PRIO.search(u)]
     return (p + o)[:max_count]
+
+
+# ── Phase 2 DOM 圖片擷取 ─────────────────────────────────────
+
+def _parse_url_size(url):
+    """從 URL 解析尺寸：tps-W-H 或 _WxH 格式。"""
+    m = re.search(r'-tps-(\d+)-(\d+)', url)
+    if m:
+        return int(m.group(1)), int(m.group(2))
+    m = re.search(r'[_-](\d{3,4})x(\d{3,4})[_.]', url)
+    if m:
+        return int(m.group(1)), int(m.group(2))
+    return 0, 0
+
+def _norm_img(src, w, h):
+    """標準化圖片物件；naturalWidth=0 時 fallback URL 解析尺寸。"""
+    if not src:
+        return None
+    if src.startswith('//'):
+        src = 'https:' + src
+    if not src.startswith('http'):
+        return None
+    if w == 0 or h == 0:
+        w, h = _parse_url_size(src)
+    return {"src": src, "w": w, "h": h}
+
+def _scroll_for_lazy(page, steps=12, wait_ms=500):
+    """分段捲動頁面，觸發 lazy load / AJAX 詳情圖，等網路靜止再回頭。"""
+    for i in range(steps + 1):
+        page.evaluate(f"window.scrollTo(0, document.body.scrollHeight * {i} / {steps})")
+        page.wait_for_timeout(wait_ms)
+    # 等所有 AJAX 請求完成
+    try:
+        page.wait_for_load_state("networkidle", timeout=12000)
+    except Exception:
+        pass
+    page.evaluate("window.scrollTo(0, 0)")
+    page.wait_for_timeout(1000)
+
+# JavaScript helpers（selector 以 argument 傳入，避免 f-string 轉義問題）
+_JS_PICK_IMGS = """(selector) => {
+    const results = [];
+    const seen = new Set();
+    try {
+        document.querySelectorAll(selector).forEach(img => {
+            const src = img.src
+                || img.dataset.src
+                || img.dataset.lazyload
+                || img.getAttribute('data-lazyload') || '';
+            if (!src || seen.has(src)) return;
+            seen.add(src);
+            results.push({ src, w: img.naturalWidth || 0, h: img.naturalHeight || 0 });
+        });
+    } catch(e) {}
+    return results;
+}"""
+
+_JS_PICK_VIDS = """(selector) => {
+    const results = [];
+    const seen = new Set();
+    try {
+        document.querySelectorAll(selector).forEach(el => {
+            const src = el.src || el.getAttribute('src') || '';
+            if (src && !seen.has(src)) { seen.add(src); results.push(src); }
+        });
+    } catch(e) {}
+    return results;
+}"""
+
+_GALLERY_SEL = {
+    '1688': [
+        'img.preview-img',
+        'img.ant-image-img.preview-img',
+        '.detail-gallery-turn-box img',
+        '.gallery-turn-warp img',
+        '.J_Gallery img',
+        '[class*="galleryItem"] img',
+        '[class*="gallery-wrap"] img',
+    ],
+    'taobao': [
+        '.J_ThumbList img',
+        '.mainPicWraper img',
+        '[class*="gallery"] img',
+    ],
+}
+_DESC_SEL = {
+    '1688': '.mod-detail-description img, .detail-desc-content img, .description-content img',
+    'taobao': '.descContainer img, .J_DescContent img',
+}
+_VIDEO_SEL = 'video source[src], video[src]'
+
+def _extract_images_dom(page, platform='1688'):
+    """Phase 2 DOM 擷取：main_images / detail_images / video_urls。
+    detail 三層策略：CSS selector → page.frames → page.content() regex。
+    """
+    out = {"main_images": [], "detail_images": [], "video_urls": []}
+
+    # ── 主圖（輪播區，不需 scroll）───────────────────────────
+    for sel in _GALLERY_SEL.get(platform, []):
+        try:
+            items = page.evaluate(_JS_PICK_IMGS, sel)
+            cands = []
+            for it in items:
+                img = _norm_img(it['src'], it['w'], it['h'])
+                if not img: continue
+                w, h = img['w'], img['h']
+                if (w >= 500 and h >= 500 and max(w, h) / min(w, h) <= 1.5) or \
+                   (w == 0 and h == 0 and 'alicdn' in img['src']):
+                    cands.append(img)
+            if cands:
+                out['main_images'] = cands
+                break
+        except Exception as e:
+            print(f"  [main] {e}")
+
+    # ── 詳情圖（scroll + 三層策略）──────────────────────────
+    print("    scroll lazy load...")
+    _scroll_for_lazy(page)
+
+    main_srcs = {i['src'] for i in out['main_images']}
+
+    def _add_detail(img):
+        if img and img['src'] not in main_srcs and img['w'] >= 1000 and img['h'] >= 250:
+            main_srcs.add(img['src'])
+            out['detail_images'].append(img)
+
+    # 策略 1：CSS selector（main frame）
+    desc_sel = _DESC_SEL.get(platform, '')
+    if desc_sel:
+        try:
+            for it in page.evaluate(_JS_PICK_IMGS, desc_sel):
+                _add_detail(_norm_img(it['src'], it['w'], it['h']))
+        except Exception as e:
+            print(f"  [detail s1] {e}")
+
+    # 策略 2：掃所有 frames（1688 詳情常在 iframe 內）
+    if not out['detail_images']:
+        for frame in page.frames[1:]:
+            try:
+                for it in frame.evaluate(_JS_PICK_IMGS, 'img'):
+                    _add_detail(_norm_img(it['src'], it['w'], it['h']))
+            except Exception:
+                pass
+
+    # 策略 3：page.content() regex
+    # tps 有尺寸：w>=1000 h>=250；imgextra 無尺寸：先收下，process_images 再驗
+    if not out['detail_images']:
+        try:
+            for u in _ALICDN.findall(page.content()):
+                if u.startswith('//'): u = 'https:' + u
+                if not u.startswith('http') or u in main_srcs: continue
+                if _SKIP.search(u) or not _tps_ok(u): continue
+                w, h = _parse_url_size(u)
+                if (w >= 1000 and h >= 250) or (w == 0 and 'imgextra' in u):
+                    main_srcs.add(u)
+                    out['detail_images'].append({"src": u, "w": w, "h": h})
+        except Exception as e:
+            print(f"  [detail s3] {e}")
+
+    # ── 影片 ────────────────────────────────────────────────
+    try:
+        out['video_urls'] = list(dict.fromkeys(page.evaluate(_JS_PICK_VIDS, _VIDEO_SEL)))
+    except Exception as e:
+        print(f"  [video] {e}")
+
+    # 去重
+    for key in ('main_images', 'detail_images'):
+        seen, deduped = set(), []
+        for img in out[key]:
+            if img['src'] not in seen:
+                seen.add(img['src']); deduped.append(img)
+        out[key] = deduped
+
+    print(f"    [OK] main={len(out['main_images'])} detail={len(out['detail_images'])} video={len(out['video_urls'])}")
+    return out
 
 
 # ── 圖片處理：去背 + 白底 + 上傳 ────────────────────────────
@@ -158,11 +347,25 @@ def process_images(job_id, raw_images):
 
 def scrape_1688(page, url):
     result = {"raw_title": "", "raw_price": "", "raw_desc": "", "raw_images": [], "raw_extra": {}}
+
+    # 攔截 HTML 回應 URL（頁面載入期間，含 iframe / AJAX 載入的描述 HTML）
+    intercepted_html_urls = []
+    def _on_resp(resp):
+        try:
+            ct = resp.headers.get('content-type', '')
+            u = resp.url
+            if resp.status == 200 and any(t in ct for t in ('text/html', 'application/json', 'text/plain', 'text/javascript')) or ct == '':
+                if 'login' not in u and 'blank' not in u and '/offer/' not in u:
+                    intercepted_html_urls.append(u)
+        except Exception:
+            pass
+    page.on("response", _on_resp)
+
     print("    載入頁面...")
     page.goto(url, wait_until="domcontentloaded", timeout=30000)
     page.wait_for_timeout(PAGE_WAIT)
 
-    # 優先從 JS 資料抓商品標題（最可靠）
+    # JS 資料：標題 / 價格
     try:
         js_data = page.evaluate("""() => {
             try {
@@ -170,10 +373,10 @@ def scrape_1688(page, url):
                 const o = d.offerDetail || d.detail || {};
                 const base = o.baseInfo || o.offerInfo || {};
                 return {
-                    title:  base.subject || base.title || o.subject || null,
-                    price:  base.priceInfo?.price || null,
-                    sku:    o.skuModel?.skuProps || null,
-                    specs:  o.attribute?.attributes || null,
+                    title: base.subject || base.title || o.subject || null,
+                    price: base.priceInfo?.price || null,
+                    sku:   o.skuModel?.skuProps || null,
+                    specs: o.attribute?.attributes || null,
                 };
             } catch(e) { return {}; }
         }""")
@@ -185,7 +388,6 @@ def scrape_1688(page, url):
     except Exception:
         pass
 
-    # DOM selector fallback（只用精確的 class，不用裸 h1）
     if not result["raw_title"]:
         for sel in [".title-text", ".mod-detail-title h1", ".offer-title", ".detail-title"]:
             try:
@@ -195,17 +397,14 @@ def scrape_1688(page, url):
             except Exception:
                 pass
 
-    # 最後才用 page.title()，並過濾掉廠商/公司名稱關鍵字
     if not result["raw_title"]:
         pt = page.title()
         for s in ["-1688.com","- 1688","阿里巴巴找货","阿里巴巴","批发","_","1688"]:
             pt = pt.replace(s, "").strip()
-        # 若標題含公司/廠字樣則放棄（可能抓到廠商名）
         company_keywords = ["有限公司","材料厂","制造厂","加工厂","有限责任","工贸","商贸","实业"]
         if not any(k in pt for k in company_keywords):
             result["raw_title"] = pt
 
-    # 價格
     if not result["raw_price"]:
         for sel in [".price-value", ".m-price .price", ".price-text"]:
             try:
@@ -215,11 +414,45 @@ def scrape_1688(page, url):
             except Exception:
                 pass
 
-    # 圖片
-    html = page.content()
-    result["raw_images"] = clean_images(extract_imgs(html))
+    # Phase 2 DOM 擷取（含 scroll + networkidle）
+    product_images = _extract_images_dom(page, '1688')
 
-    # 描述
+    # 策略 5：re-fetch 攔截到的 HTML 找詳情圖（描述在獨立 iframe/AJAX 時使用）
+    print(f"    [intercept] 攔截到 {len(intercepted_html_urls)} 個 HTML URL")
+    for u in intercepted_html_urls[:5]:
+        print(f"      {u[:100]}")
+    if not product_images["detail_images"] and intercepted_html_urls:
+        main_srcs = {i['src'] for i in product_images["main_images"]}
+        for iurl in intercepted_html_urls[:15]:
+            try:
+                r = requests.get(iurl, headers={
+                    "User-Agent": "Mozilla/5.0",
+                    "Referer": "https://www.1688.com/"
+                }, timeout=8)
+                if not r.ok:
+                    continue
+                for u in _ALICDN.findall(r.text):
+                    if u.startswith('//'): u = 'https:' + u
+                    if not u.startswith('http') or u in main_srcs: continue
+                    if _SKIP.search(u) or not _tps_ok(u): continue
+                    w, h = _parse_url_size(u)
+                    if (w >= 1000 and h >= 250) or \
+                       (w == 0 and ('imgextra' in u or 'cbu01' in u)):
+                        main_srcs.add(u)
+                        product_images["detail_images"].append({"src": u, "w": w, "h": h})
+            except Exception:
+                pass
+        if product_images["detail_images"]:
+            print(f"    [intercepted] detail={len(product_images['detail_images'])}")
+
+    try:
+        page.remove_listener("response", _on_resp)
+    except Exception:
+        pass
+
+    result["product_images"] = product_images
+    result["raw_images"] = [i["src"] for i in product_images["main_images"]][:8]
+
     for sel in [".mod-detail-description", ".detail-desc-content", ".description-content"]:
         try:
             d = page.text_content(sel, timeout=2000)
@@ -255,8 +488,9 @@ def scrape_taobao(page, url):
                 result["raw_price"] = p.strip(); break
         except Exception: pass
 
-    html = page.content()
-    result["raw_images"] = clean_images(extract_imgs(html))
+    product_images = _extract_images_dom(page, 'taobao')
+    result["product_images"] = product_images
+    result["raw_images"] = [i["src"] for i in product_images["main_images"]][:8]
 
     for sel in [".descContainer", ".J_DescContent"]:
         try:
@@ -383,11 +617,56 @@ def run(pw):
 
 # ── 入口 ─────────────────────────────────────────────────────
 
+def test_mode(pw, test_url):
+    """--test URL：只跑圖片擷取，輸出 test_product_images.json。"""
+    platform = '1688' if '1688.com' in test_url else 'taobao'
+    print(f"\n[測試模式] platform={platform}")
+    print(f"  URL: {test_url[:80]}...")
+
+    context = pw.chromium.launch_persistent_context(
+        user_data_dir=PROFILE_DIR,
+        headless=HEADLESS,
+        args=["--no-sandbox", "--disable-blink-features=AutomationControlled"],
+        viewport={"width": 1280, "height": 800},
+    )
+    page = context.new_page()
+
+    # 走完整的 scrape 流程（scrape_* 內部會自己 goto）
+    if platform == '1688':
+        data = scrape_1688(page, test_url)
+    else:
+        data = scrape_taobao(page, test_url)
+
+    page.close()
+    context.close()
+
+    product_images = data.get("product_images", {"main_images": [], "detail_images": [], "video_urls": []})
+    out_path = Path("test_product_images.json")
+    with open(out_path, "w", encoding="utf-8") as f:
+        json.dump(product_images, f, ensure_ascii=False, indent=2)
+
+    print(f"\n[OK] 輸出：{out_path.absolute()}")
+    print(f"  主圖    : {len(product_images['main_images'])} 張")
+    print(f"  詳情圖  : {len(product_images['detail_images'])} 張")
+    print(f"  影片    : {len(product_images['video_urls'])} 個")
+
+
 if __name__ == "__main__":
     login = "--login" in sys.argv
+    test  = "--test"  in sys.argv
+
     with sync_playwright() as pw:
         if login:
             login_mode(pw)
+        elif test:
+            idx = sys.argv.index("--test")
+            if idx + 1 >= len(sys.argv):
+                print("用法：python local_worker.py --test <URL>")
+                sys.exit(1)
+            if not Path(PROFILE_DIR).exists():
+                print("\n[提示] 尚未登入，請先執行：python local_worker.py --login\n")
+                sys.exit(0)
+            test_mode(pw, sys.argv[idx + 1])
         else:
             if not Path(PROFILE_DIR).exists():
                 print("\n[提示] 尚未登入，請先執行：python local_worker.py --login\n")
