@@ -4641,7 +4641,7 @@ async function saveEdit(id){
 }
 
 function imgFormHtml(id, existing){
-  const joined = existing.join("\n");
+  const joined = existing.join("\\n");
   return `<div class="section img-form">
     <div class="slabel">手動補圖片 URL（第三層，一行一張）</div>
     <textarea id="imgTa_${id}" rows="4" placeholder="https://img.alicdn.com/...">${joined}</textarea>
