@@ -4444,7 +4444,7 @@ function schedulePoll(){
   clearTimeout(pollTimer);
   const active = jobs.some(j=>["pending","scraping","rewriting"].includes(j.status));
   document.getElementById("hStatus").textContent = active ? "更新中..." : "";
-  if(active) pollTimer = setTimeout(loadJobs, 2500);
+  pollTimer = setTimeout(loadJobs, active ? 2500 : 8000);
 }
 
 function render(){
