@@ -127,6 +127,7 @@ def _init_messages_db():
                 "ALTER TABLE product_jobs ADD COLUMN IF NOT EXISTS img_status TEXT DEFAULT ''",
                 "ALTER TABLE product_jobs ADD COLUMN IF NOT EXISTS raw_extra TEXT DEFAULT '{}'",
                 "ALTER TABLE product_jobs ADD COLUMN IF NOT EXISTS brand TEXT DEFAULT ''",
+                "ALTER TABLE product_jobs ADD COLUMN IF NOT EXISTS product_images TEXT DEFAULT '{}'",
             ]:
                 try: cur.execute(col_sql)
                 except Exception: pass
@@ -3771,13 +3772,13 @@ def _pj_get(job_id):
     try:
         conn = _pg_conn(); cur = conn.cursor()
         cur.execute(
-            "SELECT id,url,platform,status,raw_title,raw_desc,raw_images,raw_price,ai_name,ai_desc,ai_keywords,error_msg,created_at,processed_images,img_status,raw_extra,brand FROM product_jobs WHERE id=%s",
+            "SELECT id,url,platform,status,raw_title,raw_desc,raw_images,raw_price,ai_name,ai_desc,ai_keywords,error_msg,created_at,processed_images,img_status,raw_extra,brand,product_images FROM product_jobs WHERE id=%s",
             (job_id,)
         )
         row = cur.fetchone(); cur.close(); conn.close()
         if not row:
             return None
-        return {"id":row[0],"url":row[1],"platform":row[2],"status":row[3],"raw_title":row[4],"raw_desc":row[5],"raw_images":json.loads(row[6] or "[]"),"raw_price":row[7],"ai_name":row[8],"ai_desc":row[9],"ai_keywords":row[10],"error_msg":row[11],"created_at":row[12],"processed_images":json.loads(row[13] or "[]"),"img_status":row[14] or "","raw_extra":json.loads(row[15] or "{}"),"brand":row[16] or ""}
+        return {"id":row[0],"url":row[1],"platform":row[2],"status":row[3],"raw_title":row[4],"raw_desc":row[5],"raw_images":json.loads(row[6] or "[]"),"raw_price":row[7],"ai_name":row[8],"ai_desc":row[9],"ai_keywords":row[10],"error_msg":row[11],"created_at":row[12],"processed_images":json.loads(row[13] or "[]"),"img_status":row[14] or "","raw_extra":json.loads(row[15] or "{}"),"brand":row[16] or "","product_images":json.loads(row[17] or "{}")}
     except Exception:
         return None
 
@@ -4522,13 +4523,28 @@ function renderModal(j, editMode=false){
     }
     if(j.ai_desc) h+=`<div class="section"><div class="slabel">商品描述</div><div class="rbox" style="max-height:320px;overflow-y:auto">${esc(j.ai_desc)}<button class="copy-btn" onclick='cp(this,${JSON.stringify(j.ai_desc)})'>複製</button></div></div>`;
   }
-  if(j.raw_images&&j.raw_images.length){
-    const imgStatusMap={"processing":"處理中...","done":"處理完成","failed":"處理失敗","no_images":"無圖片"};
-    const imgStatusLabel=imgStatusMap[j.img_status]||"";
-    const processBtn=j.img_status==="processing"
-      ? `<span style="font-size:12px;color:#888"><span class="spinner"></span>${imgStatusLabel}</span>`
-      : `<button class="btn-sm" onclick="processImgs(${j.id})" style="margin-left:8px">白底處理</button>${imgStatusLabel?`<span style="font-size:12px;color:#888;margin-left:6px">${imgStatusLabel}</span>`:""}`;
+  // 結構化圖片顯示（product_images）
+  const pi = j.product_images || {};
+  const mainImgs   = pi.main_images   || [];
+  const detailImgs = pi.detail_images || [];
+  const videoUrls  = pi.video_urls    || [];
+  const imgStatusMap={"processing":"處理中...","done":"處理完成","failed":"處理失敗","no_images":"無圖片"};
+  const imgStatusLabel=imgStatusMap[j.img_status]||"";
+  const processBtn=j.img_status==="processing"
+    ? `<span style="font-size:12px;color:#888"><span class="spinner"></span>${imgStatusLabel}</span>`
+    : `<button class="btn-sm" onclick="processImgs(${j.id})" style="margin-left:8px">白底處理</button>${imgStatusLabel?`<span style="font-size:12px;color:#888;margin-left:6px">${imgStatusLabel}</span>`:""}`;
+  if(mainImgs.length){
+    const srcs = mainImgs.map(i=>typeof i==='object'?i.src:i);
+    h+=`<div class="section"><div class="slabel" style="display:flex;align-items:center;gap:6px">主圖（${srcs.length} 張）${processBtn}</div><div class="imgs-row">${srcs.map(img=>`<img src="${esc(img)}" loading="lazy" onerror="this.style.display='none'" title="${esc(img)}">`).join("")}</div></div>`;
+  } else if(j.raw_images&&j.raw_images.length){
     h+=`<div class="section"><div class="slabel" style="display:flex;align-items:center;gap:6px">原始圖片（${j.raw_images.length} 張）${processBtn}</div><div class="imgs-row">${j.raw_images.map(img=>`<img src="${esc(img)}" loading="lazy" onerror="this.style.display='none'">`).join("")}</div></div>`;
+  }
+  if(detailImgs.length){
+    const srcs = detailImgs.map(i=>typeof i==='object'?i.src:i);
+    h+=`<div class="section"><div class="slabel">詳情圖（${srcs.length} 張）</div><div class="imgs-row">${srcs.map(img=>`<img src="${esc(img)}" loading="lazy" onerror="this.style.display='none'" title="${esc(img)}">`).join("")}</div></div>`;
+  }
+  if(videoUrls.length){
+    h+=`<div class="section"><div class="slabel">影片（${videoUrls.length} 個）</div><div>${videoUrls.map(v=>`<a href="${esc(v)}" target="_blank" style="font-size:12px;display:block;margin:2px 0;color:#1a73e8;word-break:break-all">${esc(v.slice(0,80))}</a>`).join("")}</div></div>`;
   }
   if(j.processed_images&&j.processed_images.length){
     const zipUrl=`/api/products/${j.id}/images/zip?key=${KEY}`;
@@ -4907,6 +4923,7 @@ def api_products_scrape_result(job_id):
         return jsonify({"ok": True})
 
     processed = data.get("processed_images", [])
+    product_imgs = data.get("product_images", {})
     _pj_update(job_id,
         status="scraping",
         raw_title         = data.get("raw_title", ""),
@@ -4916,6 +4933,7 @@ def api_products_scrape_result(job_id):
         raw_extra         = data.get("raw_extra", "{}"),
         processed_images  = json.dumps(processed, ensure_ascii=False),
         img_status        = "done" if processed else "",
+        product_images    = json.dumps(product_imgs, ensure_ascii=False),
     )
     threading.Thread(target=_run_ai_rewrite_for_job, args=(job_id,), daemon=True).start()
     return jsonify({"ok": True})
