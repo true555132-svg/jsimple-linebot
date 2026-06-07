@@ -42,23 +42,44 @@ function scanPage() {
     .map(img => ({ src: img.src, w: img.naturalWidth, h: img.naturalHeight }))
     .filter((item, idx, arr) => arr.findIndex(i => i.src === item.src) === idx); // 去重
 
-  // ── SKU 規格圖 ────────────────────────────────────────────
-  const skuSrcs = new Set([...mainSrcs]);
+  // ── SKU 規格圖（從 window.__INIT_DATA__ 讀，不依賴 CSS selector）────
   const skuImgs = [];
-  const skuSelectors = platform === '1688'
-    ? ['.sku-selector img', '.sku-item img', '[class*="sku"] img', '.prop-item img']
-    : ['.J_TSaleProp img', '.sku-prop-item img'];
-  for (const sel of skuSelectors) {
-    [...document.querySelectorAll(sel)].forEach(img => {
-      const src = img.src || img.dataset.src || '';
-      if (src && src.includes('alicdn') && !skuSrcs.has(src)
-          && img.naturalWidth >= 30) {
-        skuSrcs.add(src);
-        // 取得規格名稱（parent 元素的 title 或 alt）
-        const label = img.alt || img.closest('[title]')?.getAttribute('title') || '';
-        skuImgs.push({ src, w: img.naturalWidth, h: img.naturalHeight, label });
-      }
+  try {
+    const d = window.__INIT_DATA__ || {};
+    const o = d.offerDetail || d.detail || {};
+    const skuProps = o.skuModel?.skuProps || [];
+    const seen = new Set();
+    skuProps.forEach(prop => {
+      (prop.values || []).forEach(v => {
+        const raw = v.image || v.imageUrl || '';
+        if (!raw) return;
+        const src = raw.startsWith('//') ? 'https:' + raw : raw;
+        if (!seen.has(src)) {
+          seen.add(src);
+          skuImgs.push({
+            src,
+            w: 0, h: 0,
+            label: (prop.name || '') + ':' + (v.name || '')
+          });
+        }
+      });
     });
+  } catch(e) {}
+  // fallback：DOM selector（1688 舊版或其他平台）
+  if (!skuImgs.length) {
+    const skuSrcs = new Set([...mainSrcs]);
+    const sels = platform === '1688'
+      ? ['[class*="sku"] img[src*="alicdn"]', '[class*="prop"] img[src*="alicdn"]']
+      : ['.J_TSaleProp img', '.sku-prop-item img'];
+    for (const sel of sels) {
+      [...document.querySelectorAll(sel)].forEach(img => {
+        const src = img.src || '';
+        if (src && !skuSrcs.has(src) && img.naturalWidth >= 30) {
+          skuSrcs.add(src);
+          skuImgs.push({ src, w: img.naturalWidth, h: img.naturalHeight, label: img.alt || '' });
+        }
+      });
+    }
   }
 
   // ── 影片 ──────────────────────────────────────────────────
