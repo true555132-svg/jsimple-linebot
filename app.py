@@ -4498,8 +4498,8 @@ async function submitUrl(){
   const pWrap=document.getElementById("progressWrap");
   const pBar=document.getElementById("progressBar");
   errEl.style.display="none";
-  const urls=ta.value.split("\\n").map(s=>s.trim()).filter(Boolean);
-  if(!urls.length){errEl.textContent="請貼上商品連結";errEl.style.display="block";return;}
+  const urls=ta.value.split("\n").map(s=>s.trim()).filter(Boolean);
+  if(!urls.length){toast("請貼上商品連結");errEl.textContent="請貼上商品連結";errEl.style.display="block";return;}
   btn.disabled=true;
   let done=0,failed=0;
   pWrap.style.display="block";
@@ -4510,13 +4510,13 @@ async function submitUrl(){
     try{
       const brand=document.getElementById("brandSel").value;
       const r=await api("/api/products",{method:"POST",body:JSON.stringify({url,brand})});
-      if(r.error) failed++;
+      if(r.error){failed++;toast(`連結格式錯誤：${r.error}`);}
       else done++;
-    }catch(e){failed++;}
+    }catch(e){failed++;toast("網路錯誤，請稍後再試");}
   }
   pBar.style.width="100%";
   hint.textContent=`完成：${done} 筆${failed?`，失敗：${failed} 筆`:""}`;
-  if(done>0) ta.value="";
+  if(done>0){ta.value="";toast(`成功提交 ${done} 筆任務`);}
   btn.disabled=false; btn.textContent="開始搬運";
   loadJobs();
   setTimeout(()=>{pWrap.style.display="none"; hint.textContent="";},4000);
