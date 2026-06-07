@@ -29,7 +29,7 @@ POLL_SEC        = 5        # 輪詢間隔（秒）
 PAGE_WAIT       = 3000     # 頁面載入等待（ms）
 HEADLESS        = False    # False = 顯示瀏覽器視窗（方便觀察）
 SUPABASE_URL    = "https://lrslleetqyaerstrlbap.supabase.co"
-SUPABASE_KEY    = ""       # ← 填入 Render 環境變數 SUPABASE_SERVICE_KEY 的值
+SUPABASE_KEY    = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imxyc2xsZWV0cXlhZXJzdHJsYmFwIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc4MDQ5ODI5NywiZXhwIjoyMDk2MDc0Mjk3fQ.tL3sa7ue4NBXrh-x7Ga7jfOPCjNYFAwM-vfkMzR2dD0"       # ← 填入 Render 環境變數 SUPABASE_SERVICE_KEY 的值
 SUPABASE_BUCKET = "chat-images"
 ENABLE_REMBG    = True     # False = 跳過去背，只做白底
 # ────────────────────────────────────────────────────────────
@@ -392,11 +392,24 @@ def scrape_1688(page, url):
                 const d = window.__INIT_DATA__ || {};
                 const o = d.offerDetail || d.detail || {};
                 const base = o.baseInfo || o.offerInfo || {};
+                // SKU 規格圖
+                const skuImgs = [];
+                const skuProps = o.skuModel?.skuProps || [];
+                skuProps.forEach(prop => {
+                    (prop.values || []).forEach(v => {
+                        const img = v.image || v.imageUrl || '';
+                        if (img) skuImgs.push({
+                            src: img.startsWith('//') ? 'https:' + img : img,
+                            label: (prop.name || '') + ':' + (v.name || '')
+                        });
+                    });
+                });
                 return {
-                    title: base.subject || base.title || o.subject || null,
-                    price: base.priceInfo?.price || null,
-                    sku:   o.skuModel?.skuProps || null,
-                    specs: o.attribute?.attributes || null,
+                    title:   base.subject || base.title || o.subject || null,
+                    price:   base.priceInfo?.price || null,
+                    sku:     o.skuModel?.skuProps || null,
+                    specs:   o.attribute?.attributes || null,
+                    skuImgs: skuImgs,
                 };
             } catch(e) { return {}; }
         }""")
@@ -405,6 +418,7 @@ def scrape_1688(page, url):
         if js_data.get("price"):
             result["raw_price"] = str(js_data["price"])
         result["raw_extra"].update({k: v for k, v in js_data.items() if v and k in ("sku","specs")})
+        result["_sku_imgs"] = js_data.get("skuImgs", [])
     except Exception:
         pass
 
@@ -436,6 +450,11 @@ def scrape_1688(page, url):
 
     # Phase 2 DOM 擷取（含 scroll + networkidle）
     product_images = _extract_images_dom(page, '1688')
+    # SKU 規格圖（來自 JS data）
+    sku_imgs = result.pop("_sku_imgs", [])
+    product_images["sku_images"] = sku_imgs
+    if sku_imgs:
+        print(f"    SKU 規格圖 {len(sku_imgs)} 張")
 
     # 策略 5：re-fetch 攔截到的 HTML 找詳情圖（描述在獨立 iframe/AJAX 時使用）
     print(f"    [intercept] 攔截到 {len(intercepted_html_urls)} 個 HTML URL")

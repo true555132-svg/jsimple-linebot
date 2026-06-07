@@ -42,6 +42,25 @@ function scanPage() {
     .map(img => ({ src: img.src, w: img.naturalWidth, h: img.naturalHeight }))
     .filter((item, idx, arr) => arr.findIndex(i => i.src === item.src) === idx); // 去重
 
+  // ── SKU 規格圖 ────────────────────────────────────────────
+  const skuSrcs = new Set([...mainSrcs]);
+  const skuImgs = [];
+  const skuSelectors = platform === '1688'
+    ? ['.sku-selector img', '.sku-item img', '[class*="sku"] img', '.prop-item img']
+    : ['.J_TSaleProp img', '.sku-prop-item img'];
+  for (const sel of skuSelectors) {
+    [...document.querySelectorAll(sel)].forEach(img => {
+      const src = img.src || img.dataset.src || '';
+      if (src && src.includes('alicdn') && !skuSrcs.has(src)
+          && img.naturalWidth >= 30) {
+        skuSrcs.add(src);
+        // 取得規格名稱（parent 元素的 title 或 alt）
+        const label = img.alt || img.closest('[title]')?.getAttribute('title') || '';
+        skuImgs.push({ src, w: img.naturalWidth, h: img.naturalHeight, label });
+      }
+    });
+  }
+
   // ── 影片 ──────────────────────────────────────────────────
   const videoUrls = [...document.querySelectorAll('video source[src], video[src]')]
     .map(el => el.src || el.getAttribute('src'))
@@ -52,7 +71,12 @@ function scanPage() {
     platform,
     url: location.href,
     title: document.title,
-    product_images: { main_images: mainImgs, detail_images: detailImgs, video_urls: videoUrls }
+    product_images: {
+      main_images:   mainImgs,
+      detail_images: detailImgs,
+      sku_images:    skuImgs,
+      video_urls:    videoUrls
+    }
   };
 }
 

@@ -38,6 +38,7 @@ function handleScanResult(result) {
   const pi = result.product_images || {};
   document.getElementById('cMain').textContent   = (pi.main_images   || []).length;
   document.getElementById('cDetail').textContent = (pi.detail_images || []).length;
+  document.getElementById('cSku').textContent    = (pi.sku_images    || []).length;
   document.getElementById('cVideo').textContent  = (pi.video_urls    || []).length;
 
   const btn = document.getElementById('btnSend');

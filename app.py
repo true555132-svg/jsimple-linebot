@@ -4552,6 +4552,12 @@ function renderModal(j, editMode=false){
     const srcs = detailImgs.map(i=>typeof i==='object'?i.src:i);
     h+=`<div class="section"><div class="slabel">詳情圖（${srcs.length} 張）</div><div class="imgs-row">${srcs.map(img=>`<img src="${esc(img)}" loading="lazy" onerror="this.style.display='none'" title="${esc(img)}">`).join("")}</div></div>`;
   }
+  const skuImgs = pi.sku_images || [];
+  if(skuImgs.length){
+    const skuSrcs = skuImgs.map(i=>typeof i==='object'?i.src:i);
+    const skuLabels = skuImgs.map(i=>typeof i==='object'?(i.label||''):'');
+    h+=`<div class="section"><div class="slabel">SKU 規格圖（${skuSrcs.length} 張）</div><div class="imgs-row" style="flex-wrap:wrap">${skuSrcs.map((src,idx)=>`<div style="text-align:center;margin:4px"><img src="${esc(src)}" loading="lazy" onerror="this.style.display='none'" style="max-width:80px;max-height:80px;border:1px solid #eee;border-radius:4px"><div style="font-size:10px;color:#888;max-width:80px;overflow:hidden;white-space:nowrap;text-overflow:ellipsis">${esc(skuLabels[idx]||'')}</div></div>`).join("")}</div></div>`;
+  }
   if(videoUrls.length){
     h+=`<div class="section"><div class="slabel">影片（${videoUrls.length} 個）</div><div>${videoUrls.map(v=>`<a href="${esc(v)}" target="_blank" style="font-size:12px;display:block;margin:2px 0;color:#1a73e8;word-break:break-all">${esc(v.slice(0,80))}</a>`).join("")}</div></div>`;
   }
