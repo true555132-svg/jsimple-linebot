@@ -4498,7 +4498,7 @@ async function submitUrl(){
   const pWrap=document.getElementById("progressWrap");
   const pBar=document.getElementById("progressBar");
   errEl.style.display="none";
-  const urls=ta.value.split("\n").map(s=>s.trim()).filter(Boolean);
+  const urls=ta.value.split("\\n").map(s=>s.trim()).filter(Boolean);
   if(!urls.length){toast("請貼上商品連結");errEl.textContent="請貼上商品連結";errEl.style.display="block";return;}
   btn.disabled=true;
   let done=0,failed=0;
@@ -4653,7 +4653,7 @@ function imgFormHtml(id, existing){
 async function saveImgs(id){
   const ta=document.getElementById("imgTa_"+id);
   if(!ta) return;
-  const urls=ta.value.split("\n").map(s=>s.trim()).filter(Boolean);
+  const urls=ta.value.split("\\n").map(s=>s.trim()).filter(Boolean);
   const msg=document.getElementById("saveImgMsg_"+id);
   if(msg) msg.textContent="儲存中...";
   const r=await api("/api/products/"+id+"/images",{method:"POST",body:JSON.stringify({urls})});
