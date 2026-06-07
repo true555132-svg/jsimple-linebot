@@ -92,6 +92,26 @@ def clean_images(urls, max_count=10):
     o = [u for u in result if not _PRIO.search(u)]
     return (p + o)[:max_count]
 
+_BADGE = re.compile(
+    r'wangpu|credit|level|certification|badge|guarantee|seal|'
+    r'icon|logo|avatar|brand|qrcode|qr_|star|tag|label|'
+    r'score|rank|medal|trophy|shield|trust|verify|auth',
+    re.I
+)
+def clean_images_strict(urls, max_count=10):
+    seen, result = set(), []
+    for u in urls:
+        u = u.strip()
+        if u.startswith("//"): u = "https:" + u
+        if not u.startswith("http"): continue
+        if _SKIP.search(u) or _BADGE.search(u): continue
+        if u not in seen:
+            seen.add(u); result.append(u)
+    p = [u for u in result if _PRIO.search(u)]
+    o = [u for u in result if not _PRIO.search(u)]
+    return (p + o)[:max_count]
+
+
 
 # ── Phase 2 DOM 圖片擷取 ─────────────────────────────────────
 
