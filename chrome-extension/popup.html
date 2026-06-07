@@ -1,0 +1,56 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+<meta charset="UTF-8">
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { font-family: -apple-system, sans-serif; width: 320px; background: #fff; color: #333; font-size: 13px; }
+.header { background: #1a1a2e; color: #fff; padding: 12px 14px; display: flex; align-items: center; gap: 8px; }
+.header strong { font-size: 14px; }
+.header span { font-size: 11px; color: #aaa; }
+.body { padding: 14px; }
+.url { font-size: 11px; color: #666; background: #f5f5f5; padding: 6px 8px; border-radius: 4px; margin-bottom: 12px; word-break: break-all; max-height: 40px; overflow: hidden; }
+.counts { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 8px; margin-bottom: 14px; }
+.count-box { text-align: center; border: 1px solid #e0e0e0; border-radius: 6px; padding: 8px 4px; }
+.count-box .num { font-size: 22px; font-weight: 700; color: #1a73e8; }
+.count-box .lbl { font-size: 10px; color: #888; margin-top: 2px; }
+.field { margin-bottom: 10px; }
+.field label { display: block; font-size: 11px; color: #555; margin-bottom: 3px; }
+.field select, .field input { width: 100%; border: 1px solid #ddd; border-radius: 5px; padding: 6px 8px; font-size: 12px; }
+.btn { width: 100%; background: #1a73e8; color: #fff; border: none; border-radius: 6px; padding: 10px; font-size: 13px; font-weight: 600; cursor: pointer; margin-top: 4px; }
+.btn:hover { background: #1557b0; }
+.btn:disabled { background: #aaa; cursor: not-allowed; }
+.status { margin-top: 10px; text-align: center; font-size: 12px; min-height: 18px; }
+.status.ok { color: #2e7d32; }
+.status.err { color: #c62828; }
+.warn { background: #fff3e0; border: 1px solid #ffcc02; border-radius: 5px; padding: 8px; font-size: 11px; color: #e65100; margin-bottom: 10px; }
+</style>
+</head>
+<body>
+<div class="header">
+  <strong>JSIMPLE 搬運</strong>
+  <span id="platform"></span>
+</div>
+<div class="body">
+  <div class="url" id="pageUrl">載入中...</div>
+  <div id="warnBox" class="warn" style="display:none">此頁面不是 1688 或 淘寶商品頁。</div>
+  <div class="counts">
+    <div class="count-box"><div class="num" id="cMain">-</div><div class="lbl">主圖</div></div>
+    <div class="count-box"><div class="num" id="cDetail">-</div><div class="lbl">詳情圖</div></div>
+    <div class="count-box"><div class="num" id="cVideo">-</div><div class="lbl">影片</div></div>
+  </div>
+  <div class="field">
+    <label>品牌</label>
+    <select id="brandSel">
+      <option value="">不指定（通用風格）</option>
+      <option value="jsimple">JSIMPLE — 高架床 / 家具</option>
+      <option value="lander">朗德燈具 — 燈具 / 照明</option>
+      <option value="filterbreath">濾呼吸 — 空氣濾網</option>
+    </select>
+  </div>
+  <button class="btn" id="btnSend" disabled>掃描中...</button>
+  <div class="status" id="statusMsg"></div>
+</div>
+<script src="popup.js"></script>
+</body>
+</html>

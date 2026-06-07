@@ -4910,6 +4910,33 @@ def api_products_pending():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
+@app.route("/api/products/from-extension", methods=["POST"])
+def api_products_from_extension():
+    """Chrome Extension 直送：不需要 Worker，直接存圖 + 觸發 AI 改寫。"""
+    ok, _ = auth_required()
+    if not ok:
+        return jsonify({"error": "unauthorized"}), 403
+    data = request.get_json(silent=True) or {}
+    url      = (data.get("url") or "").strip()
+    platform = data.get("platform", "1688")
+    brand    = data.get("brand", "")
+    title    = data.get("title", "")
+    product_imgs = data.get("product_images", {})
+    if not url:
+        return jsonify({"error": "缺少 url"}), 400
+    job_id = _pj_insert(url, platform, brand)
+    if not job_id:
+        return jsonify({"error": "DB error"}), 500
+    main_srcs = [i["src"] if isinstance(i, dict) else i for i in product_imgs.get("main_images", [])]
+    _pj_update(job_id,
+        status         = "scraping",
+        raw_title      = title,
+        raw_images     = json.dumps(main_srcs, ensure_ascii=False),
+        product_images = json.dumps(product_imgs, ensure_ascii=False),
+    )
+    threading.Thread(target=_run_ai_rewrite_for_job, args=(job_id,), daemon=True).start()
+    return jsonify({"ok": True, "id": job_id})
+
 @app.route("/api/products/<int:job_id>/scrape-result", methods=["POST"])
 def api_products_scrape_result(job_id):
     """本機 Worker 回傳爬取結果，觸發 AI 改寫。"""

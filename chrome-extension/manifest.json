@@ -1,0 +1,23 @@
+{
+  "manifest_version": 3,
+  "name": "JSIMPLE 商品搬運",
+  "version": "1.0",
+  "description": "從 1688 / 淘寶抓取商品圖片，直送 AI 改寫後台",
+  "permissions": ["activeTab", "scripting"],
+  "host_permissions": [
+    "*://*.1688.com/*",
+    "*://*.taobao.com/*",
+    "https://jsimple-linebot.onrender.com/*"
+  ],
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "JSIMPLE 搬運"
+  },
+  "content_scripts": [
+    {
+      "matches": ["*://*.1688.com/*", "*://*.taobao.com/*"],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    }
+  ]
+}
