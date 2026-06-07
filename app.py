@@ -3360,6 +3360,37 @@ def api_upload_image():
         return jsonify({"error": err or "上傳失敗"}), 500
     return jsonify({"url": url})
 
+@app.route("/api/push-image-to-line", methods=["POST"])
+def api_push_image_to_line():
+    ok, _ = auth_required()
+    if not ok:
+        return jsonify({"error": "unauthorized"}), 403
+    data = request.get_json(silent=True) or {}
+    user_id = data.get("user_id", "").strip()
+    image_b64 = data.get("image_b64", "")
+    filename = data.get("filename", "product.jpg")
+    if not user_id:
+        return jsonify({"error": "user_id 必填"}), 400
+    if not image_b64:
+        return jsonify({"error": "image_b64 必填"}), 400
+    # 去掉 data URL 前綴
+    if "," in image_b64:
+        image_b64 = image_b64.split(",", 1)[1]
+    import re as _re
+    safe = _re.sub(r"[^a-zA-Z0-9._-]", "_", filename)
+    fname = f"{int(time.time())}_{safe}"
+    try:
+        raw = base64.b64decode(image_b64)
+    except Exception:
+        return jsonify({"error": "invalid base64"}), 400
+    url, err = upload_image_to_supabase(fname, raw, "image/jpeg")
+    if not url:
+        url, err = upload_image_to_github(fname, raw)
+    if not url:
+        return jsonify({"error": err or "上傳失敗"}), 500
+    line_push_image(user_id, url)
+    return jsonify({"success": True, "url": url})
+
 @app.route("/api/upload_file", methods=["POST"])
 def api_upload_file():
     ok, _ = auth_required()
