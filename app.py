@@ -4568,17 +4568,35 @@ function renderModal(j, editMode=false){
   const mainImgs   = pi.main_images   || [];
   const detailImgs = pi.detail_images || [];
   const videoUrls  = pi.video_urls    || [];
-  const imgStatusMap={"processing":"處理中...","done":"處理完成","failed":"處理失敗","no_images":"無圖片"};
+  const imgStatusMap={"pending_images":"等待本機 Worker 處理...","processing":"處理中（本機 Worker）...","done":"白底完成","failed":"處理失敗","no_images":"無圖片"};
   const imgStatusLabel=imgStatusMap[j.img_status]||"";
-  const processBtn=j.img_status==="processing"
-    ? `<span style="font-size:12px;color:#888"><span class="spinner"></span>${imgStatusLabel}</span>`
-    : `<button class="btn-sm" onclick="processImgs(${j.id})" style="margin-left:8px">白底處理</button>${imgStatusLabel?`<span style="font-size:12px;color:#888;margin-left:6px">${imgStatusLabel}</span>`:""}`;
-  if(mainImgs.length){
-    const srcs = mainImgs.map(i=>typeof i==='object'?i.src:i);
-    h+=`<div class="section"><div class="slabel" style="display:flex;align-items:center;gap:6px">主圖（${srcs.length} 張）${processBtn}</div><div class="imgs-row">${srcs.map(img=>`<img src="${esc(img)}" loading="lazy" onerror="this.style.display='none'" title="${esc(img)}">`).join("")}</div></div>`;
-  } else if(j.raw_images&&j.raw_images.length){
-    h+=`<div class="section"><div class="slabel" style="display:flex;align-items:center;gap:6px">原始圖片（${j.raw_images.length} 張）${processBtn}</div><div class="imgs-row">${j.raw_images.map(img=>`<img src="${esc(img)}" loading="lazy" onerror="this.style.display='none'">`).join("")}</div></div>`;
-  }
+  // 主圖區：勾選 checkbox，選好再白底
+  const allSrcs = mainImgs.length
+    ? mainImgs.map(i=>typeof i==='object'?i.src:i)
+    : (j.raw_images||[]);
+  const rawZipUrl = `/api/products/${j.id}/images/zip?type=raw&key=${KEY}`;
+  if(allSrcs.length){
+    const imgPending = j.img_status==="processing" || j.img_status==="pending_images";
+    const statusSpan = imgPending
+      ? `<span style="font-size:12px;color:#888"><span class="spinner"></span>${imgStatusLabel}</span>`
+      : (imgStatusLabel ? `<span style="font-size:11px;color:#2e7d32;margin-left:4px">${imgStatusLabel}</span>` : "");
+    if(imgPending && openId===j.id) setTimeout(()=>{if(openId===j.id)openJob(j.id);},3000);
+    h+=`<div class="section">
+      <div class="slabel" style="display:flex;align-items:center;gap:6px;flex-wrap:wrap">
+        主圖（${allSrcs.length} 張）
+        <button class="btn-sm" onclick="selectAll(${j.id},true)">全選</button>
+        <button class="btn-sm" onclick="selectAll(${j.id},false)">全不選</button>
+        <button class="btn-sm" onclick="processSelected(${j.id})" style="background:#1a73e8;color:#fff">✓ 白底（選取）</button>
+        <a href="${rawZipUrl}" class="export-btn" style="font-size:11px">⬇ 原圖 ZIP</a>
+        ${statusSpan}
+      </div>
+      <div class="imgs-row" id="imgRow_${j.id}" style="flex-wrap:wrap">${allSrcs.map((src,idx)=>`
+        <label style="cursor:pointer;text-align:center;margin:4px">
+          <input type="checkbox" class="imgChk_${j.id}" value="${esc(src)}" checked style="display:block;margin:0 auto 2px">
+          <img src="${esc(src)}" loading="lazy" onerror="this.parentElement.style.display='none'" style="max-width:90px;max-height:90px;border:2px solid #1a73e8;border-radius:4px">
+        </label>`).join("")}
+      </div>
+    </div>`;}
   if(detailImgs.length){
     const srcs = detailImgs.map(i=>typeof i==='object'?i.src:i);
     h+=`<div class="section"><div class="slabel">詳情圖（${srcs.length} 張）</div><div class="imgs-row">${srcs.map(img=>`<img src="${esc(img)}" loading="lazy" onerror="this.style.display='none'" title="${esc(img)}">`).join("")}</div></div>`;
@@ -4587,7 +4605,8 @@ function renderModal(j, editMode=false){
   if(skuImgs.length){
     const skuSrcs = skuImgs.map(i=>typeof i==='object'?i.src:i);
     const skuLabels = skuImgs.map(i=>typeof i==='object'?(i.label||''):'');
-    h+=`<div class="section"><div class="slabel">SKU 規格圖（${skuSrcs.length} 張）</div><div class="imgs-row" style="flex-wrap:wrap">${skuSrcs.map((src,idx)=>`<div style="text-align:center;margin:4px"><img src="${esc(src)}" loading="lazy" onerror="this.style.display='none'" style="max-width:80px;max-height:80px;border:1px solid #eee;border-radius:4px"><div style="font-size:10px;color:#888;max-width:80px;overflow:hidden;white-space:nowrap;text-overflow:ellipsis">${esc(skuLabels[idx]||'')}</div></div>`).join("")}</div></div>`;
+    const skuZipUrl = `/api/products/${j.id}/images/zip?type=sku&key=${KEY}`;
+    h+=`<div class="section"><div class="slabel" style="display:flex;align-items:center;gap:8px">SKU 規格圖（${skuSrcs.length} 張）<a href="${skuZipUrl}" class="export-btn" style="font-size:11px">⬇ ZIP</a></div><div class="imgs-row" style="flex-wrap:wrap">${skuSrcs.map((src,idx)=>`<div style="text-align:center;margin:4px"><img src="${esc(src)}" loading="lazy" onerror="this.style.display='none'" style="max-width:80px;max-height:80px;border:1px solid #eee;border-radius:4px"><div style="font-size:10px;color:#888;max-width:80px;overflow:hidden;white-space:nowrap;text-overflow:ellipsis">${esc(skuLabels[idx]||'')}</div></div>`).join("")}</div></div>`;
   }
   if(videoUrls.length){
     h+=`<div class="section"><div class="slabel">影片（${videoUrls.length} 個）</div><div>${videoUrls.map(v=>`<a href="${esc(v)}" target="_blank" style="font-size:12px;display:block;margin:2px 0;color:#1a73e8;word-break:break-all">${esc(v.slice(0,80))}</a>`).join("")}</div></div>`;
@@ -4647,9 +4666,14 @@ async function saveImgs(id){
   }
 }
 
-async function processImgs(id){
-  const r=await api("/api/products/"+id+"/process-images",{method:"POST",body:"{}"});
-  if(r.ok){toast("圖片處理開始，請稍候...");setTimeout(()=>openJob(id),3000);}
+function selectAll(id, checked){
+  document.querySelectorAll(".imgChk_"+id).forEach(c=>c.checked=checked);
+}
+async function processSelected(id){
+  const checked=[...document.querySelectorAll(".imgChk_"+id+":checked")].map(c=>c.value);
+  if(!checked.length){toast("請至少勾選一張圖片");return;}
+  const r=await api("/api/products/"+id+"/process-images",{method:"POST",body:JSON.stringify({urls:checked})});
+  if(r.ok){toast(`開始處理 ${checked.length} 張，本機 Worker 執行中...`);setTimeout(()=>openJob(id),3000);}
   else toast("失敗："+r.error);
 }
 
@@ -4808,13 +4832,15 @@ def api_products_process_images(job_id):
     job = _pj_get(job_id)
     if not job:
         return jsonify({"error": "not found"}), 404
-    if not job.get("raw_images"):
+    data = request.get_json(silent=True) or {}
+    selected_urls = data.get("urls", [])
+    target_imgs = selected_urls if selected_urls else job.get("raw_images", [])
+    if not target_imgs:
         return jsonify({"error": "沒有圖片可處理"}), 400
-    try:
-        from PIL import Image  # 確認 Pillow 可用
-    except ImportError:
-        return jsonify({"error": "Pillow 未安裝，請在 requirements.txt 加上 Pillow"}), 500
-    threading.Thread(target=_process_images_for_job, args=(job_id,), daemon=True).start()
+    update_fields = {"img_status": "pending_images"}
+    if selected_urls:
+        update_fields["raw_images"] = json.dumps(selected_urls, ensure_ascii=False)
+    _pj_update(job_id, **update_fields)
     return jsonify({"ok": True})
 
 # ── 本機 Worker API ───────────────────────────────────────────
@@ -4919,7 +4945,15 @@ def api_products_images_zip(job_id):
     job = _pj_get(job_id)
     if not job:
         return jsonify({"error": "not found"}), 404
-    imgs = job.get("processed_images") or job.get("raw_images", [])
+    img_type = request.args.get("type", "processed")
+    if img_type == "raw":
+        imgs = job.get("raw_images", [])
+    elif img_type == "sku":
+        pi = job.get("product_images", {})
+        skus = pi.get("sku_images", [])
+        imgs = [i["src"] if isinstance(i, dict) else i for i in skus]
+    else:
+        imgs = job.get("processed_images") or job.get("raw_images", [])
     if not imgs:
         return jsonify({"error": "沒有圖片可下載"}), 400
     import io, zipfile, re as _re
@@ -4958,10 +4992,20 @@ def api_products_pending():
     try:
         conn = _pg_conn(); cur = conn.cursor()
         cur.execute(
-            "SELECT id, url, platform FROM product_jobs WHERE status='pending' ORDER BY created_at ASC LIMIT 10"
+            "SELECT id, url, platform, raw_images, img_status FROM product_jobs"
+            " WHERE status='pending' OR img_status='pending_images'"
+            " ORDER BY created_at ASC LIMIT 10"
         )
         rows = cur.fetchall(); cur.close(); conn.close()
-        jobs = [{"id": r[0], "url": r[1], "platform": r[2]} for r in rows]
+        jobs = []
+        for r in rows:
+            job_id_r, url, platform, raw_imgs_json, img_status = r
+            if img_status == "pending_images":
+                jobs.append({"id": job_id_r, "url": url, "platform": platform,
+                             "mode": "images_only",
+                             "raw_images": json.loads(raw_imgs_json or "[]")})
+            else:
+                jobs.append({"id": job_id_r, "url": url, "platform": platform})
         return jsonify({"jobs": jobs})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
@@ -5005,6 +5049,14 @@ def api_products_scrape_result(job_id):
 
     if data.get("error"):
         _pj_update(job_id, status="error", error_msg=f"本機爬取失敗：{data['error']}")
+        return jsonify({"ok": True})
+
+    if data.get("mode") == "images_only":
+        processed = data.get("processed_images", [])
+        _pj_update(job_id,
+            processed_images = json.dumps(processed, ensure_ascii=False),
+            img_status       = "done" if processed else "failed",
+        )
         return jsonify({"ok": True})
 
     processed = data.get("processed_images", [])

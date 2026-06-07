@@ -605,6 +605,19 @@ def run(pw):
                 idle = 0
                 for job in jobs:
                     job_id, url, platform = job["id"], job["url"], job["platform"]
+                    mode = job.get("mode", "scrape")
+
+                    if mode == "images_only":
+                        raw_images = job.get("raw_images", [])
+                        print(f"[白底 #{job_id}] 處理 {len(raw_images)} 張圖片...")
+                        processed = process_images(job_id, raw_images) if raw_images else []
+                        r = post_result(job_id, {"mode": "images_only", "processed_images": processed})
+                        if r.get("ok"):
+                            print(f"  ✓ 白底完成（{len(processed)} 張）")
+                        else:
+                            print(f"  ✗ 回傳失敗: {r}")
+                        continue
+
                     print(f"[任務 #{job_id}] {platform.upper()} {url[:65]}...")
 
                     page = context.new_page()
