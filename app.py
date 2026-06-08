@@ -1159,6 +1159,12 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
 .read-toggle{width:10px;height:10px;border-radius:50%;border:2px solid #9aa0a6;background:transparent;cursor:pointer;flex-shrink:0;padding:0;margin-left:4px;transition:background 0.15s,border-color 0.15s}
 .read-toggle.is-unread{background:#e53935;border-color:#e53935}
 .read-toggle:hover{border-color:#0d6efd}
+.pin-btn{background:transparent;border:none;cursor:pointer;font-size:11px;padding:1px 2px;opacity:0.3;transition:opacity .15s;flex-shrink:0;line-height:1}
+.pin-btn:hover,.pin-btn.pinned{opacity:1}
+.conv-item.pinned{border-left:3px solid #0d6efd;padding-left:9px}
+.read-filter{padding:5px 12px;border-bottom:1px solid #e8eaed;display:flex;gap:4px;flex-shrink:0}
+.rfbtn{padding:2px 10px;border-radius:12px;font-size:11px;cursor:pointer;border:1.5px solid #ddd;color:#555;background:#fff;transition:.15s}
+.rfbtn.active{background:#e8f4fd;border-color:#0d6efd;color:#0d6efd}
 
 /* MIDDLE CHAT */
 .chat-main{display:flex;flex-direction:column;overflow:hidden;background:#f8f9fa}
@@ -1308,6 +1314,11 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
     <div class="stab" data-s="sold">成交</div>
   </div>
   <div class="tag-filter" id="tagFilter"></div>
+  <div class="read-filter" id="readFilter">
+    <button class="rfbtn active" data-r="all" onclick="setReadFilter('all')">全部</button>
+    <button class="rfbtn" data-r="unread" onclick="setReadFilter('unread')">未讀</button>
+    <button class="rfbtn" data-r="read" onclick="setReadFilter('read')">已讀</button>
+  </div>
   <div class="conv-list" id="convList"></div>
 </div>
 
@@ -1445,7 +1456,8 @@ function fmtConvTime(ts){
   return d.getFullYear()+'/'+(d.getMonth()+1)+'/'+d.getDate();
 }
 
-let allConvs = [], curKey = null, curStatus = 'bot', filterStatus = 'all', filterTag = null, searchQ = '';
+let allConvs = [], curKey = null, curStatus = 'bot', filterStatus = 'all', filterTag = null, searchQ = '', filterRead = 'all';
+let pinnedKeys = new Set(JSON.parse(localStorage.getItem('pinnedKeys')||'[]'));
 let curTags = [], curCustomer = {}, noteTimer = null;
 
 // INIT
@@ -1513,6 +1525,8 @@ function renderList(){
   let list = allConvs.filter(c=>{
     if(filterStatus !== 'all' && (c.status||'bot') !== filterStatus) return false;
     if(filterTag && !(c.tags||[]).includes(filterTag)) return false;
+    if(filterRead === 'unread' && !(c.unread>0)) return false;
+    if(filterRead === 'read' && (c.unread>0)) return false;
     if(searchQ){
       const name = (c.user_name||c.user_id||'').toLowerCase();
       const last = (c.last_message||'').toLowerCase();
@@ -1520,11 +1534,17 @@ function renderList(){
     }
     return true;
   });
+  // 置頂排序：已置頂的排最前面，各自維持原有順序
+  list.sort((a,b)=>{
+    const ap = pinnedKeys.has(a.key)?1:0, bp = pinnedKeys.has(b.key)?1:0;
+    return bp - ap;
+  });
   const el = document.getElementById('convList');
   if(!list.length){el.innerHTML='<div style="padding:20px;text-align:center;color:#9aa0a6;font-size:13px">沒有符合的對話</div>';return}
   el.innerHTML = list.map(c=>{
     const s = c.status||'bot';
     const unread = c.unread||0;
+    const isPinned = pinnedKeys.has(c.key);
     const tags = (c.tags||[]).slice(0,3).map(t=>`<span class="tag-pill">${t}</span>`).join('');
     const pb = c.platform?.toLowerCase()==='fb'?'<span class="platform-badge pb-fb">FB</span>':'<span class="platform-badge pb-line">LINE</span>';
     const timeStr = c.last_time ? fmtConvTime(c.last_time) : '';
@@ -1535,13 +1555,14 @@ function renderList(){
     const hasUnread = unread>0 ? ' has-unread' : '';
     const toggleClass = unread>0 ? ' is-unread' : '';
     const safeKey = c.key.replace(/'/g,"\\'");
-    return `<div class="conv-item${c.key===curKey?' active':''}${hasUnread}" onclick="openConv('${safeKey}')">
+    return `<div class="conv-item${c.key===curKey?' active':''}${hasUnread}${isPinned?' pinned':''}" onclick="openConv('${safeKey}')">
       ${avatarEl}
       <div class="conv-info">
         <div class="conv-name-row">
           <span class="conv-name">${escHtml(c.user_name||c.user_id||'未知用戶')}</span>
           <div style="display:flex;align-items:center;gap:4px;flex-shrink:0">
             ${unreadBadge}
+            <button class="pin-btn${isPinned?' pinned':''}" title="${isPinned?'取消置頂':'置頂'}" onclick="togglePin(event,'${safeKey}')">📌</button>
             <button class="read-toggle${toggleClass}" title="${unread>0?'標為已讀':'標為未讀'}" onclick="toggleRead(event,'${safeKey}')"></button>
             <span class="conv-time">${timeStr}</span>
           </div>
@@ -1554,6 +1575,22 @@ function renderList(){
       </div>
     </div>`;
   }).join('');
+}
+
+function togglePin(evt, key){
+  evt.stopPropagation();
+  if(pinnedKeys.has(key)) pinnedKeys.delete(key);
+  else pinnedKeys.add(key);
+  localStorage.setItem('pinnedKeys', JSON.stringify([...pinnedKeys]));
+  renderList();
+}
+
+function setReadFilter(val){
+  filterRead = val;
+  document.querySelectorAll('#readFilter .rfbtn').forEach(b=>{
+    b.classList.toggle('active', b.dataset.r === val);
+  });
+  renderList();
 }
 
 async function toggleRead(evt, key){
