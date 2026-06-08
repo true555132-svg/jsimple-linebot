@@ -631,10 +631,7 @@ def run(pw):
 
                         data["raw_extra"] = json.dumps(data.get("raw_extra", {}), ensure_ascii=False)
 
-                        if data.get("raw_images") and SUPABASE_KEY:
-                            data["processed_images"] = process_images(job_id, data["raw_images"])
-                        else:
-                            data["processed_images"] = []
+                        data["processed_images"] = []  # 白底改為手動觸發，不自動生成
 
                         r = post_result(job_id, data)
                         if r.get("ok"):
