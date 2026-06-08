@@ -829,9 +829,13 @@ def line_push(user_id: str, text: str):
         "Authorization": f"Bearer {LINE_CHANNEL_ACCESS_TOKEN}"
     })
     try:
-        urllib.request.urlopen(req)
-    except Exception:
-        pass
+        with urllib.request.urlopen(req) as r:
+            print(f"[LINE PUSH OK] user={user_id} status={r.status}", flush=True)
+    except urllib.error.HTTPError as e:
+        body = e.read().decode("utf-8", errors="ignore")
+        print(f"[LINE PUSH ERROR] user={user_id} status={e.code} body={body}", flush=True)
+    except Exception as e:
+        print(f"[LINE PUSH ERROR] user={user_id} error={e}", flush=True)
 
 def line_push_video(user_id: str, video_url: str, preview_url: str):
     url = "https://api.line.me/v2/bot/message/push"
