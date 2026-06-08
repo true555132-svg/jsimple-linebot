@@ -390,20 +390,44 @@ def scrape_1688(page, url):
         js_data = page.evaluate("""() => {
             try {
                 const d = window.__INIT_DATA__ || {};
-                const o = d.offerDetail || d.detail || {};
+                // 多路徑搜尋 offerDetail
+                const o = d.offerDetail || d.detail || d.data?.offerDetail || {};
                 const base = o.baseInfo || o.offerInfo || {};
-                // SKU 規格圖
+
+                // SKU 規格圖 — 多路徑
                 const skuImgs = [];
-                const skuProps = o.skuModel?.skuProps || [];
-                skuProps.forEach(prop => {
-                    (prop.values || []).forEach(v => {
-                        const img = v.image || v.imageUrl || '';
-                        if (img) skuImgs.push({
-                            src: img.startsWith('//') ? 'https:' + img : img,
-                            label: (prop.name || '') + ':' + (v.name || '')
+                const seen = new Set();
+                const addSku = (props) => {
+                    (props || []).forEach(prop => {
+                        (prop.values || []).forEach(v => {
+                            const img = v.image || v.imageUrl || v.imageRaw || '';
+                            if (img && !seen.has(img)) {
+                                seen.add(img);
+                                skuImgs.push({
+                                    src: img.startsWith('//') ? 'https:' + img : img,
+                                    label: (prop.name||'') + ':' + (v.name||'')
+                                });
+                            }
                         });
                     });
-                });
+                };
+                // 路徑 1: offerDetail.skuModel.skuProps
+                addSku(o.skuModel?.skuProps);
+                // 路徑 2: offerDetail.skuInfos (部分商品)
+                addSku(o.skuInfos);
+                // 路徑 3: 全域 skuProps 直接掛在 __INIT_DATA__
+                addSku(d.skuProps || d.skuModel?.skuProps);
+                // 路徑 4: DOM 直接讀色塊圖片 (最可靠的 fallback)
+                if (skuImgs.length === 0) {
+                    document.querySelectorAll('.sku-item img, .obj-sku img, [class*="sku"] img').forEach(img => {
+                        const src = img.src || img.dataset.src || '';
+                        if (src && !seen.has(src) && src.includes('alicdn')) {
+                            seen.add(src);
+                            skuImgs.push({ src, label: img.alt || '' });
+                        }
+                    });
+                }
+
                 return {
                     title:   base.subject || base.title || o.subject || null,
                     price:   base.priceInfo?.price || null,
@@ -411,7 +435,7 @@ def scrape_1688(page, url):
                     specs:   o.attribute?.attributes || null,
                     skuImgs: skuImgs,
                 };
-            } catch(e) { return {}; }
+            } catch(e) { return {err: String(e)}; }
         }""")
         if js_data.get("title"):
             result["raw_title"] = js_data["title"].strip()
