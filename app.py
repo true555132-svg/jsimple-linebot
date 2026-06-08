@@ -582,16 +582,25 @@ def get_reply(text: str, user_id: str, platform: str) -> tuple:
 def callback():
     signature = request.headers.get("X-Line-Signature", "")
     body = request.get_data(as_text=True)
+    print(f"[LINE WEBHOOK] received, sig={signature[:10]}...", flush=True)
     try:
         handler.handle(body, signature)
     except InvalidSignatureError:
+        print("[LINE WEBHOOK] InvalidSignatureError", flush=True)
         abort(400)
+    except Exception as e:
+        print(f"[LINE WEBHOOK ERROR] {e}", flush=True)
     return "OK"
 
 @handler.add(MessageEvent, message=TextMessageContent)
 def handle_line_message(event):
-    text, image_url = get_reply(event.message.text.strip(), event.source.user_id, "line")
+    user_id = event.source.user_id
+    msg_text = event.message.text.strip()
+    print(f"[LINE MSG] user={user_id} text={msg_text[:30]!r}", flush=True)
+    text, image_url = get_reply(msg_text, user_id, "line")
+    print(f"[LINE REPLY PLAN] text={bool(text)} image={bool(image_url)}", flush=True)
     if not text and not image_url:
+        print("[LINE REPLY PLAN] no reply (intent off or manual mode)", flush=True)
         return
     messages = []
     if text:
@@ -603,8 +612,9 @@ def handle_line_message(event):
             MessagingApi(api_client).reply_message_with_http_info(
                 ReplyMessageRequest(reply_token=event.reply_token, messages=messages)
             )
+        print(f"[LINE REPLY OK] user={user_id}", flush=True)
     except Exception as e:
-        print(f"[LINE REPLY ERROR] {e}", flush=True)
+        print(f"[LINE REPLY ERROR] user={user_id} error={e}", flush=True)
 
 # ── FB Messenger Webhook ──────────────────────────────────
 
