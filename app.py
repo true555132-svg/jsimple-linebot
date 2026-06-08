@@ -1389,9 +1389,9 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
       &#128206;
       <input type="file" id="fileInput" accept="*/*" style="display:none" onchange="uploadFile(this)">
     </label>
-    <textarea id="replyInput" placeholder="輸入訊息… (Enter 換行，Ctrl+Enter 發送)" rows="2"
+    <textarea id="replyInput" placeholder="輸入訊息..." rows="2"
       oninput="autoResize(this)"
-      onkeydown="if((event.ctrlKey||event.metaKey)&&event.key==='Enter'){event.preventDefault();sendReply()}"
+      onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();sendReply()}"
       onpaste="handlePaste(event)"></textarea>
     <button class="btn-icon btn-send" onclick="sendReply()" title="送出">&#10148;</button>
   </div>
@@ -1414,8 +1414,8 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
     <div style="font-size:14px;font-weight:600;margin-bottom:14px;color:#1a1a1a">確認傳送這張圖片？</div>
     <img id="pastePreview" style="max-width:100%;max-height:180px;border-radius:8px;margin-bottom:18px;object-fit:contain">
     <div style="display:flex;gap:10px">
-      <button onclick="cancelPaste()" style="flex:1;padding:10px;border:1.5px solid #ddd;border-radius:8px;background:#fff;cursor:pointer;font-size:13px;color:#555">取消</button>
-      <button onclick="confirmPaste()" style="flex:1;padding:10px;border:none;border-radius:8px;background:#0d6efd;color:#fff;cursor:pointer;font-size:13px;font-weight:600">確認發送</button>
+      <button onclick="cancelPaste()" style="flex:1;padding:10px;border:1.5px solid #ddd;border-radius:8px;background:#fff;cursor:pointer;font-size:13px;color:#555">不同意</button>
+      <button onclick="confirmPaste()" style="flex:1;padding:10px;border:none;border-radius:8px;background:#0d6efd;color:#fff;cursor:pointer;font-size:13px;font-weight:600">同意</button>
     </div>
   </div>
 </div>
