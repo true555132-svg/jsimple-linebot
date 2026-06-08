@@ -598,10 +598,13 @@ def handle_line_message(event):
         messages.append(TextMessage(text=text))
     if image_url:
         messages.append(ImageMessage(original_content_url=image_url, preview_image_url=image_url))
-    with ApiClient(configuration) as api_client:
-        MessagingApi(api_client).reply_message_with_http_info(
-            ReplyMessageRequest(reply_token=event.reply_token, messages=messages)
-        )
+    try:
+        with ApiClient(configuration) as api_client:
+            MessagingApi(api_client).reply_message_with_http_info(
+                ReplyMessageRequest(reply_token=event.reply_token, messages=messages)
+            )
+    except Exception as e:
+        print(f"[LINE REPLY ERROR] {e}", flush=True)
 
 # ── FB Messenger Webhook ──────────────────────────────────
 
@@ -1207,7 +1210,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
 .tpl-btn-cancel{padding:6px 16px;background:#f0f2f5;color:#555;border:none;border-radius:8px;font-size:12px;cursor:pointer}
 
 .input-area{background:#fff;border-top:1px solid #e8eaed;padding:10px 12px;display:flex;gap:8px;align-items:flex-end;flex-shrink:0}
-.input-area textarea{flex:1;border:1.5px solid #e8eaed;border-radius:12px;padding:8px 12px;font-size:13px;resize:none;outline:none;font-family:inherit;line-height:1.5;max-height:120px}
+.input-area textarea{flex:1;border:1.5px solid #e8eaed;border-radius:12px;padding:8px 12px;font-size:13px;resize:none;outline:none;font-family:inherit;line-height:1.5;min-height:60px;max-height:200px}
 .input-area textarea:focus{border-color:#0d6efd}
 .btn-icon{width:36px;height:36px;border-radius:50%;border:1.5px solid #e8eaed;background:#fff;cursor:pointer;display:flex;align-items:center;justify-content:center;font-size:16px;flex-shrink:0;transition:.15s}
 .btn-icon:hover{background:#f0f8ff;border-color:#0d6efd}
@@ -1372,9 +1375,9 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
       &#128206;
       <input type="file" id="fileInput" accept="*/*" style="display:none" onchange="uploadFile(this)">
     </label>
-    <textarea id="replyInput" placeholder="輸入訊息..." rows="1"
+    <textarea id="replyInput" placeholder="輸入訊息… (Enter 換行，Ctrl+Enter 發送)" rows="2"
       oninput="autoResize(this)"
-      onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();sendReply()}"
+      onkeydown="if((event.ctrlKey||event.metaKey)&&event.key==='Enter'){event.preventDefault();sendReply()}"
       onpaste="handlePaste(event)"></textarea>
     <button class="btn-icon btn-send" onclick="sendReply()" title="送出">&#10148;</button>
   </div>
@@ -1390,6 +1393,18 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
 </div>
 
 <div class="toast" id="toast"></div>
+
+<!-- Paste Image Confirm Modal -->
+<div id="pasteModal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.5);z-index:9999;align-items:center;justify-content:center">
+  <div style="background:#fff;border-radius:14px;padding:22px 20px;max-width:340px;width:90%;text-align:center;box-shadow:0 8px 32px rgba(0,0,0,.18)">
+    <div style="font-size:14px;font-weight:600;margin-bottom:14px;color:#1a1a1a">確認傳送這張圖片？</div>
+    <img id="pastePreview" style="max-width:100%;max-height:180px;border-radius:8px;margin-bottom:18px;object-fit:contain">
+    <div style="display:flex;gap:10px">
+      <button onclick="cancelPaste()" style="flex:1;padding:10px;border:1.5px solid #ddd;border-radius:8px;background:#fff;cursor:pointer;font-size:13px;color:#555">取消</button>
+      <button onclick="confirmPaste()" style="flex:1;padding:10px;border:none;border-radius:8px;background:#0d6efd;color:#fff;cursor:pointer;font-size:13px;font-weight:600">確認發送</button>
+    </div>
+  </div>
+</div>
 
 <script>
 const KEY = new URLSearchParams(location.search).get('key') || '';
@@ -1772,6 +1787,8 @@ async function uploadFile(input){
   input.value='';
 }
 
+let _pasteFile = null;
+
 async function handlePaste(e){
   const items = e.clipboardData?.items;
   if(!items) return;
@@ -1782,24 +1799,45 @@ async function handlePaste(e){
       let file = item.getAsFile();
       if(!file) return;
       file = await compressImage(file);
-      toast('圖片上傳中...');
+      _pasteFile = file;
       const reader = new FileReader();
-      reader.onload = async re=>{
-        const b64 = re.target.result.split(',')[1];
-        try{
-          const up = await fetch('/api/upload_image',{method:'POST',headers:{'Content-Type':'application/json'},
-            body:JSON.stringify({key:curKey,admin_key:KEY,filename:'paste.jpg',content:b64})});
-          const ud = await up.json();
-          if(!ud.url){ toast('上傳失敗：'+(ud.error||'')); return; }
-          await fetch('/api/reply',{method:'POST',headers:{'Content-Type':'application/json'},
-            body:JSON.stringify({key:curKey,admin_key:KEY,image_url:ud.url})});
-          await loadMsgs(curKey);
-        }catch(err){ toast('上傳失敗：'+err.message); }
+      reader.onload = re=>{
+        document.getElementById('pastePreview').src = re.target.result;
+        const modal = document.getElementById('pasteModal');
+        modal.style.display = 'flex';
       };
       reader.readAsDataURL(file);
       return;
     }
   }
+}
+
+function cancelPaste(){
+  _pasteFile = null;
+  document.getElementById('pasteModal').style.display = 'none';
+  document.getElementById('pastePreview').src = '';
+}
+
+async function confirmPaste(){
+  if(!_pasteFile) return;
+  const file = _pasteFile;
+  cancelPaste();
+  toast('圖片上傳中...');
+  const reader = new FileReader();
+  reader.onload = async re=>{
+    const b64 = re.target.result.split(',')[1];
+    try{
+      const up = await fetch('/api/upload_image',{method:'POST',headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({key:curKey,admin_key:KEY,filename:'paste.jpg',content:b64})});
+      const ud = await up.json();
+      if(!ud.url){ toast('上傳失敗：'+(ud.error||'')); return; }
+      await fetch('/api/reply',{method:'POST',headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({key:curKey,admin_key:KEY,image_url:ud.url})});
+      await loadMsgs(curKey);
+      toast('圖片已傳送');
+    }catch(err){ toast('上傳失敗：'+err.message); }
+  };
+  reader.readAsDataURL(file);
 }
 
 // ── 快捷模板 ──────────────────────────────────────────────
@@ -2108,7 +2146,7 @@ function useTpl(text){
 
 function autoResize(el){
   el.style.height = '';
-  el.style.height = Math.min(el.scrollHeight, 120)+'px';
+  el.style.height = Math.min(el.scrollHeight, 200)+'px';
 }
 
 // RIGHT PANEL
