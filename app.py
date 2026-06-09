@@ -1490,7 +1490,8 @@ function fmtConvTime(ts){
 }
 
 let allConvs = [], curKey = null, curStatus = 'bot', filterStatus = 'all', filterTag = null, searchQ = '', filterRead = 'all';
-let pinnedKeys = new Set(JSON.parse(localStorage.getItem('pinnedKeys')||'[]'));
+let pinnedKeys = new Set();
+try{ pinnedKeys = new Set(JSON.parse(localStorage.getItem('pinnedKeys')||'[]')); }catch(e){ localStorage.removeItem('pinnedKeys'); }
 let curTags = [], curCustomer = {}, noteTimer = null;
 
 // INIT
