@@ -1542,15 +1542,23 @@ document.getElementById('searchInput').addEventListener('input', e=>{
 async function loadConvs(){
   try{
     const r = await fetch(`/api/conversations?key=${KEY}`);
+    if(!r.ok){console.error('conversations api error',r.status);return}
     const d = await r.json();
     if(Array.isArray(d)) allConvs = d;
-    else if(d.conversations) allConvs = d.conversations;
-    renderList();
+    else if(d && d.conversations) allConvs = d.conversations;
+    else allConvs = [];
+    try{ renderList(); }catch(e2){
+      console.error('renderList error',e2);
+      document.getElementById('convList').innerHTML='<div style="padding:16px;color:#e53935;font-size:12px">載入錯誤，請重新整理</div>';
+    }
     if(curKey) {
       const cur = allConvs.find(c=>c.key===curKey);
       if(cur) updateHeaderStatus(cur.status||'bot');
     }
-  }catch(e){console.error(e)}
+  }catch(e){
+    console.error('loadConvs error',e);
+    document.getElementById('convList').innerHTML='<div style="padding:16px;color:#e53935;font-size:12px">網路錯誤，請重新整理</div>';
+  }
 }
 
 function renderList(){
