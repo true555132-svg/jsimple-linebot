@@ -1416,6 +1416,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
   </div>
   <div class="quote-card" id="quoteCard">
     <span class="quote-card-icon">↩</span>
+    <img id="quoteCardImg" style="display:none;width:46px;height:46px;border-radius:6px;object-fit:cover;flex-shrink:0">
     <div class="quote-card-body">
       <div class="quote-card-sender" id="quoteCardSender"></div>
       <div class="quote-card-preview" id="quoteCardText"></div>
@@ -1735,11 +1736,12 @@ function renderMsgs(msgs){
     const senderName = isMe ? '我' : (conv?.user_name || conv?.user_id || '客戶');
     const safeSender = senderName.replace(/'/g,"\\'").slice(0,30);
     const safeToken = (m.quote_token||'').replace(/'/g,"\\'");
+    const safeImg = (m.image_url||'').replace(/'/g,"\\'");
     return `<div class="msg-row ${isMe?'me':'them'}">
       <div class="msg-bubble">${content}</div>
       <span class="msg-time">${time}</span>
       <div class="msg-actions">
-        <button class="msg-act-btn" onclick="setQuote('${safePreview}','${safeSender}','${safeToken}')">↩ 回覆</button>
+        <button class="msg-act-btn" onclick="setQuote('${safePreview}','${safeSender}','${safeToken}','${safeImg}')">↩ 回覆</button>
       </div>
     </div>`;
   }).join('');
@@ -1780,11 +1782,21 @@ async function toggleTakeover(){
 let _quoteText = '';
 let _quoteToken = '';
 
-function setQuote(text, sender, token){
+function setQuote(text, sender, token, imgUrl){
   _quoteText = text;
   _quoteToken = token || '';
   document.getElementById('quoteCardSender').textContent = sender || '回覆';
-  document.getElementById('quoteCardText').textContent = text;
+  const imgEl = document.getElementById('quoteCardImg');
+  const isImg = imgUrl && !/sticker/i.test(imgUrl);
+  if(isImg){
+    imgEl.src = imgUrl;
+    imgEl.style.display = 'block';
+    document.getElementById('quoteCardText').textContent = '';
+  } else {
+    imgEl.style.display = 'none';
+    imgEl.src = '';
+    document.getElementById('quoteCardText').textContent = text;
+  }
   document.getElementById('quoteCard').classList.add('show');
   document.getElementById('replyInput').focus();
 }
@@ -1794,6 +1806,9 @@ function clearQuote(){
   _quoteToken = '';
   document.getElementById('quoteCardSender').textContent = '';
   document.getElementById('quoteCardText').textContent = '';
+  const imgEl = document.getElementById('quoteCardImg');
+  imgEl.style.display = 'none';
+  imgEl.src = '';
   document.getElementById('quoteCard').classList.remove('show');
 }
 
