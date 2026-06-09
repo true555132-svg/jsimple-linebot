@@ -2465,8 +2465,16 @@ function escAttr(s){
   return String(s).replace(/"/g,'&quot;').replace(/'/g,'&#39;');
 }
 function linkify(s){
-  return escHtml(s).replace(/https?:\/\/[^\s&lt;&gt;"']+/g,
-    url=>`<a href="${url}" target="_blank" rel="noopener" style="color:inherit;text-decoration:underline;word-break:break-all">${url}</a>`);
+  const re=/https?:\/\/[^\s<>"']+/g;
+  const parts=[]; let last=0, m;
+  while((m=re.exec(s))!==null){
+    parts.push(escHtml(s.slice(last,m.index)));
+    const url=m[0];
+    parts.push(`<a href="${escAttr(url)}" target="_blank" rel="noopener" style="color:inherit;text-decoration:underline;word-break:break-all">${escHtml(url)}</a>`);
+    last=m.index+url.length;
+  }
+  parts.push(escHtml(s.slice(last)));
+  return parts.join('');
 }
 
 init();
