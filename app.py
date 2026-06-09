@@ -1185,16 +1185,21 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
 .msg-bubble{max-width:72%;padding:8px 12px;border-radius:16px;font-size:13px;line-height:1.5;word-break:break-word}
 .msg-row.them .msg-bubble{background:#fff;border-bottom-left-radius:4px;box-shadow:0 1px 2px rgba(0,0,0,.06)}
 .msg-row.me .msg-bubble{background:#0d6efd;color:#fff;border-bottom-right-radius:4px}
-.msg-reply-btn{display:none;position:absolute;bottom:2px;background:#fff;border:1px solid #ddd;border-radius:10px;padding:2px 8px;font-size:11px;color:#555;cursor:pointer;box-shadow:0 1px 4px rgba(0,0,0,.12);white-space:nowrap;z-index:2}
-.msg-row.them .msg-reply-btn{left:54px}
-.msg-row.me .msg-reply-btn{right:54px}
-.msg-row:hover .msg-reply-btn{display:block}
-#selTooltip{display:none;position:fixed;background:#1a1a1a;color:#fff;border-radius:8px;padding:5px 14px;font-size:12px;font-weight:600;cursor:pointer;z-index:99999;box-shadow:0 2px 10px rgba(0,0,0,.3);white-space:nowrap;transform:translateX(-50%);pointer-events:auto}
-#selTooltip::after{content:'';position:absolute;bottom:-6px;left:50%;transform:translateX(-50%);width:0;height:0;border:6px solid transparent;border-top-color:#1a1a1a;border-bottom:none}
-.quote-bar{display:none;background:#f0f4ff;border-left:3px solid #0d6efd;padding:6px 10px;font-size:12px;color:#444;margin:0;position:relative;flex-shrink:0}
-.quote-bar.show{display:flex;align-items:center;gap:8px}
-.quote-bar-text{flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.quote-bar-close{cursor:pointer;font-size:14px;color:#9aa0a6;flex-shrink:0;background:none;border:none;padding:0;line-height:1}
+.msg-actions{display:none;position:absolute;top:-34px;background:#fff;border:1px solid #e4e6ea;border-radius:20px;padding:3px 6px;box-shadow:0 2px 12px rgba(0,0,0,.18);z-index:10;align-items:center;gap:0;white-space:nowrap}
+.msg-row.them .msg-actions{left:38px}
+.msg-row.me .msg-actions{right:0}
+.msg-row:hover .msg-actions{display:flex}
+.msg-act-btn{background:none;border:none;cursor:pointer;padding:5px 14px;border-radius:14px;font-size:13px;color:#333;font-weight:500;transition:.15s;line-height:1.4}
+.msg-act-btn:hover{background:#f0f4ff;color:#0d6efd}
+.msg-act-sep{width:1px;height:18px;background:#e4e6ea;flex-shrink:0;margin:0 2px}
+.quote-card{display:none;background:#f0f4ff;border-left:4px solid #0d6efd;padding:10px 14px;margin:0;flex-shrink:0;align-items:center;gap:10px;border-top:1px solid #dce6ff}
+.quote-card.show{display:flex}
+.quote-card-icon{font-size:20px;flex-shrink:0;color:#0d6efd}
+.quote-card-body{flex:1;min-width:0}
+.quote-card-sender{font-size:11px;font-weight:700;color:#0d6efd;margin-bottom:2px}
+.quote-card-preview{font-size:13px;color:#333;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.quote-card-close{background:none;border:none;cursor:pointer;font-size:22px;color:#9aa0a6;padding:0 4px;line-height:1;flex-shrink:0}
+.quote-card-close:hover{color:#333}
 .msg-img{max-width:220px;border-radius:12px;cursor:pointer}
 .msg-sticker{width:100px}
 .msg-time{font-size:10px;color:#9aa0a6;white-space:nowrap}
@@ -1399,10 +1404,13 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
     <div class="img-lib-grid" id="imgLibGrid"></div>
     <input type="file" id="imgLibInput" accept="image/*" style="display:none" onchange="saveToLibrary(this)">
   </div>
-  <div class="quote-bar" id="quoteBar">
-    <span style="font-size:11px;color:#0d6efd;font-weight:600;flex-shrink:0">回覆：</span>
-    <span class="quote-bar-text" id="quoteBarText"></span>
-    <button class="quote-bar-close" onclick="clearQuote()">✕</button>
+  <div class="quote-card" id="quoteCard">
+    <span class="quote-card-icon">↩</span>
+    <div class="quote-card-body">
+      <div class="quote-card-sender" id="quoteCardSender"></div>
+      <div class="quote-card-preview" id="quoteCardText"></div>
+    </div>
+    <button class="quote-card-close" onclick="clearQuote()">×</button>
   </div>
   <div class="input-area">
     <button class="btn-icon" onclick="toggleTpl()" title="快速回覆">&#9889;</button>
@@ -1695,11 +1703,18 @@ function renderMsgs(msgs){
       else content=`<img class="msg-img" src="${imgUrl}" onclick="window.open(this.src)">`;
     } else if(m.sticker_url) content = `<img class="msg-sticker" src="${m.sticker_url}">`;
     else content = escHtml(m.content||'');
-    const safeContent = (m.content||'').replace(/'/g,"\\'").slice(0,100);
+    const safeContent = (m.content||m.image_url?'[圖片]':'').replace(/'/g,"\\'").slice(0,80);
+    const rawContent = m.image_url ? '[圖片]' : (m.sticker_url ? '[貼圖]' : (m.content||''));
+    const safePreview = rawContent.replace(/'/g,"\\'").slice(0,80);
+    const conv = allConvs.find(c=>c.key===curKey);
+    const senderName = isMe ? '我' : (conv?.user_name || conv?.user_id || '客戶');
+    const safeSender = senderName.replace(/'/g,"\\'").slice(0,30);
     return `<div class="msg-row ${isMe?'me':'them'}">
       <div class="msg-bubble">${content}</div>
       <span class="msg-time">${time}</span>
-      <button class="msg-reply-btn" onclick="setQuote('${safeContent}')">回覆</button>
+      <div class="msg-actions">
+        <button class="msg-act-btn" onclick="setQuote('${safePreview}','${safeSender}')">↩ 回覆</button>
+      </div>
     </div>`;
   }).join('');
   area.scrollTop = area.scrollHeight;
@@ -1738,56 +1753,20 @@ async function toggleTakeover(){
 
 let _quoteText = '';
 
-function setQuote(text){
+function setQuote(text, sender){
   _quoteText = text;
-  document.getElementById('quoteBarText').textContent = text;
-  document.getElementById('quoteBar').classList.add('show');
+  document.getElementById('quoteCardSender').textContent = sender || '回覆';
+  document.getElementById('quoteCardText').textContent = text;
+  document.getElementById('quoteCard').classList.add('show');
   document.getElementById('replyInput').focus();
 }
 
 function clearQuote(){
   _quoteText = '';
-  document.getElementById('quoteBarText').textContent = '';
-  document.getElementById('quoteBar').classList.remove('show');
+  document.getElementById('quoteCardSender').textContent = '';
+  document.getElementById('quoteCardText').textContent = '';
+  document.getElementById('quoteCard').classList.remove('show');
 }
-
-// 選取文字浮現引用按鈕
-(function(){
-  const tip = document.createElement('div');
-  tip.id = 'selTooltip';
-  tip.textContent = '↩ 引用回覆';
-  document.body.appendChild(tip);
-
-  function hideTip(){ tip.style.display='none'; tip._txt=''; }
-
-  document.getElementById('msgArea').addEventListener('mouseup', ()=>{
-    setTimeout(()=>{
-      const sel = window.getSelection();
-      const txt = sel?.toString().trim();
-      if(!txt){ hideTip(); return; }
-      const range = sel.getRangeAt(0);
-      const node = range.commonAncestorContainer;
-      const bubble = (node.nodeType===3 ? node.parentElement : node)?.closest?.('.msg-bubble');
-      if(!bubble){ hideTip(); return; }
-      const rect = range.getBoundingClientRect();
-      tip._txt = txt;
-      tip.style.display = 'block';
-      tip.style.top  = (rect.top - 38) + 'px';
-      tip.style.left = (rect.left + rect.width/2) + 'px';
-    }, 10);
-  });
-
-  tip.addEventListener('mousedown', e=>{
-    e.preventDefault();
-    const txt = tip._txt || window.getSelection()?.toString().trim();
-    if(txt) setQuote(txt);
-    window.getSelection()?.removeAllRanges();
-    hideTip();
-  });
-
-  document.addEventListener('mousedown', e=>{ if(e.target!==tip) hideTip(); });
-  document.getElementById('msgArea').addEventListener('scroll', hideTip);
-})();
 
 async function sendReply(){
   if(!curKey) return;
