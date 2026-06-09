@@ -1328,6 +1328,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
       <input type="text" id="searchInput" placeholder="搜尋對話...">
     </div>
   </div>
+  <div id="debugBar" style="display:none;padding:4px 10px;font-size:10px;background:#fff3cd;color:#856404;border-bottom:1px solid #ffc107"></div>
   <div class="status-tabs" id="statusTabs">
     <div class="stab active" data-s="all">全部</div>
     <div class="stab" data-s="bot">Bot</div>
@@ -1540,24 +1541,31 @@ document.getElementById('searchInput').addEventListener('input', e=>{
 });
 
 async function loadConvs(){
+  const dbg = document.getElementById('debugBar');
   try{
+    if(dbg){ dbg.style.display='block'; dbg.textContent='載入對話中...'; }
     const r = await fetch(`/api/conversations?key=${KEY}`);
-    if(!r.ok){console.error('conversations api error',r.status);return}
+    if(!r.ok){
+      if(dbg) dbg.textContent=`API錯誤 ${r.status} key=${KEY||'(空)'}`;
+      document.getElementById('convList').innerHTML=`<div style="padding:16px;color:#e53935;font-size:12px">API錯誤 ${r.status}</div>`;
+      return;
+    }
     const d = await r.json();
     if(Array.isArray(d)) allConvs = d;
     else if(d && d.conversations) allConvs = d.conversations;
-    else allConvs = [];
+    else{ allConvs = []; if(dbg) dbg.textContent=`API回傳非陣列: ${JSON.stringify(d).slice(0,80)}`; }
+    if(dbg) dbg.textContent=`JS KEY=${KEY||'(空)'} 對話數=${allConvs.length}`;
     try{ renderList(); }catch(e2){
-      console.error('renderList error',e2);
-      document.getElementById('convList').innerHTML='<div style="padding:16px;color:#e53935;font-size:12px">載入錯誤，請重新整理</div>';
+      if(dbg) dbg.textContent=`renderList錯誤: ${e2.message}`;
+      document.getElementById('convList').innerHTML=`<div style="padding:16px;color:#e53935;font-size:12px">渲染錯誤: ${e2.message}</div>`;
     }
     if(curKey) {
       const cur = allConvs.find(c=>c.key===curKey);
       if(cur) updateHeaderStatus(cur.status||'bot');
     }
   }catch(e){
-    console.error('loadConvs error',e);
-    document.getElementById('convList').innerHTML='<div style="padding:16px;color:#e53935;font-size:12px">網路錯誤，請重新整理</div>';
+    if(dbg) dbg.textContent=`例外: ${e.message} key=${KEY||'(空)'}`;
+    document.getElementById('convList').innerHTML=`<div style="padding:16px;color:#e53935;font-size:12px">錯誤: ${e.message}</div>`;
   }
 }
 
