@@ -551,7 +551,7 @@ def classify_intent(text: str, platform: str) -> str:
             return intent
     return "default"
 
-def get_reply(text: str, user_id: str, platform: str) -> tuple:
+def get_reply(text: str, user_id: str, platform: str, quote_token: str = "") -> tuple:
     cfg = platforms[platform]
     intent = classify_intent(text, platform)
     intent_on = cfg["enabled_intents"].get(intent, True)
@@ -570,6 +570,7 @@ def get_reply(text: str, user_id: str, platform: str) -> tuple:
         "intent": intent,
         "reply": reply_text,
         "replied": replied,
+        "quote_token": quote_token,
     })
     if not replied or f"{platform}:{user_id}" in manual_takeover:
         return None, None
@@ -596,8 +597,9 @@ def callback():
 def handle_line_message(event):
     user_id = event.source.user_id
     msg_text = event.message.text.strip()
+    quote_token = getattr(event.message, 'quote_token', '') or ''
     print(f"[LINE MSG] user={user_id} text={msg_text[:30]!r}", flush=True)
-    text, image_url = get_reply(msg_text, user_id, "line")
+    text, image_url = get_reply(msg_text, user_id, "line", quote_token=quote_token)
     print(f"[LINE REPLY PLAN] text={bool(text)} image={bool(image_url)}", flush=True)
     if not text and not image_url:
         print("[LINE REPLY PLAN] no reply (intent off or manual mode)", flush=True)
@@ -637,8 +639,10 @@ def handle_line_image(event):
     except Exception:
         pass
     now = time.strftime("%Y/%m/%d %H:%M:%S", time.gmtime(time.time() + 8*3600))
+    qt = getattr(event.message, 'quote_token', '') or ''
     log_message({"time": now, "platform": "LINE", "user_id": user_id,
-                 "msg": "[圖片]", "intent": "image", "reply": "", "replied": False, "image_url": image_url})
+                 "msg": "[圖片]", "intent": "image", "reply": "", "replied": False,
+                 "image_url": image_url, "quote_token": qt})
 
 @handler.add(MessageEvent, message=StickerMessageContent)
 def handle_line_sticker(event):
@@ -646,8 +650,10 @@ def handle_line_sticker(event):
     stk_id = event.message.sticker_id
     sticker_url = f"https://stickershop.line-scdn.net/stickershop/v1/sticker/{stk_id}/iPhone/sticker@2x.png"
     now = time.strftime("%Y/%m/%d %H:%M:%S", time.gmtime(time.time() + 8*3600))
+    qt = getattr(event.message, 'quote_token', '') or ''
     log_message({"time": now, "platform": "LINE", "user_id": user_id,
-                 "msg": "[貼圖]", "intent": "sticker", "reply": "", "replied": False, "image_url": sticker_url})
+                 "msg": "[貼圖]", "intent": "sticker", "reply": "", "replied": False,
+                 "image_url": sticker_url, "quote_token": qt})
 @app.route("/fb-webhook", methods=["GET"])
 def fb_verify():
     if (request.args.get("hub.mode") == "subscribe" and
@@ -821,9 +827,12 @@ def get_user_profile(platform: str, user_id: str) -> dict:
     user_profiles[key] = profile
     return profile
 
-def line_push(user_id: str, text: str):
+def line_push(user_id: str, text: str, quote_token: str = ""):
     url = "https://api.line.me/v2/bot/message/push"
-    payload = json.dumps({"to": user_id, "messages": [{"type": "text", "text": text}]}).encode()
+    msg = {"type": "text", "text": text}
+    if quote_token:
+        msg["quoteToken"] = quote_token
+    payload = json.dumps({"to": user_id, "messages": [msg]}).encode()
     req = urllib.request.Request(url, data=payload, headers={
         "Content-Type": "application/json",
         "Authorization": f"Bearer {LINE_CHANNEL_ACCESS_TOKEN}"
@@ -1703,17 +1712,17 @@ function renderMsgs(msgs){
       else content=`<img class="msg-img" src="${imgUrl}" onclick="window.open(this.src)">`;
     } else if(m.sticker_url) content = `<img class="msg-sticker" src="${m.sticker_url}">`;
     else content = escHtml(m.content||'');
-    const safeContent = (m.content||m.image_url?'[圖片]':'').replace(/'/g,"\\'").slice(0,80);
     const rawContent = m.image_url ? '[圖片]' : (m.sticker_url ? '[貼圖]' : (m.content||''));
-    const safePreview = rawContent.replace(/'/g,"\\'").slice(0,80);
+    const safePreview = rawContent.replace(/'/g,"\\'").replace(/\n/g,' ').slice(0,80);
     const conv = allConvs.find(c=>c.key===curKey);
     const senderName = isMe ? '我' : (conv?.user_name || conv?.user_id || '客戶');
     const safeSender = senderName.replace(/'/g,"\\'").slice(0,30);
+    const safeToken = (m.quote_token||'').replace(/'/g,"\\'");
     return `<div class="msg-row ${isMe?'me':'them'}">
       <div class="msg-bubble">${content}</div>
       <span class="msg-time">${time}</span>
       <div class="msg-actions">
-        <button class="msg-act-btn" onclick="setQuote('${safePreview}','${safeSender}')">↩ 回覆</button>
+        <button class="msg-act-btn" onclick="setQuote('${safePreview}','${safeSender}','${safeToken}')">↩ 回覆</button>
       </div>
     </div>`;
   }).join('');
@@ -1752,9 +1761,11 @@ async function toggleTakeover(){
 }
 
 let _quoteText = '';
+let _quoteToken = '';
 
-function setQuote(text, sender){
+function setQuote(text, sender, token){
   _quoteText = text;
+  _quoteToken = token || '';
   document.getElementById('quoteCardSender').textContent = sender || '回覆';
   document.getElementById('quoteCardText').textContent = text;
   document.getElementById('quoteCard').classList.add('show');
@@ -1763,6 +1774,7 @@ function setQuote(text, sender){
 
 function clearQuote(){
   _quoteText = '';
+  _quoteToken = '';
   document.getElementById('quoteCardSender').textContent = '';
   document.getElementById('quoteCardText').textContent = '';
   document.getElementById('quoteCard').classList.remove('show');
@@ -1773,13 +1785,16 @@ async function sendReply(){
   const inp = document.getElementById('replyInput');
   const txt = inp.value.trim();
   if(!txt) return;
-  const finalMsg = _quoteText ? `「${_quoteText}」\n${txt}` : txt;
+  const finalMsg = txt;
   inp.value = '';
   inp.style.height = '';
+  const sendQuoteToken = _quoteToken;
   clearQuote();
   try{
+    const payload = {key:curKey,admin_key:KEY,message:finalMsg};
+    if(sendQuoteToken) payload.quote_token = sendQuoteToken;
     const r = await fetch('/api/reply',{method:'POST',headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({key:curKey,admin_key:KEY,message:finalMsg})});
+      body:JSON.stringify(payload)});
     const d = await r.json();
     if(d.ok) await loadMsgs(curKey);
     else toast('發送失敗：'+(d.error||''));
@@ -3350,7 +3365,8 @@ def api_messages():
         else:
             if l.get("msg"):
                 msgs.append({"role": "user", "content": l["msg"], "ts": ts,
-                             "image_url": l.get("image_url", ""), "sticker_url": l.get("sticker_url", "")})
+                             "image_url": l.get("image_url", ""), "sticker_url": l.get("sticker_url", ""),
+                             "quote_token": l.get("quote_token", "")})
             if l.get("reply") and l.get("replied"):
                 msgs.append({"role": "admin", "content": l["reply"], "ts": ts + 1})
     return jsonify({"messages": msgs})
@@ -3441,11 +3457,12 @@ def api_reply():
     file_url = data.get("file_url", "").strip()
     filename = data.get("filename", "檔案").strip()
     file_size = int(data.get("file_size", 0))
+    quote_token = data.get("quote_token", "").strip()
     if not user_id or (not text and not image_url and not video_url and not file_url):
         return jsonify({"error": "missing fields"}), 400
     try:
         if platform == "LINE":
-            if text: line_push(user_id, text)
+            if text: line_push(user_id, text, quote_token=quote_token)
             if image_url: line_push_image(user_id, image_url)
             if video_url: line_push_video(user_id, video_url, preview_url or video_url)
             if file_url: line_push_file(user_id, file_url, filename, file_size)
