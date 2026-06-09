@@ -1697,7 +1697,7 @@ function renderMsgs(msgs){
     return `<div class="msg-row ${isMe?'me':'them'}">
       <div class="msg-bubble">${content}</div>
       <span class="msg-time">${time}</span>
-      ${!isMe?`<button class="msg-reply-btn" onclick="setQuote('${safeContent}')">回覆</button>`:''}
+      <button class="msg-reply-btn" onclick="setQuote('${safeContent}')">回覆</button>
     </div>`;
   }).join('');
   area.scrollTop = area.scrollHeight;
