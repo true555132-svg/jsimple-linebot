@@ -1189,6 +1189,8 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
 .msg-row.them .msg-reply-btn{left:54px}
 .msg-row.me .msg-reply-btn{right:54px}
 .msg-row:hover .msg-reply-btn{display:block}
+#selTooltip{display:none;position:fixed;background:#1a1a1a;color:#fff;border-radius:8px;padding:5px 14px;font-size:12px;font-weight:600;cursor:pointer;z-index:99999;box-shadow:0 2px 10px rgba(0,0,0,.3);white-space:nowrap;transform:translateX(-50%);pointer-events:auto}
+#selTooltip::after{content:'';position:absolute;bottom:-6px;left:50%;transform:translateX(-50%);width:0;height:0;border:6px solid transparent;border-top-color:#1a1a1a;border-bottom:none}
 .quote-bar{display:none;background:#f0f4ff;border-left:3px solid #0d6efd;padding:6px 10px;font-size:12px;color:#444;margin:0;position:relative;flex-shrink:0}
 .quote-bar.show{display:flex;align-items:center;gap:8px}
 .quote-bar-text{flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
@@ -1748,6 +1750,44 @@ function clearQuote(){
   document.getElementById('quoteBarText').textContent = '';
   document.getElementById('quoteBar').classList.remove('show');
 }
+
+// 選取文字浮現引用按鈕
+(function(){
+  const tip = document.createElement('div');
+  tip.id = 'selTooltip';
+  tip.textContent = '↩ 引用回覆';
+  document.body.appendChild(tip);
+
+  function hideTip(){ tip.style.display='none'; tip._txt=''; }
+
+  document.getElementById('msgArea').addEventListener('mouseup', ()=>{
+    setTimeout(()=>{
+      const sel = window.getSelection();
+      const txt = sel?.toString().trim();
+      if(!txt){ hideTip(); return; }
+      const range = sel.getRangeAt(0);
+      const node = range.commonAncestorContainer;
+      const bubble = (node.nodeType===3 ? node.parentElement : node)?.closest?.('.msg-bubble');
+      if(!bubble){ hideTip(); return; }
+      const rect = range.getBoundingClientRect();
+      tip._txt = txt;
+      tip.style.display = 'block';
+      tip.style.top  = (rect.top - 38) + 'px';
+      tip.style.left = (rect.left + rect.width/2) + 'px';
+    }, 10);
+  });
+
+  tip.addEventListener('mousedown', e=>{
+    e.preventDefault();
+    const txt = tip._txt || window.getSelection()?.toString().trim();
+    if(txt) setQuote(txt);
+    window.getSelection()?.removeAllRanges();
+    hideTip();
+  });
+
+  document.addEventListener('mousedown', e=>{ if(e.target!==tip) hideTip(); });
+  document.getElementById('msgArea').addEventListener('scroll', hideTip);
+})();
 
 async function sendReply(){
   if(!curKey) return;
