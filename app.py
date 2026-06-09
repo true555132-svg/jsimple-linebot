@@ -1730,7 +1730,7 @@ function renderMsgs(msgs){
     } else if(m.sticker_url) content = `<img class="msg-sticker" src="${m.sticker_url}">`;
     else content = escHtml(m.content||'');
     const rawContent = m.image_url ? '[圖片]' : (m.sticker_url ? '[貼圖]' : (m.content||''));
-    const safePreview = rawContent.replace(/'/g,"\\'").replace(/\n/g,' ').slice(0,80);
+    const safePreview = rawContent.replace(/'/g,"\\'").replace(/\\n/g,' ').slice(0,80);
     const conv = allConvs.find(c=>c.key===curKey);
     const senderName = isMe ? '我' : (conv?.user_name || conv?.user_id || '客戶');
     const safeSender = senderName.replace(/'/g,"\\'").slice(0,30);
