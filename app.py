@@ -827,7 +827,7 @@ def get_user_profile(platform: str, user_id: str) -> dict:
     user_profiles[key] = profile
     return profile
 
-def line_push(user_id: str, text: str, quote_token: str = ""):
+def line_push(user_id: str, text: str, quote_token: str = "") -> str:
     url = "https://api.line.me/v2/bot/message/push"
     msg = {"type": "text", "text": text}
     if quote_token:
@@ -839,12 +839,16 @@ def line_push(user_id: str, text: str, quote_token: str = ""):
     })
     try:
         with urllib.request.urlopen(req) as r:
-            print(f"[LINE PUSH OK] user={user_id} status={r.status}", flush=True)
+            resp = json.loads(r.read().decode("utf-8", errors="ignore"))
+            sent_qt = (resp.get("sentMessages") or [{}])[0].get("quoteToken", "")
+            print(f"[LINE PUSH OK] user={user_id} quoteToken={bool(sent_qt)}", flush=True)
+            return sent_qt
     except urllib.error.HTTPError as e:
         body = e.read().decode("utf-8", errors="ignore")
         print(f"[LINE PUSH ERROR] user={user_id} status={e.code} body={body}", flush=True)
     except Exception as e:
         print(f"[LINE PUSH ERROR] user={user_id} error={e}", flush=True)
+    return ""
 
 def line_push_video(user_id: str, video_url: str, preview_url: str):
     url = "https://api.line.me/v2/bot/message/push"
@@ -3406,7 +3410,8 @@ def api_messages():
             content = l.get("reply", "")
             img = l.get("image_url", "")
             if content or img:
-                msgs.append({"role": "admin", "content": content, "ts": ts, "image_url": img})
+                msgs.append({"role": "admin", "content": content, "ts": ts, "image_url": img,
+                             "quote_token": l.get("quote_token", "")})
         else:
             if l.get("msg"):
                 msgs.append({"role": "user", "content": l["msg"], "ts": ts,
@@ -3506,8 +3511,9 @@ def api_reply():
     if not user_id or (not text and not image_url and not video_url and not file_url):
         return jsonify({"error": "missing fields"}), 400
     try:
+        sent_quote_token = ""
         if platform == "LINE":
-            if text: line_push(user_id, text, quote_token=quote_token)
+            if text: sent_quote_token = line_push(user_id, text, quote_token=quote_token)
             if image_url: line_push_image(user_id, image_url)
             if video_url: line_push_video(user_id, video_url, preview_url or video_url)
             if file_url: line_push_file(user_id, file_url, filename, file_size)
@@ -3521,7 +3527,8 @@ def api_reply():
         now = time.strftime("%Y/%m/%d %H:%M:%S", time.gmtime(time.time() + 8*3600))
         if text:
             log_message({"time": now, "platform": platform, "user_id": user_id,
-                         "msg": "", "intent": "manual", "reply": text, "replied": True, "sent_by": "admin"})
+                         "msg": "", "intent": "manual", "reply": text, "replied": True,
+                         "sent_by": "admin", "quote_token": sent_quote_token})
         if image_url:
             log_message({"time": now, "platform": platform, "user_id": user_id,
                          "msg": "", "intent": "manual", "reply": "", "replied": True,
