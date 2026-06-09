@@ -1729,7 +1729,7 @@ function renderMsgs(msgs){
       }
       else content=`<img class="msg-img" src="${imgUrl}" onclick="window.open(this.src)">`;
     } else if(m.sticker_url) content = `<img class="msg-sticker" src="${m.sticker_url}">`;
-    else content = escHtml(m.content||'');
+    else content = linkify(m.content||'');
     const rawContent = m.image_url ? '[圖片]' : (m.sticker_url ? '[貼圖]' : (m.content||''));
     const safePreview = rawContent.replace(/'/g,"\\'").replace(/\\n/g,' ').slice(0,80);
     const conv = allConvs.find(c=>c.key===curKey);
@@ -1737,11 +1737,12 @@ function renderMsgs(msgs){
     const safeSender = senderName.replace(/'/g,"\\'").slice(0,30);
     const safeToken = (m.quote_token||'').replace(/'/g,"\\'");
     const safeImg = (m.image_url||'').replace(/'/g,"\\'");
+    const quoteCall = `setQuote('${safePreview}','${safeSender}','${safeToken}','${safeImg}')`;
     return `<div class="msg-row ${isMe?'me':'them'}">
-      <div class="msg-bubble">${content}</div>
+      <div class="msg-bubble" ondblclick="${quoteCall}" title="雙擊引用回覆">${content}</div>
       <span class="msg-time">${time}</span>
       <div class="msg-actions">
-        <button class="msg-act-btn" onclick="setQuote('${safePreview}','${safeSender}','${safeToken}','${safeImg}')">↩ 回覆</button>
+        <button class="msg-act-btn" onclick="${quoteCall}">↩ 回覆</button>
       </div>
     </div>`;
   }).join('');
@@ -2462,6 +2463,10 @@ function escHtml(s){
 }
 function escAttr(s){
   return String(s).replace(/"/g,'&quot;').replace(/'/g,'&#39;');
+}
+function linkify(s){
+  return escHtml(s).replace(/https?:\/\/[^\s&lt;&gt;"']+/g,
+    url=>`<a href="${url}" target="_blank" rel="noopener" style="color:inherit;text-decoration:underline;word-break:break-all">${url}</a>`);
 }
 
 init();
