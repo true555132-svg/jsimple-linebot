@@ -1818,10 +1818,10 @@ async function sendReply(){
   const inp = document.getElementById('replyInput');
   const txt = inp.value.trim();
   if(!txt) return;
-  const finalMsg = txt;
+  const sendQuoteToken = _quoteToken;
+  const finalMsg = (!sendQuoteToken && _quoteText) ? `「${_quoteText}」\n${txt}` : txt;
   inp.value = '';
   inp.style.height = '';
-  const sendQuoteToken = _quoteToken;
   clearQuote();
   try{
     const payload = {key:curKey,admin_key:KEY,message:finalMsg};
