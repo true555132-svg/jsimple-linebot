@@ -343,7 +343,7 @@ FB_IMAGE_URLS = {
 }
 
 LINE_ENABLED_INTENTS = {
-    "greeting": True,
+    "greeting": False,
     "price": False,
     "custom": False,
     "shipping": False,
