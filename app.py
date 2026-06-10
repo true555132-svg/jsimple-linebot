@@ -1152,7 +1152,7 @@ INBOX_HTML = """<!DOCTYPE html>
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
 body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#f0f2f5;color:#1a1a1a;height:100vh;overflow:hidden}
-.crm-wrap{display:grid;grid-template-columns:300px 1fr 320px;height:100vh}
+.crm-wrap{display:grid;grid-template-columns:300px 1fr 280px;height:100vh}
 .mobile-back{display:none}
 @media(max-width:820px){
   body{overflow:hidden}
@@ -1167,7 +1167,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
   .takeover-btn{font-size:11px;padding:4px 8px}
   .btn-icon{width:34px;height:34px;font-size:15px}
   .input-area{padding:6px 8px;gap:4px}
-  .msg-bubble{max-width:72%}
+  .msg-bubble{max-width:70%}
 }
 
 /* LEFT SIDEBAR */
@@ -1230,7 +1230,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
 
 /* MIDDLE CHAT */
 /* ── CHAT MAIN (LINE OA 風格) ─────────────────────────── */
-.chat-main{display:flex;flex-direction:column;overflow:hidden;background:#ebebeb}
+.chat-main{display:flex;flex-direction:column;overflow:hidden;background:#fff}
 .chat-header{background:#fff;border-bottom:1px solid #e8eaed;padding:10px 16px;display:flex;align-items:center;gap:10px;flex-shrink:0}
 .chat-header-avatar{width:36px;height:36px;border-radius:50%;object-fit:cover;background:#e8eaed}
 .chat-header-info{flex:1;min-width:0}
@@ -1241,7 +1241,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
 .takeover-on{background:#06C755;color:#fff}.takeover-off{background:#e8eaed;color:#555}
 
 /* 訊息區 */
-.msg-area{flex:1;overflow-y:auto;padding:12px 14px;display:flex;flex-direction:column;gap:2px}
+.msg-area{flex:1;overflow-y:auto;padding:12px 14px;display:flex;flex-direction:column;gap:2px;background:#fff}
 .msg-area::-webkit-scrollbar{width:4px}
 .msg-area::-webkit-scrollbar-thumb{background:#ccc;border-radius:2px}
 
@@ -1251,7 +1251,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
 .msg-row.them+.msg-row.me,.msg-row.me+.msg-row.them{margin-top:8px}
 
 /* 泡泡 */
-.msg-bubble{max-width:58%;padding:8px 11px;border-radius:18px;font-size:13.5px;line-height:1.55;word-break:break-word;white-space:pre-wrap}
+.msg-bubble{max-width:42%;padding:8px 11px;border-radius:18px;font-size:13.5px;line-height:1.55;word-break:break-word;white-space:pre-wrap}
 .msg-row.them .msg-bubble{background:#fff;border-bottom-left-radius:4px;box-shadow:0 1px 2px rgba(0,0,0,.1);color:#1a1a1a}
 .msg-row.me .msg-bubble{background:#95EC69;color:#1a1a1a;border-bottom-right-radius:4px}
 
@@ -1262,6 +1262,8 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
 .msg-row:hover .msg-actions{display:flex}
 .msg-act-btn{background:none;border:none;cursor:pointer;padding:4px 12px;border-radius:12px;font-size:12px;color:#444;font-weight:500;transition:.15s}
 .msg-act-btn:hover{background:#f0f4ff;color:#06C755}
+.msg-act-btn.no-qt{color:#bbb;cursor:default;font-size:11px}
+.msg-act-btn.no-qt:hover{background:none;color:#bbb}
 
 /* 輸入區引用卡片 */
 .quote-card{display:none;background:#f5fff5;border-left:4px solid #06C755;padding:8px 12px;margin:0;flex-shrink:0;align-items:center;gap:10px;border-top:1px solid #d4f5d4}
@@ -1485,6 +1487,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
     <div class="quote-card-body">
       <div class="quote-card-sender" id="quoteCardSender"></div>
       <div class="quote-card-preview" id="quoteCardText"></div>
+      <div id="quoteCardBadge" style="display:none;font-size:10px;color:#06C755;font-weight:700;margin-top:2px">✓ 原生引用卡片（客戶會看到）</div>
     </div>
     <button class="quote-card-close" onclick="clearQuote()">×</button>
   </div>
@@ -1802,12 +1805,16 @@ function renderMsgs(msgs){
     const safeSender = senderName.replace(/'/g,"\\'").slice(0,30);
     const safeToken = (m.quote_token||'').replace(/'/g,"\\'");
     const safeImg = (m.image_url||'').replace(/'/g,"\\'");
+    const hasQt = !!safeToken;
     const quoteCall = `setQuote('${safePreview}','${safeSender}','${safeToken}','${safeImg}')`;
+    const replyBtn = hasQt
+      ? `<button class="msg-act-btn" onclick="${quoteCall}">↩ 回覆</button>`
+      : `<button class="msg-act-btn no-qt" disabled title="舊訊息無法原生引用">↩ 舊訊息</button>`;
     return `<div class="msg-row ${isMe?'me':'them'}">
-      <div class="msg-bubble" ondblclick="${quoteCall}" title="雙擊引用回覆">${content}</div>
+      <div class="msg-bubble"${hasQt?` ondblclick="${quoteCall}" title="雙擊引用"`:''}>${content}</div>
       <span class="msg-time">${time}</span>
       <div class="msg-actions">
-        <button class="msg-act-btn" onclick="${quoteCall}">↩ 回覆</button>
+        ${replyBtn}
       </div>
     </div>`;
   }).join('');
@@ -1849,9 +1856,10 @@ let _quoteText = '';
 let _quoteToken = '';
 
 function setQuote(text, sender, token, imgUrl){
+  if(!token){ return; }
   _quoteText = text;
-  _quoteToken = token || '';
-  console.log('[QUOTE SET]', {text:text.slice(0,40), sender, token: _quoteToken||'(空)', hasImg:!!imgUrl});
+  _quoteToken = token;
+  console.log('[QUOTE SET]', {text:text.slice(0,40), sender, token: _quoteToken, hasImg:!!imgUrl});
   document.getElementById('quoteCardSender').textContent = sender || '回覆';
   const imgEl = document.getElementById('quoteCardImg');
   const isImg = imgUrl && !/sticker/i.test(imgUrl);
@@ -1864,6 +1872,7 @@ function setQuote(text, sender, token, imgUrl){
     imgEl.src = '';
     document.getElementById('quoteCardText').textContent = text;
   }
+  document.getElementById('quoteCardBadge').style.display = 'block';
   document.getElementById('quoteCard').classList.add('show');
   document.getElementById('replyInput').focus();
 }
@@ -1873,6 +1882,7 @@ function clearQuote(){
   _quoteToken = '';
   document.getElementById('quoteCardSender').textContent = '';
   document.getElementById('quoteCardText').textContent = '';
+  document.getElementById('quoteCardBadge').style.display = 'none';
   const imgEl = document.getElementById('quoteCardImg');
   imgEl.style.display = 'none';
   imgEl.src = '';
