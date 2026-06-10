@@ -867,22 +867,25 @@ def line_push(user_id: str, text: str, quote_token: str = "") -> str:
     msg = {"type": "text", "text": text}
     if quote_token:
         msg["quoteToken"] = quote_token
-    payload = json.dumps({"to": user_id, "messages": [msg]}).encode()
+    full_payload = {"to": user_id, "messages": [msg]}
+    print(f"[LINE PUSH PAYLOAD] {json.dumps(full_payload, ensure_ascii=False)}", flush=True)
+    payload = json.dumps(full_payload).encode()
     req = urllib.request.Request(url, data=payload, headers={
         "Content-Type": "application/json",
         "Authorization": f"Bearer {LINE_CHANNEL_ACCESS_TOKEN}"
     })
     try:
         with urllib.request.urlopen(req) as r:
-            resp = json.loads(r.read().decode("utf-8", errors="ignore"))
+            resp_body = r.read()
+            resp = json.loads(resp_body.decode("utf-8", errors="ignore"))
             sent_qt = (resp.get("sentMessages") or [{}])[0].get("quoteToken", "")
-            print(f"[LINE PUSH OK] user={user_id} quoteToken={bool(sent_qt)}", flush=True)
+            print(f"[LINE PUSH RESP] status={r.status} sentMessages={resp.get('sentMessages')} sent_qt={sent_qt!r}", flush=True)
             return sent_qt
     except urllib.error.HTTPError as e:
         body = e.read().decode("utf-8", errors="ignore")
-        print(f"[LINE PUSH ERROR] user={user_id} status={e.code} body={body}", flush=True)
+        print(f"[LINE PUSH ERROR] status={e.code} body={body}", flush=True)
     except Exception as e:
-        print(f"[LINE PUSH ERROR] user={user_id} error={e}", flush=True)
+        print(f"[LINE PUSH ERROR] {e}", flush=True)
     return ""
 
 def _parse_sent_qt(resp_body: bytes) -> str:
@@ -1848,6 +1851,7 @@ let _quoteToken = '';
 function setQuote(text, sender, token, imgUrl){
   _quoteText = text;
   _quoteToken = token || '';
+  console.log('[QUOTE SET]', {text:text.slice(0,40), sender, token: _quoteToken||'(空)', hasImg:!!imgUrl});
   document.getElementById('quoteCardSender').textContent = sender || '回覆';
   const imgEl = document.getElementById('quoteCardImg');
   const isImg = imgUrl && !/sticker/i.test(imgUrl);
@@ -1882,18 +1886,21 @@ async function sendReply(){
   if(!txt) return;
   const sendQuoteToken = _quoteToken;
   const finalMsg = txt;
+  console.log('[SEND] quoteToken=', sendQuoteToken||'(空)', ' msg=', finalMsg.slice(0,40));
   inp.value = '';
   inp.style.height = '';
   clearQuote();
   try{
     const payload = {key:curKey,admin_key:KEY,message:finalMsg};
     if(sendQuoteToken) payload.quote_token = sendQuoteToken;
+    console.log('[PAYLOAD]', JSON.stringify(payload));
     const r = await fetch('/api/reply',{method:'POST',headers:{'Content-Type':'application/json'},
       body:JSON.stringify(payload)});
     const d = await r.json();
+    console.log('[API RESP]', d);
     if(d.ok) await loadMsgs(curKey);
     else toast('發送失敗：'+(d.error||''));
-  }catch(e){toast('發送失敗')}
+  }catch(e){console.error('[SEND ERROR]',e);toast('發送失敗')}
 }
 
 async function generateVideoThumb(file){
@@ -3567,6 +3574,7 @@ def api_reply():
     filename = data.get("filename", "檔案").strip()
     file_size = int(data.get("file_size", 0))
     quote_token = data.get("quote_token", "").strip()
+    print(f"[API REPLY] platform={platform} user={user_id} text={bool(text)} quote_token={quote_token!r}", flush=True)
     if not user_id or (not text and not image_url and not video_url and not file_url):
         return jsonify({"error": "missing fields"}), 400
     try:
