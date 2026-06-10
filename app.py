@@ -121,13 +121,15 @@ def _init_messages_db():
                     updated_at       FLOAT DEFAULT 0
                 )
             """)
-            # migration：補 Phase 2 欄位（已存在則忽略）
+            # migration：補欄位（已存在則忽略）
             for col_sql in [
                 "ALTER TABLE product_jobs ADD COLUMN IF NOT EXISTS processed_images TEXT DEFAULT '[]'",
                 "ALTER TABLE product_jobs ADD COLUMN IF NOT EXISTS img_status TEXT DEFAULT ''",
                 "ALTER TABLE product_jobs ADD COLUMN IF NOT EXISTS raw_extra TEXT DEFAULT '{}'",
                 "ALTER TABLE product_jobs ADD COLUMN IF NOT EXISTS brand TEXT DEFAULT ''",
                 "ALTER TABLE product_jobs ADD COLUMN IF NOT EXISTS product_images TEXT DEFAULT '{}'",
+                "ALTER TABLE messages ADD COLUMN IF NOT EXISTS quote_token TEXT DEFAULT ''",
+                "ALTER TABLE messages ADD COLUMN IF NOT EXISTS reply_quote_token TEXT DEFAULT ''",
             ]:
                 try: cur.execute(col_sql)
                 except Exception: pass
@@ -304,8 +306,9 @@ def _db_insert_message(entry):
             cur = conn.cursor()
             cur.execute("""
                 INSERT INTO messages
-                  (time,platform,user_id,msg,intent,reply,replied,image_url,sticker_url,sent_by)
-                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                  (time,platform,user_id,msg,intent,reply,replied,
+                   image_url,sticker_url,sent_by,quote_token,reply_quote_token)
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
             """, (
                 entry.get("time",""),
                 entry.get("platform",""),
@@ -317,12 +320,31 @@ def _db_insert_message(entry):
                 entry.get("image_url",""),
                 entry.get("sticker_url",""),
                 entry.get("sent_by",""),
+                entry.get("quote_token",""),
+                entry.get("reply_quote_token",""),
             ))
             conn.commit()
             cur.close()
             conn.close()
     except Exception as e:
         import sys; print(f"[DB Insert Error] {e}", file=sys.stderr)
+
+def _db_update_reply_qt(platform: str, user_id: str, time_str: str, reply_qt: str):
+    if not DATABASE_URL or not reply_qt:
+        return
+    try:
+        with _db_lock:
+            conn = _pg_conn()
+            cur = conn.cursor()
+            cur.execute(
+                "UPDATE messages SET reply_quote_token=%s WHERE platform=%s AND user_id=%s AND time=%s",
+                (reply_qt, platform.upper(), user_id, time_str)
+            )
+            conn.commit()
+            cur.close()
+            conn.close()
+    except Exception as e:
+        import sys; print(f"[DB ReplyQT Error] {e}", file=sys.stderr)
 
 def _load_logs_from_db():
     if not DATABASE_URL:
@@ -331,7 +353,9 @@ def _load_logs_from_db():
         conn = _pg_conn()
         cur = conn.cursor()
         cur.execute("""
-            SELECT time,platform,user_id,msg,intent,reply,replied,image_url,sticker_url,sent_by
+            SELECT time,platform,user_id,msg,intent,reply,replied,
+                   image_url,sticker_url,sent_by,
+                   COALESCE(quote_token,''),COALESCE(reply_quote_token,'')
             FROM messages ORDER BY id DESC
         """)
         rows = cur.fetchall()
@@ -344,6 +368,7 @@ def _load_logs_from_db():
                 "msg": r[3], "intent": r[4], "reply": r[5],
                 "replied": bool(r[6]), "image_url": r[7] or "",
                 "sticker_url": r[8] or "", "sent_by": r[9] or "",
+                "quote_token": r[10] or "", "reply_quote_token": r[11] or "",
             })
         return d
     except Exception as e:
@@ -600,6 +625,7 @@ def handle_line_message(event):
     quote_token = getattr(event.message, 'quote_token', '') or ''
     print(f"[LINE MSG] user={user_id} text={msg_text[:30]!r}", flush=True)
     text, image_url = get_reply(msg_text, user_id, "line", quote_token=quote_token)
+    msg_time = message_log[0].get("time","") if message_log else ""
     print(f"[LINE REPLY PLAN] text={bool(text)} image={bool(image_url)}", flush=True)
     if not text and not image_url:
         print("[LINE REPLY PLAN] no reply (intent off or manual mode)", flush=True)
@@ -611,9 +637,18 @@ def handle_line_message(event):
         messages.append(ImageMessage(original_content_url=image_url, preview_image_url=image_url))
     try:
         with ApiClient(configuration) as api_client:
-            MessagingApi(api_client).reply_message_with_http_info(
+            resp, _status, _hdrs = MessagingApi(api_client).reply_message_with_http_info(
                 ReplyMessageRequest(reply_token=event.reply_token, messages=messages)
             )
+        try:
+            sent = getattr(resp, "sent_messages", None) or []
+            reply_qt = getattr(sent[0], "quote_token", "") if sent else ""
+            if reply_qt and message_log:
+                message_log[0]["reply_quote_token"] = reply_qt
+                threading.Thread(target=_db_update_reply_qt,
+                    args=("LINE", user_id, msg_time, reply_qt), daemon=True).start()
+        except Exception:
+            pass
         print(f"[LINE REPLY OK] user={user_id}", flush=True)
     except Exception as e:
         print(f"[LINE REPLY ERROR] user={user_id} error={e}", flush=True)
@@ -850,43 +885,53 @@ def line_push(user_id: str, text: str, quote_token: str = "") -> str:
         print(f"[LINE PUSH ERROR] user={user_id} error={e}", flush=True)
     return ""
 
-def line_push_video(user_id: str, video_url: str, preview_url: str):
+def _parse_sent_qt(resp_body: bytes) -> str:
+    try:
+        resp = json.loads(resp_body.decode("utf-8", errors="ignore"))
+        return (resp.get("sentMessages") or [{}])[0].get("quoteToken", "")
+    except Exception:
+        return ""
+
+def line_push_video(user_id: str, video_url: str, preview_url: str) -> str:
     url = "https://api.line.me/v2/bot/message/push"
     payload = json.dumps({"to": user_id, "messages": [{"type": "video",
         "originalContentUrl": video_url, "previewImageUrl": preview_url}]}).encode()
     req = urllib.request.Request(url, data=payload, headers={
         "Content-Type": "application/json", "Authorization": f"Bearer {LINE_CHANNEL_ACCESS_TOKEN}"})
     try:
-        urllib.request.urlopen(req)
+        with urllib.request.urlopen(req) as r:
+            return _parse_sent_qt(r.read())
     except Exception:
         pass
+    return ""
 
-def line_push_image(user_id: str, image_url: str):
+def line_push_image(user_id: str, image_url: str) -> str:
     url = "https://api.line.me/v2/bot/message/push"
-    payload = json.dumps({"to": user_id, "messages": [{"type": "image", "originalContentUrl": image_url, "previewImageUrl": image_url}]}).encode()
-    req = urllib.request.Request(url, data=payload, headers={"Content-Type": "application/json", "Authorization": f"Bearer {LINE_CHANNEL_ACCESS_TOKEN}"})
+    payload = json.dumps({"to": user_id, "messages": [{"type": "image",
+        "originalContentUrl": image_url, "previewImageUrl": image_url}]}).encode()
+    req = urllib.request.Request(url, data=payload, headers={
+        "Content-Type": "application/json", "Authorization": f"Bearer {LINE_CHANNEL_ACCESS_TOKEN}"})
     try:
-        urllib.request.urlopen(req)
+        with urllib.request.urlopen(req) as r:
+            return _parse_sent_qt(r.read())
     except Exception:
         pass
+    return ""
 
-def line_push_file(user_id: str, file_url: str, filename: str, file_size: int = 0):
+def line_push_file(user_id: str, file_url: str, filename: str, file_size: int = 0) -> str:
     url = "https://api.line.me/v2/bot/message/push"
     payload = json.dumps({"to": user_id, "messages": [{
-        "type": "file",
-        "originalContentUrl": file_url,
-        "fileName": filename,
-        "fileSize": file_size
+        "type": "file", "originalContentUrl": file_url,
+        "fileName": filename, "fileSize": file_size
     }]}).encode()
     req = urllib.request.Request(url, data=payload, headers={
-        "Content-Type": "application/json",
-        "Authorization": f"Bearer {LINE_CHANNEL_ACCESS_TOKEN}"
-    })
+        "Content-Type": "application/json", "Authorization": f"Bearer {LINE_CHANNEL_ACCESS_TOKEN}"})
     try:
-        urllib.request.urlopen(req)
+        with urllib.request.urlopen(req) as r:
+            return _parse_sent_qt(r.read())
     except Exception:
-        # fallback: send as text link
         line_push(user_id, f"📎 {filename}\n{file_url}")
+    return ""
 
 def fb_send_file(psid: str, file_url: str):
     url = f"https://graph.facebook.com/v22.0/me/messages?access_token={FB_PAGE_ACCESS_TOKEN}"
@@ -1823,7 +1868,7 @@ async function sendReply(){
   const txt = inp.value.trim();
   if(!txt) return;
   const sendQuoteToken = _quoteToken;
-  const finalMsg = (!sendQuoteToken && _quoteText) ? `「${_quoteText}」\n${txt}` : txt;
+  const finalMsg = txt;
   inp.value = '';
   inp.style.height = '';
   clearQuote();
@@ -3418,7 +3463,8 @@ def api_messages():
                              "image_url": l.get("image_url", ""), "sticker_url": l.get("sticker_url", ""),
                              "quote_token": l.get("quote_token", "")})
             if l.get("reply") and l.get("replied"):
-                msgs.append({"role": "admin", "content": l["reply"], "ts": ts + 1})
+                msgs.append({"role": "admin", "content": l["reply"], "ts": ts + 1,
+                             "quote_token": l.get("reply_quote_token", "")})
     return jsonify({"messages": msgs})
 
 @app.route("/api/conversations")
@@ -3511,12 +3557,12 @@ def api_reply():
     if not user_id or (not text and not image_url and not video_url and not file_url):
         return jsonify({"error": "missing fields"}), 400
     try:
-        sent_quote_token = ""
+        sent_quote_token = img_quote_token = vid_quote_token = file_quote_token = ""
         if platform == "LINE":
             if text: sent_quote_token = line_push(user_id, text, quote_token=quote_token)
-            if image_url: line_push_image(user_id, image_url)
-            if video_url: line_push_video(user_id, video_url, preview_url or video_url)
-            if file_url: line_push_file(user_id, file_url, filename, file_size)
+            if image_url: img_quote_token = line_push_image(user_id, image_url)
+            if video_url: vid_quote_token = line_push_video(user_id, video_url, preview_url or video_url)
+            if file_url: file_quote_token = line_push_file(user_id, file_url, filename, file_size)
         elif platform == "FB":
             if text: fb_send(user_id, text)
             if image_url: fb_send_image(user_id, image_url)
@@ -3532,15 +3578,15 @@ def api_reply():
         if image_url:
             log_message({"time": now, "platform": platform, "user_id": user_id,
                          "msg": "", "intent": "manual", "reply": "", "replied": True,
-                         "image_url": image_url, "sent_by": "admin"})
+                         "image_url": image_url, "sent_by": "admin", "quote_token": img_quote_token})
         if video_url:
             log_message({"time": now, "platform": platform, "user_id": user_id,
                          "msg": "", "intent": "manual", "reply": "", "replied": True,
-                         "image_url": video_url, "sent_by": "admin"})
+                         "image_url": video_url, "sent_by": "admin", "quote_token": vid_quote_token})
         if file_url:
             log_message({"time": now, "platform": platform, "user_id": user_id,
                          "msg": "", "intent": "manual", "reply": f"[檔案] {filename}", "replied": True,
-                         "sent_by": "admin"})
+                         "sent_by": "admin", "quote_token": file_quote_token})
         return jsonify({"ok": True})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
