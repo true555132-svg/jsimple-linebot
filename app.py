@@ -1164,6 +1164,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
   .takeover-btn{font-size:11px;padding:4px 8px}
   .btn-icon{width:34px;height:34px;font-size:15px}
   .input-area{padding:6px 8px;gap:4px}
+  .msg-bubble{max-width:72%}
 }
 
 /* LEFT SIDEBAR */
@@ -1225,7 +1226,8 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
 .rfbtn.active{background:#e8f4fd;border-color:#0d6efd;color:#0d6efd}
 
 /* MIDDLE CHAT */
-.chat-main{display:flex;flex-direction:column;overflow:hidden;background:#f8f9fa}
+/* ── CHAT MAIN (LINE OA 風格) ─────────────────────────── */
+.chat-main{display:flex;flex-direction:column;overflow:hidden;background:#ebebeb}
 .chat-header{background:#fff;border-bottom:1px solid #e8eaed;padding:10px 16px;display:flex;align-items:center;gap:10px;flex-shrink:0}
 .chat-header-avatar{width:36px;height:36px;border-radius:50%;object-fit:cover;background:#e8eaed}
 .chat-header-info{flex:1;min-width:0}
@@ -1233,36 +1235,47 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
 .chat-header-sub{font-size:11px;color:#9aa0a6}
 .status-select{padding:4px 8px;border:1.5px solid #ddd;border-radius:20px;font-size:11px;font-weight:600;cursor:pointer;outline:none;color:#555;background:#fff}
 .takeover-btn{padding:5px 12px;border-radius:20px;font-size:11px;font-weight:700;border:none;cursor:pointer}
-.takeover-on{background:#0d6efd;color:#fff}.takeover-off{background:#e8eaed;color:#555}
+.takeover-on{background:#06C755;color:#fff}.takeover-off{background:#e8eaed;color:#555}
 
-.msg-area{flex:1;overflow-y:auto;padding:16px;display:flex;flex-direction:column;gap:10px}
+/* 訊息區 */
+.msg-area{flex:1;overflow-y:auto;padding:12px 14px;display:flex;flex-direction:column;gap:2px}
 .msg-area::-webkit-scrollbar{width:4px}
-.msg-area::-webkit-scrollbar-thumb{background:#ddd;border-radius:2px}
-.msg-row{display:flex;gap:8px;align-items:flex-end;position:relative}
+.msg-area::-webkit-scrollbar-thumb{background:#ccc;border-radius:2px}
+
+/* 訊息列 */
+.msg-row{display:flex;gap:5px;align-items:flex-end;position:relative;padding:1px 0}
 .msg-row.me{flex-direction:row-reverse}
-.msg-bubble{max-width:72%;padding:8px 12px;border-radius:16px;font-size:13px;line-height:1.5;word-break:break-word}
-.msg-row.them .msg-bubble{background:#fff;border-bottom-left-radius:4px;box-shadow:0 1px 2px rgba(0,0,0,.06)}
-.msg-row.me .msg-bubble{background:#0d6efd;color:#fff;border-bottom-right-radius:4px}
-.msg-actions{display:none;position:absolute;top:-34px;background:#fff;border:1px solid #e4e6ea;border-radius:20px;padding:3px 6px;box-shadow:0 2px 12px rgba(0,0,0,.18);z-index:10;align-items:center;gap:0;white-space:nowrap}
-.msg-row.them .msg-actions{left:38px}
-.msg-row.me .msg-actions{right:0}
+.msg-row.them+.msg-row.me,.msg-row.me+.msg-row.them{margin-top:8px}
+
+/* 泡泡 */
+.msg-bubble{max-width:58%;padding:8px 11px;border-radius:18px;font-size:13.5px;line-height:1.55;word-break:break-word;white-space:pre-wrap}
+.msg-row.them .msg-bubble{background:#fff;border-bottom-left-radius:4px;box-shadow:0 1px 2px rgba(0,0,0,.1);color:#1a1a1a}
+.msg-row.me .msg-bubble{background:#95EC69;color:#1a1a1a;border-bottom-right-radius:4px}
+
+/* hover 回覆選單 */
+.msg-actions{display:none;position:absolute;top:-32px;background:#fff;border:1px solid #e0e0e0;border-radius:18px;padding:2px 5px;box-shadow:0 2px 10px rgba(0,0,0,.15);z-index:10;align-items:center;white-space:nowrap}
+.msg-row.them .msg-actions{left:4px}
+.msg-row.me .msg-actions{right:4px}
 .msg-row:hover .msg-actions{display:flex}
-.msg-act-btn{background:none;border:none;cursor:pointer;padding:5px 14px;border-radius:14px;font-size:13px;color:#333;font-weight:500;transition:.15s;line-height:1.4}
-.msg-act-btn:hover{background:#f0f4ff;color:#0d6efd}
-.msg-act-sep{width:1px;height:18px;background:#e4e6ea;flex-shrink:0;margin:0 2px}
-.quote-card{display:none;background:#f0f4ff;border-left:4px solid #0d6efd;padding:10px 14px;margin:0;flex-shrink:0;align-items:center;gap:10px;border-top:1px solid #dce6ff}
+.msg-act-btn{background:none;border:none;cursor:pointer;padding:4px 12px;border-radius:12px;font-size:12px;color:#444;font-weight:500;transition:.15s}
+.msg-act-btn:hover{background:#f0f4ff;color:#06C755}
+
+/* 輸入區引用卡片 */
+.quote-card{display:none;background:#f5fff5;border-left:4px solid #06C755;padding:8px 12px;margin:0;flex-shrink:0;align-items:center;gap:10px;border-top:1px solid #d4f5d4}
 .quote-card.show{display:flex}
-.quote-card-icon{font-size:20px;flex-shrink:0;color:#0d6efd}
+.quote-card-icon{font-size:18px;flex-shrink:0;color:#06C755}
 .quote-card-body{flex:1;min-width:0}
-.quote-card-sender{font-size:11px;font-weight:700;color:#0d6efd;margin-bottom:2px}
-.quote-card-preview{font-size:13px;color:#333;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.quote-card-close{background:none;border:none;cursor:pointer;font-size:22px;color:#9aa0a6;padding:0 4px;line-height:1;flex-shrink:0}
+.quote-card-sender{font-size:11px;font-weight:700;color:#06C755;margin-bottom:2px}
+.quote-card-preview{font-size:12px;color:#333;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.quote-card-close{background:none;border:none;cursor:pointer;font-size:20px;color:#9aa0a6;padding:0 4px;line-height:1;flex-shrink:0}
 .quote-card-close:hover{color:#333}
-.msg-img{max-width:220px;border-radius:12px;cursor:pointer}
-.msg-sticker{width:100px}
-.msg-time{font-size:10px;color:#9aa0a6;white-space:nowrap}
+
+/* 圖片縮圖 */
+.msg-img{max-width:180px;max-height:180px;border-radius:10px;cursor:pointer;display:block;object-fit:cover}
+.msg-sticker{width:80px;height:80px;object-fit:contain}
+.msg-time{font-size:10px;color:#888;white-space:nowrap;padding-bottom:3px;flex-shrink:0;line-height:1.2}
 .msg-avatar{width:28px;height:28px;border-radius:50%;object-fit:cover;background:#e8eaed;flex-shrink:0}
-.sys-msg{text-align:center;font-size:11px;color:#9aa0a6;padding:4px 0}
+.sys-msg{text-align:center;font-size:11px;color:#888;padding:6px 0;background:rgba(0,0,0,.04);border-radius:12px;margin:6px 20px}
 
 .tpl-panel{background:#fff;border-top:1px solid #e8eaed;display:none;flex-direction:column;max-height:280px}
 .tpl-panel.open{display:flex}
