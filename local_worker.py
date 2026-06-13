@@ -53,6 +53,12 @@ def get_pending_jobs():
 def post_result(job_id, data):
     return api_post(f"/api/products/{job_id}/scrape-result", data)
 
+def get_pending_scan_jobs():
+    return api_get("/api/store-scan/pending").get("jobs", [])
+
+def post_scan_result(scan_job_id, data):
+    return api_post(f"/api/store-scan/{scan_job_id}/result", data)
+
 
 # ── 圖片工具 ─────────────────────────────────────────────────
 
@@ -443,8 +449,9 @@ def scrape_1688(page, url):
             result["raw_price"] = str(js_data["price"])
         result["raw_extra"].update({k: v for k, v in js_data.items() if v and k in ("sku","specs")})
         result["_sku_imgs"] = js_data.get("skuImgs", [])
-    except Exception:
-        pass
+        print(f"    [JS] title={bool(js_data.get('title'))} skuImgs={len(result['_sku_imgs'])} err={js_data.get('err','')}")
+    except Exception as e:
+        print(f"    [JS ERROR] {e}")
 
     if not result["raw_title"]:
         for sel in [".title-text", ".mod-detail-title h1", ".offer-title", ".detail-title"]:
@@ -565,6 +572,124 @@ def scrape_taobao(page, url):
     return result
 
 
+# ── Store Scan（Phase 1）────────────────────────────────────
+
+_SCAN_1688_JS = """() => {
+    const items = [];
+    const seen = new Set();
+    const selectors = [
+        '.offer-list-row-offer', '.J_offerItem',
+        '[class*="offerItem"]', '[class*="offer-item"]',
+        '.list-item', '[class*="listItem"]',
+    ];
+    let cards = [];
+    for (const sel of selectors) {
+        cards = [...document.querySelectorAll(sel)];
+        if (cards.length > 0) break;
+    }
+    for (const card of cards) {
+        try {
+            const titleEl = card.querySelector('a.title,a[title],.title a,h4 a,[class*="title"] a');
+            if (!titleEl) continue;
+            const url = titleEl.href || '';
+            if (seen.has(url) || !url.includes('1688.com')) continue;
+            seen.add(url);
+            const title = (titleEl.textContent || titleEl.getAttribute('title') || '').trim();
+            const imgEl = card.querySelector('img');
+            let image = '';
+            if (imgEl) {
+                image = imgEl.src || imgEl.dataset.src || imgEl.getAttribute('data-lazyload') || '';
+                if (image.startsWith('//')) image = 'https:' + image;
+            }
+            const priceEl = card.querySelector('[class*="price"] strong,[class*="price-num"],[class*="price-text"],.price strong');
+            const price = priceEl ? priceEl.textContent.trim() : '';
+            const shopEl = card.querySelector('[class*="company"] a,[class*="shopName"] a,.company-name a');
+            const shop_name = shopEl ? shopEl.textContent.trim() : '';
+            if (title && url) items.push({ title, url, image, price, shop_name });
+        } catch(e) {}
+    }
+    return items;
+}"""
+
+_SCAN_TAOBAO_JS = """() => {
+    const items = [];
+    const seen = new Set();
+    const selectors = ['.item','[class*="Card--"]','[class*="item--"]','[class*="ItemCard"]'];
+    let cards = [];
+    for (const sel of selectors) {
+        cards = [...document.querySelectorAll(sel)];
+        if (cards.length > 1) break;
+    }
+    for (const card of cards) {
+        try {
+            const titleEl = card.querySelector('[class*="title"] a,a[title],h4 a,.title a');
+            if (!titleEl) continue;
+            let url = titleEl.href || '';
+            if (!url.startsWith('http')) url = 'https:' + url;
+            if (seen.has(url)) continue;
+            seen.add(url);
+            const title = (titleEl.textContent || titleEl.getAttribute('title') || '').trim();
+            const imgEl = card.querySelector('img');
+            let image = '';
+            if (imgEl) {
+                image = imgEl.src || imgEl.dataset.src || '';
+                if (image.startsWith('//')) image = 'https:' + image;
+            }
+            const priceEl = card.querySelector('[class*="price"]');
+            const price = priceEl ? priceEl.textContent.trim().replace(/[^\\d.~\\-]/g,'') : '';
+            const shopEl = card.querySelector('[class*="shop"] a,[class*="store"] a');
+            const shop_name = shopEl ? shopEl.textContent.trim() : '';
+            if (title && url) items.push({ title, url, image, price, shop_name });
+        } catch(e) {}
+    }
+    return items;
+}"""
+
+
+def scan_store_page(page, url, limit=50):
+    """Phase 1：掃描店鋪/分類頁，只抓當前頁面商品卡片，不翻頁。"""
+    from datetime import datetime
+    platform = '1688' if '1688.com' in url else 'taobao' if 'taobao.com' in url else 'unknown'
+    if platform == 'unknown':
+        return {"platform": platform, "items": [], "error": "不支援的平台"}
+
+    print(f"    [Scan] {platform.upper()} 載入...")
+    page.goto(url, wait_until="domcontentloaded", timeout=30000)
+    page.wait_for_timeout(3000)
+
+    # 輕度捲動觸發 lazy load（不做完整詳情頁那種深度捲動）
+    for i in range(1, 4):
+        page.evaluate(f"window.scrollTo(0, document.body.scrollHeight * {i} / 3)")
+        page.wait_for_timeout(700)
+    page.evaluate("window.scrollTo(0, 0)")
+    page.wait_for_timeout(500)
+
+    scraped_at = datetime.now().strftime("%Y-%m-%d %H:%M")
+    try:
+        js = _SCAN_1688_JS if platform == '1688' else _SCAN_TAOBAO_JS
+        raw = page.evaluate(js)
+    except Exception as e:
+        print(f"    [Scan] JS 失敗: {e}")
+        return {"platform": platform, "items": [], "error": str(e)}
+
+    items = []
+    for it in (raw or [])[:limit]:
+        img = it.get("image", "")
+        if img.startswith("//"): img = "https:" + img
+        items.append({
+            "title":      it.get("title", "")[:200],
+            "url":        it.get("url", ""),
+            "image":      img,
+            "price":      it.get("price", "")[:50],
+            "shop_name":  it.get("shop_name", "")[:100],
+            "platform":   platform,
+            "scraped_at": scraped_at,
+        })
+
+    print(f"    [Scan] 抓到 {len(items)} 筆")
+    return {"platform": platform, "items": items}
+
+
 # ── 登入模式 ─────────────────────────────────────────────────
 
 def login_mode(pw):
@@ -624,6 +749,28 @@ def run(pw):
 
     while True:
         try:
+            # 先處理店鋪掃描任務（scan jobs）
+            scan_jobs = get_pending_scan_jobs()
+            if scan_jobs:
+                idle = 0
+                for sj in scan_jobs:
+                    sj_id, sj_url, sj_platform = sj["id"], sj["url"], sj["platform"]
+                    print(f"[掃描 #{sj_id}] {sj_platform.upper()} {sj_url[:65]}...")
+                    page = context.new_page()
+                    try:
+                        result = scan_store_page(page, sj_url, limit=50)
+                        r = post_scan_result(sj_id, result)
+                        if r.get("ok"):
+                            print(f"  ✓ 掃描完成（{r.get('count', 0)} 筆）")
+                        else:
+                            print(f"  ✗ 回傳失敗: {r}")
+                    except Exception as e:
+                        print(f"  [錯誤] {e}")
+                        try: post_scan_result(sj_id, {"error": str(e)})
+                        except Exception: pass
+                    finally:
+                        page.close()
+
             jobs = get_pending_jobs()
             if jobs:
                 idle = 0
@@ -727,10 +874,30 @@ def test_mode(pw, test_url):
 if __name__ == "__main__":
     login = "--login" in sys.argv
     test  = "--test"  in sys.argv
+    scan  = "--scan"  in sys.argv
 
     with sync_playwright() as pw:
         if login:
             login_mode(pw)
+        elif scan:
+            idx = sys.argv.index("--scan")
+            if idx + 1 >= len(sys.argv):
+                print("用法：python local_worker.py --scan <URL>")
+                sys.exit(1)
+            scan_url = sys.argv[idx + 1]
+            if not Path(PROFILE_DIR).exists():
+                print("\n[提示] 尚未登入，請先執行：python local_worker.py --login\n")
+                sys.exit(0)
+            context = pw.chromium.launch_persistent_context(
+                user_data_dir=PROFILE_DIR, headless=HEADLESS,
+                args=["--no-sandbox", "--disable-blink-features=AutomationControlled"],
+                viewport={"width": 1280, "height": 800},
+            )
+            page = context.new_page()
+            result = scan_store_page(page, scan_url)
+            page.close(); context.close()
+            import json as _json
+            print(_json.dumps(result, ensure_ascii=False, indent=2))
         elif test:
             idx = sys.argv.index("--test")
             if idx + 1 >= len(sys.argv):

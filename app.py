@@ -164,6 +164,35 @@ def _init_messages_db():
                         "INSERT INTO brand_profiles(brand_key,name,category,style,tone,custom_prompt,updated_at) VALUES(%s,%s,%s,%s,%s,%s,%s)",
                         (*row, 0)
                     )
+            # store_scan_jobs / store_scan_items（Phase 1 店鋪選品）
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS store_scan_jobs (
+                    id          SERIAL PRIMARY KEY,
+                    url         TEXT DEFAULT '',
+                    platform    TEXT DEFAULT '',
+                    status      TEXT DEFAULT 'pending',
+                    item_count  INTEGER DEFAULT 0,
+                    error_msg   TEXT DEFAULT '',
+                    created_at  FLOAT DEFAULT 0,
+                    updated_at  FLOAT DEFAULT 0
+                )
+            """)
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS store_scan_items (
+                    id             SERIAL PRIMARY KEY,
+                    scan_job_id    INTEGER NOT NULL,
+                    title          TEXT DEFAULT '',
+                    url            TEXT DEFAULT '',
+                    image          TEXT DEFAULT '',
+                    price          TEXT DEFAULT '',
+                    shop_name      TEXT DEFAULT '',
+                    platform       TEXT DEFAULT '',
+                    scraped_at     TEXT DEFAULT '',
+                    added_to_queue BOOLEAN DEFAULT FALSE,
+                    created_at     FLOAT DEFAULT 0
+                )
+            """)
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_scan_items_job ON store_scan_items(scan_job_id)")
             conn.commit()
             cur.close()
             conn.close()
@@ -4109,6 +4138,104 @@ def _pj_delete(job_id):
     except Exception:
         pass
 
+# ── Store Scan DB helpers ─────────────────────────────────────
+
+def _ss_insert(url, platform):
+    if not DATABASE_URL:
+        return None
+    try:
+        with _db_lock:
+            conn = _pg_conn(); cur = conn.cursor()
+            cur.execute(
+                "INSERT INTO store_scan_jobs (url,platform,status,created_at,updated_at) VALUES (%s,%s,'pending',%s,%s) RETURNING id",
+                (url, platform, time.time(), time.time())
+            )
+            job_id = cur.fetchone()[0]
+            conn.commit(); cur.close(); conn.close()
+            return job_id
+    except Exception as e:
+        import sys; print(f"[SS Insert] {e}", file=sys.stderr)
+        return None
+
+def _ss_update(job_id, **fields):
+    if not DATABASE_URL or not fields:
+        return
+    try:
+        fields["updated_at"] = time.time()
+        set_clause = ", ".join(f"{k}=%s" for k in fields)
+        with _db_lock:
+            conn = _pg_conn(); cur = conn.cursor()
+            cur.execute(f"UPDATE store_scan_jobs SET {set_clause} WHERE id=%s", list(fields.values()) + [job_id])
+            conn.commit(); cur.close(); conn.close()
+    except Exception as e:
+        import sys; print(f"[SS Update] {e}", file=sys.stderr)
+
+def _ss_get(job_id):
+    if not DATABASE_URL:
+        return None
+    try:
+        conn = _pg_conn(); cur = conn.cursor()
+        cur.execute(
+            "SELECT id,url,platform,status,item_count,error_msg,created_at FROM store_scan_jobs WHERE id=%s",
+            (job_id,)
+        )
+        row = cur.fetchone()
+        if not row:
+            cur.close(); conn.close(); return None
+        result = {"id":row[0],"url":row[1],"platform":row[2],"status":row[3],"item_count":row[4],"error_msg":row[5],"created_at":row[6]}
+        cur.execute(
+            "SELECT id,title,url,image,price,shop_name,platform,scraped_at,added_to_queue FROM store_scan_items WHERE scan_job_id=%s ORDER BY id ASC",
+            (job_id,)
+        )
+        result["items"] = [{"id":r[0],"title":r[1],"url":r[2],"image":r[3],"price":r[4],"shop_name":r[5],"platform":r[6],"scraped_at":r[7],"added_to_queue":bool(r[8])} for r in cur.fetchall()]
+        cur.close(); conn.close()
+        return result
+    except Exception:
+        return None
+
+def _ss_list(limit=20):
+    if not DATABASE_URL:
+        return []
+    try:
+        conn = _pg_conn(); cur = conn.cursor()
+        cur.execute(
+            "SELECT id,url,platform,status,item_count,created_at FROM store_scan_jobs ORDER BY created_at DESC LIMIT %s",
+            (limit,)
+        )
+        rows = cur.fetchall(); cur.close(); conn.close()
+        return [{"id":r[0],"url":r[1],"platform":r[2],"status":r[3],"item_count":r[4],"created_at":r[5]} for r in rows]
+    except Exception:
+        return []
+
+def _ss_insert_items(scan_job_id, items):
+    if not DATABASE_URL or not items:
+        return 0
+    try:
+        with _db_lock:
+            conn = _pg_conn(); cur = conn.cursor()
+            now = time.time()
+            for it in items:
+                cur.execute(
+                    "INSERT INTO store_scan_items (scan_job_id,title,url,image,price,shop_name,platform,scraped_at,created_at) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+                    (scan_job_id, it.get("title","")[:200], it.get("url",""), it.get("image",""), it.get("price","")[:50], it.get("shop_name","")[:100], it.get("platform",""), it.get("scraped_at",""), now)
+                )
+            conn.commit(); cur.close(); conn.close()
+            return len(items)
+    except Exception as e:
+        import sys; print(f"[SS InsertItems] {e}", file=sys.stderr)
+        return 0
+
+def _ss_mark_added(item_ids):
+    if not DATABASE_URL or not item_ids:
+        return
+    try:
+        with _db_lock:
+            conn = _pg_conn(); cur = conn.cursor()
+            cur.execute("UPDATE store_scan_items SET added_to_queue=TRUE WHERE id=ANY(%s)", (item_ids,))
+            conn.commit(); cur.close(); conn.close()
+    except Exception as e:
+        import sys; print(f"[SS MarkAdded] {e}", file=sys.stderr)
+
 # ── 圖片處理工具 ─────────────────────────────────────────────
 
 def _clean_images(urls):
@@ -4540,6 +4667,271 @@ async function save(bk) {
 
 # ── HTML 模板 ─────────────────────────────────────────────────
 
+STORE_SCAN_HTML = """<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>店鋪選品掃描</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:-apple-system,sans-serif;background:#f5f5f5;color:#333}
+.header{background:#1a1a1a;color:#fff;padding:14px 20px;display:flex;align-items:center;gap:14px}
+.header a{color:#888;text-decoration:none;font-size:14px}
+.header a:hover{color:#fff}
+.header-title{font-size:17px;font-weight:700;flex:1}
+.wrap{max-width:960px;margin:0 auto;padding:20px 16px}
+.card{background:#fff;border-radius:14px;padding:20px;margin-bottom:16px;box-shadow:0 1px 4px rgba(0,0,0,.08)}
+.card h3{font-size:14px;font-weight:700;color:#666;margin-bottom:12px}
+.url-row{display:flex;gap:10px}
+.url-row input{flex:1;border:1.5px solid #ddd;border-radius:10px;padding:10px 14px;font-size:14px;outline:none;font-family:inherit}
+.url-row input:focus{border-color:#1a1a1a}
+.btn-primary{background:#1a1a1a;color:#fff;border:none;border-radius:10px;padding:10px 22px;font-size:14px;font-weight:700;cursor:pointer;white-space:nowrap;font-family:inherit}
+.btn-primary:hover{background:#333}
+.btn-primary:disabled{background:#aaa;cursor:default}
+.status-bar{margin-top:12px;font-size:13px;color:#666;min-height:20px}
+.spinner{display:inline-block;width:12px;height:12px;border:2px solid #ddd;border-top-color:#666;border-radius:50%;animation:spin .8s linear infinite;vertical-align:middle;margin-right:4px}
+@keyframes spin{to{transform:rotate(360deg)}}
+/* history */
+.history-row{display:flex;gap:8px;flex-wrap:wrap;margin-top:8px}
+.hist-chip{background:#f0f0f0;border:1.5px solid transparent;border-radius:20px;padding:4px 12px;font-size:12px;cursor:pointer;font-family:inherit}
+.hist-chip:hover{border-color:#1a1a1a}
+.hist-chip.active{background:#1a1a1a;color:#fff}
+.hist-chip .hst{font-size:10px;color:#aaa;margin-left:4px}
+.hist-chip.active .hst{color:#888}
+/* grid */
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:12px;margin-top:4px}
+.item-card{background:#fff;border-radius:12px;border:2px solid transparent;cursor:pointer;overflow:hidden;transition:border-color .15s;position:relative;display:flex;flex-direction:column}
+.item-card:hover{border-color:#ddd}
+.item-card.checked{border-color:#1a1a1a}
+.item-card input[type=checkbox]{position:absolute;top:8px;left:8px;width:16px;height:16px;cursor:pointer;accent-color:#1a1a1a;z-index:2}
+.item-card img{width:100%;aspect-ratio:1;object-fit:cover;background:#f8f8f8}
+.item-info{padding:8px 10px 10px;flex:1;display:flex;flex-direction:column;gap:4px}
+.item-title{font-size:12px;line-height:1.4;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;word-break:break-all}
+.item-price{font-size:13px;font-weight:700;color:#c62828}
+.item-shop{font-size:11px;color:#aaa;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.item-added{font-size:10px;font-weight:700;color:#2e7d32;background:#e8f5e9;border-radius:6px;padding:1px 6px;align-self:flex-start}
+.empty{text-align:center;padding:50px 20px;color:#ccc;font-size:14px}
+/* action bar */
+.action-bar{position:sticky;bottom:0;background:#fff;border-top:1px solid #eee;padding:12px 20px;display:none;align-items:center;gap:12px;z-index:10}
+.brand-sel{border:1.5px solid #ddd;border-radius:10px;padding:8px 12px;font-size:13px;font-family:inherit;outline:none;background:#fff;cursor:pointer}
+.brand-sel:focus{border-color:#1a1a1a}
+.sel-count{font-size:13px;color:#666;flex:1}
+.btn-add{background:#2e7d32;color:#fff;border:none;border-radius:10px;padding:10px 22px;font-size:14px;font-weight:700;cursor:pointer;font-family:inherit}
+.btn-add:hover{background:#1b5e20}
+.btn-add:disabled{background:#aaa;cursor:default}
+.sel-all-row{display:flex;gap:10px;align-items:center;margin-bottom:10px;font-size:13px}
+.sel-all-row button{background:none;border:1.5px solid #ddd;border-radius:20px;padding:3px 12px;font-size:12px;cursor:pointer;font-family:inherit}
+.sel-all-row button:hover{background:#f5f5f5}
+.toast{position:fixed;bottom:80px;left:50%;transform:translateX(-50%);background:#333;color:#fff;padding:9px 20px;border-radius:20px;font-size:14px;z-index:999;opacity:0;transition:opacity .3s;pointer-events:none}
+.toast.show{opacity:1}
+.pf-badge{font-size:11px;font-weight:700;padding:2px 7px;border-radius:7px}
+.pf-1688{background:#fff0f0;color:#c62828}
+.pf-taobao{background:#fff4e5;color:#e65100}
+</style>
+</head>
+<body>
+
+<div class="header">
+  <a href="/admin/products?key={{ key }}">← 商品搬運</a>
+  <div class="header-title">店鋪選品掃描 <span style="font-size:12px;font-weight:400;color:#666">Phase 1</span></div>
+</div>
+
+<div class="wrap">
+
+  <div class="card">
+    <h3>貼上店鋪 / 分類頁連結</h3>
+    <div class="url-row">
+      <input type="text" id="urlInput" placeholder="https://shop.1688.com/... 或 https://shop.taobao.com/...">
+      <button class="btn-primary" id="scanBtn" onclick="startScan()">開始掃描</button>
+    </div>
+    <div class="status-bar" id="statusBar"></div>
+    <div id="historyWrap" style="margin-top:14px;display:none">
+      <div style="font-size:12px;color:#aaa;margin-bottom:6px">最近掃描</div>
+      <div class="history-row" id="historyRow"></div>
+    </div>
+  </div>
+
+  <div class="card" id="itemsCard" style="display:none">
+    <div class="sel-all-row">
+      <span id="scanTitle" style="flex:1;font-size:13px;color:#666"></span>
+      <button onclick="toggleAll(true)">全選</button>
+      <button onclick="toggleAll(false)">全不選</button>
+    </div>
+    <div class="grid" id="itemGrid"></div>
+  </div>
+
+</div>
+
+<div class="action-bar" id="actionBar">
+  <select class="brand-sel" id="brandSel">
+    <option value="">不指定品牌</option>
+    <option value="jsimple">JSIMPLE — 高架床</option>
+    <option value="lander">朗德燈具 — 燈具</option>
+    <option value="filterbreath">濾呼吸 — 濾網</option>
+  </select>
+  <span class="sel-count" id="selCount">已選 0 筆</span>
+  <button class="btn-add" id="addBtn" onclick="addToQueue()">加入待上架</button>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+const KEY = '{{ key }}';
+let currentJobId = null;
+let pollTimer = null;
+
+function esc(s){ return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+
+async function api(path, opts){
+  const sep = path.includes('?')?'&':'?';
+  const r = await fetch(path+sep+'key='+KEY, opts);
+  if(!r.ok) throw new Error(await r.text());
+  return r.json();
+}
+
+function showToast(msg){
+  const t=document.getElementById('toast');
+  t.textContent=msg; t.classList.add('show');
+  setTimeout(()=>t.classList.remove('show'),2800);
+}
+
+async function loadHistory(){
+  try{
+    const d = await api('/api/store-scan');
+    const jobs = d.jobs||[];
+    if(!jobs.length) return;
+    const row = document.getElementById('historyRow');
+    row.innerHTML = jobs.slice(0,8).map(j=>`
+      <span class="hist-chip" onclick="loadJob(${j.id})" data-jid="${j.id}">
+        <span class="pf-badge pf-${esc(j.platform)}">${esc(j.platform)}</span>
+        ${esc((j.url||'').split('/').slice(-2).join('/').slice(-30))}
+        <span class="hst">${j.item_count||0}筆</span>
+      </span>
+    `).join('');
+    document.getElementById('historyWrap').style.display='';
+  }catch(e){}
+}
+
+async function loadJob(jobId){
+  currentJobId = jobId;
+  document.querySelectorAll('.hist-chip').forEach(el=>el.classList.toggle('active',+el.dataset.jid===jobId));
+  document.getElementById('statusBar').innerHTML='<span class="spinner"></span> 載入中...';
+  try{
+    const job = await api('/api/store-scan/'+jobId);
+    updateUI(job);
+    if(job.status==='pending'||job.status==='scanning') startPoll();
+  }catch(e){
+    document.getElementById('statusBar').textContent='載入失敗：'+e.message;
+  }
+}
+
+async function startScan(){
+  const url = document.getElementById('urlInput').value.trim();
+  if(!url){alert('請輸入店鋪/分類頁連結');return;}
+  document.getElementById('scanBtn').disabled=true;
+  document.getElementById('statusBar').innerHTML='<span class="spinner"></span> 建立掃描任務...';
+  document.getElementById('itemsCard').style.display='none';
+  document.getElementById('actionBar').style.display='none';
+  clearTimeout(pollTimer);
+  try{
+    const r = await api('/api/store-scan',{method:'POST',body:JSON.stringify({url}),headers:{'Content-Type':'application/json'}});
+    currentJobId = r.id;
+    await loadHistory();
+    startPoll();
+  }catch(e){
+    document.getElementById('statusBar').textContent='錯誤：'+e.message;
+    document.getElementById('scanBtn').disabled=false;
+  }
+}
+
+function startPoll(){
+  clearTimeout(pollTimer);
+  pollTimer = setTimeout(async()=>{
+    try{
+      const job = await api('/api/store-scan/'+currentJobId);
+      updateUI(job);
+      if(job.status==='pending'||job.status==='scanning') startPoll();
+      else document.getElementById('scanBtn').disabled=false;
+    }catch(e){ startPoll(); }
+  },2500);
+}
+
+function updateUI(job){
+  const sb = document.getElementById('statusBar');
+  if(job.status==='pending'){
+    sb.innerHTML='<span class="spinner"></span> 等待 local_worker 處理...（請確認 worker 正在執行）';
+  }else if(job.status==='scanning'){
+    sb.innerHTML='<span class="spinner"></span> 掃描中...';
+  }else if(job.status==='done'){
+    sb.textContent='掃描完成，共 '+job.item_count+' 筆商品';
+    renderItems(job.items||[], job);
+  }else if(job.status==='error'){
+    sb.textContent='錯誤：'+(job.error_msg||'未知');
+  }
+}
+
+function renderItems(items, job){
+  const card = document.getElementById('itemsCard');
+  const grid = document.getElementById('itemGrid');
+  const scanTitle = document.getElementById('scanTitle');
+  const bar = document.getElementById('actionBar');
+  card.style.display='';
+  if(job) scanTitle.innerHTML='<span class="pf-badge pf-'+esc(job.platform)+'">'+esc(job.platform)+'</span> '+job.item_count+' 筆商品';
+  if(!items.length){
+    grid.innerHTML='<div class="empty">未抓到商品。<br>可能需要手動登入，或頁面格式不支援。<br><br>請用 python local_worker.py --login 先登入，再重試。</div>';
+    bar.style.display='none';
+    return;
+  }
+  grid.innerHTML = items.map(it=>`
+    <label class="item-card${it.added_to_queue?' checked':''}" onclick="updateCount()">
+      <input type="checkbox" value="${it.id}" class="item-cb"${it.added_to_queue?' disabled checked':''}>
+      <img src="${esc(it.image)}" onerror="this.style.background='#f0f0f0';this.style.display='block'" alt="">
+      <div class="item-info">
+        <div class="item-title">${esc(it.title)}</div>
+        ${it.price?'<div class="item-price">￥'+esc(it.price)+'</div>':''}
+        ${it.shop_name?'<div class="item-shop">'+esc(it.shop_name)+'</div>':''}
+        ${it.added_to_queue?'<div class="item-added">已加入</div>':''}
+      </div>
+    </label>
+  `).join('');
+  bar.style.display='flex';
+  updateCount();
+}
+
+function updateCount(){
+  const n = document.querySelectorAll('.item-cb:not(:disabled):checked').length;
+  document.getElementById('selCount').textContent='已選 '+n+' 筆';
+}
+
+function toggleAll(v){
+  document.querySelectorAll('.item-cb:not(:disabled)').forEach(el=>{el.checked=v;});
+  document.querySelectorAll('.item-card').forEach(el=>{ const cb=el.querySelector('.item-cb'); if(cb&&!cb.disabled) el.classList.toggle('checked',v); });
+  updateCount();
+}
+
+async function addToQueue(){
+  const checked=[...document.querySelectorAll('.item-cb:not(:disabled):checked')].map(el=>parseInt(el.value));
+  if(!checked.length){alert('請勾選商品');return;}
+  const brand=document.getElementById('brandSel').value;
+  document.getElementById('addBtn').disabled=true;
+  try{
+    const r=await api('/api/store-scan/to-queue',{method:'POST',body:JSON.stringify({item_ids:checked,brand}),headers:{'Content-Type':'application/json'}});
+    showToast('已加入 '+r.added+' 筆到商品搬運中心');
+    const job=await api('/api/store-scan/'+currentJobId);
+    renderItems(job.items||[],job);
+  }catch(e){
+    alert('錯誤：'+e.message);
+  }finally{
+    document.getElementById('addBtn').disabled=false;
+  }
+}
+
+loadHistory();
+</script>
+</body>
+</html>"""
+
 PRODUCTS_HTML = """<!DOCTYPE html>
 <html lang="zh-TW">
 <head>
@@ -4651,6 +5043,7 @@ body{font-family:-apple-system,sans-serif;background:#f5f5f5;color:#333}
   <div class="header-title">AI 商品搬運中心</div>
   <div class="header-status" id="hStatus"></div>
   <div style="display:flex;gap:8px">
+    <a class="export-btn" href="/admin/products/store-scan?key={{ key }}" title="店鋪選品掃描" style="background:#e8f5e9;color:#2e7d32">店鋪選品</a>
     <a class="export-btn" href="/admin/brand-settings?key={{ key }}" title="品牌文案設定" style="background:#e8f0fe;color:#1967d2">品牌設定</a>
     <a class="export-btn" href="/api/products/export?format=xlsx&key={{ key }}" title="匯出 Excel">⬇ Excel</a>
     <a class="export-btn" href="/api/products/export?format=csv&key={{ key }}" title="匯出 CSV">⬇ CSV</a>
@@ -4999,6 +5392,13 @@ def admin_products():
     if not ok:
         return render_template_string(LOGIN_HTML, next="/admin/products", error=None)
     return render_template_string(PRODUCTS_HTML, key=key)
+
+@app.route("/admin/products/store-scan")
+def admin_store_scan():
+    ok, key = check_auth()
+    if not ok:
+        return render_template_string(LOGIN_HTML, next="/admin/products/store-scan", error=None)
+    return render_template_string(STORE_SCAN_HTML, key=key)
 
 @app.route("/admin/brand-settings")
 def admin_brand_settings():
@@ -5350,6 +5750,108 @@ def api_products_scrape_result(job_id):
     )
     threading.Thread(target=_run_ai_rewrite_for_job, args=(job_id,), daemon=True).start()
     return jsonify({"ok": True})
+
+
+# ── Store Scan API ────────────────────────────────────────────
+
+@app.route("/api/store-scan", methods=["POST"])
+def api_store_scan_create():
+    ok, _ = auth_required()
+    if not ok:
+        return jsonify({"error": "unauthorized"}), 403
+    data = request.get_json(silent=True) or {}
+    url = (data.get("url") or "").strip()
+    if not url:
+        return jsonify({"error": "請提供店鋪/分類頁連結"}), 400
+    platform = _detect_platform(url)
+    if platform == "unknown":
+        return jsonify({"error": "目前只支援 1688 和 淘寶 連結"}), 400
+    job_id = _ss_insert(url, platform)
+    if not job_id:
+        return jsonify({"error": "建立失敗，請確認資料庫連線"}), 500
+    return jsonify({"ok": True, "id": job_id, "platform": platform})
+
+@app.route("/api/store-scan", methods=["GET"])
+def api_store_scan_list():
+    ok, _ = auth_required()
+    if not ok:
+        return jsonify({"error": "unauthorized"}), 403
+    return jsonify({"jobs": _ss_list(20)})
+
+@app.route("/api/store-scan/pending", methods=["GET"])
+def api_store_scan_pending():
+    """本機 Worker 輪詢：取得待掃描任務。"""
+    ok, _ = auth_required()
+    if not ok:
+        return jsonify({"error": "unauthorized"}), 403
+    if not DATABASE_URL:
+        return jsonify({"jobs": []})
+    try:
+        conn = _pg_conn(); cur = conn.cursor()
+        cur.execute(
+            "SELECT id, url, platform FROM store_scan_jobs WHERE status='pending' ORDER BY created_at ASC LIMIT 3"
+        )
+        rows = cur.fetchall(); cur.close(); conn.close()
+        return jsonify({"jobs": [{"id": r[0], "url": r[1], "platform": r[2]} for r in rows]})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route("/api/store-scan/<int:job_id>", methods=["GET"])
+def api_store_scan_get(job_id):
+    ok, _ = auth_required()
+    if not ok:
+        return jsonify({"error": "unauthorized"}), 403
+    job = _ss_get(job_id)
+    if not job:
+        return jsonify({"error": "not found"}), 404
+    return jsonify(job)
+
+@app.route("/api/store-scan/<int:job_id>/result", methods=["POST"])
+def api_store_scan_result(job_id):
+    """本機 Worker 回傳掃描結果。"""
+    ok, _ = auth_required()
+    if not ok:
+        return jsonify({"error": "unauthorized"}), 403
+    data = request.get_json(silent=True) or {}
+    if data.get("error"):
+        _ss_update(job_id, status="error", error_msg=data["error"])
+        return jsonify({"ok": True})
+    items = data.get("items", [])
+    count = _ss_insert_items(job_id, items)
+    _ss_update(job_id, status="done", item_count=count)
+    return jsonify({"ok": True, "count": count})
+
+@app.route("/api/store-scan/to-queue", methods=["POST"])
+def api_store_scan_to_queue():
+    """將勾選商品加入 product_jobs。"""
+    ok, _ = auth_required()
+    if not ok:
+        return jsonify({"error": "unauthorized"}), 403
+    data = request.get_json(silent=True) or {}
+    item_ids = data.get("item_ids", [])
+    brand = (data.get("brand") or "").strip()
+    if not item_ids:
+        return jsonify({"error": "請勾選商品"}), 400
+    if not DATABASE_URL:
+        return jsonify({"error": "資料庫未設定"}), 500
+    try:
+        conn = _pg_conn(); cur = conn.cursor()
+        cur.execute(
+            "SELECT id,url,platform FROM store_scan_items WHERE id=ANY(%s) AND added_to_queue=FALSE",
+            (item_ids,)
+        )
+        rows = cur.fetchall(); cur.close(); conn.close()
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+    added = []
+    for r in rows:
+        item_id, url, platform = r
+        job_id = _pj_insert(url, platform, brand)
+        if job_id:
+            added.append({"item_id": item_id, "job_id": job_id})
+    if added:
+        _ss_mark_added([a["item_id"] for a in added])
+    return jsonify({"ok": True, "added": len(added), "jobs": added})
 
 
 if __name__ == "__main__":
