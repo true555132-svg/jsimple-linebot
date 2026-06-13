@@ -5013,11 +5013,15 @@ body{font-family:-apple-system,sans-serif;background:#f5f5f5;color:#333}
 .sel-btn{background:#f0f0f0;color:#555;border:none;border-radius:6px;padding:3px 9px;font-size:11px;cursor:pointer;font-family:-apple-system,sans-serif}
 .sel-btn:hover{background:#e0e0e0}
 .img-grid{display:flex;gap:8px;flex-wrap:wrap;margin-top:6px}
-.img-thumb{position:relative;cursor:pointer;flex-shrink:0}
+.img-thumb{position:relative;cursor:pointer;flex-shrink:0;width:104px;text-align:center}
 .img-thumb input[type=checkbox]{position:absolute;top:4px;left:4px;width:16px;height:16px;cursor:pointer;z-index:2;accent-color:#1a73e8}
-.img-thumb img{width:80px;height:80px;object-fit:cover;border-radius:8px;border:2px solid transparent;transition:border-color .15s;display:block}
+.img-thumb img{width:100px;height:100px;object-fit:cover;border-radius:6px;border:2px solid #eee;transition:border-color .15s;display:block;margin:0 auto}
 .img-thumb.checked img{border-color:#1a73e8;box-shadow:0 0 0 1px #1a73e8}
-.img-label{font-size:9px;color:#888;text-align:center;max-width:80px;overflow:hidden;white-space:nowrap;text-overflow:ellipsis;margin-top:2px}
+.img-size{font-size:9px;color:#999;text-align:center;margin:3px 0 1px;min-height:13px;line-height:1.3}
+.img-label{font-size:9px;color:#666;text-align:center;max-width:100px;overflow:hidden;white-space:nowrap;text-overflow:ellipsis;margin-bottom:2px}
+.thumb-actions{display:flex;justify-content:center;gap:3px;margin-top:3px}
+.thumb-act{background:#f0f0f0;border:none;border-radius:4px;padding:2px 6px;font-size:11px;cursor:pointer;color:#555;text-decoration:none;display:inline-block;line-height:1.5}
+.thumb-act:hover{background:#ddd;color:#333}
 .sel-action-bar{position:sticky;bottom:0;background:#fff;border-top:1px solid #f0f0f0;padding:12px 0 4px;display:flex;gap:8px;align-items:center;margin-top:12px}
 .sel-count{font-size:12px;color:#888;flex:1}
 .btn-confirm{background:#1a1a1a;color:#fff;border:none;border-radius:9px;padding:8px 18px;font-size:13px;font-weight:700;cursor:pointer;font-family:-apple-system,sans-serif}
@@ -5259,14 +5263,14 @@ function renderModal(j, editMode=false){
   const imgStatusLabel=imgStatusMap[j.img_status]||"";
   const mainSrcs = mainImgs.length ? mainImgs.map(i=>typeof i==='object'?i.src:i) : (j.raw_images||[]);
   if(mainSrcs.length) h+=imgCatHtml("main","主圖",mainSrcs,[]);
-  if(detailImgs.length){
-    const srcs=detailImgs.map(i=>typeof i==='object'?i.src:i);
-    h+=imgCatHtml("detail","詳情圖",srcs,[]);
-  }
   if(skuImgs.length){
     const srcs=skuImgs.map(i=>typeof i==='object'?i.src:i);
     const labels=skuImgs.map(i=>typeof i==='object'?(i.label||''):'');
     h+=imgCatHtml("sku","SKU 規格圖",srcs,labels);
+  }
+  if(detailImgs.length){
+    const srcs=detailImgs.map(i=>typeof i==='object'?i.src:i);
+    h+=imgCatHtml("detail","詳情圖",srcs,[]);
   }
   if(videoUrls.length){
     h+=`<div class="section"><div class="slabel">影片（${videoUrls.length} 個）</div><div>${videoUrls.map(v=>`<a href="${esc(v)}" target="_blank" style="font-size:12px;display:block;margin:2px 0;color:#1a73e8;word-break:break-all">${esc(v.slice(0,80))}</a>`).join("")}</div></div>`;
@@ -5303,9 +5307,22 @@ async function saveEdit(id){
 function imgCatHtml(catId, label, srcs, labels){
   const thumbs=srcs.map((src,idx)=>{
     const checked=_selImgs.has(src);
-    return `<div class="img-thumb${checked?" checked":""}" onclick="imgThumbClick(event,this,'${catId}_${idx}')"><input type="checkbox" id="ck_${catId}_${idx}" data-url="${esc(src)}"${checked?" checked":""}><img src="${esc(src)}" loading="lazy" onerror="this.style.display='none'" title="${esc(src)}"><div class="img-label">${esc(labels[idx]||'')}</div></div>`;
+    const lbl=labels[idx]||'';
+    return `<div class="img-thumb${checked?" checked":""}" onclick="imgThumbClick(event,this,'${catId}_${idx}')">`
+      +`<input type="checkbox" id="ck_${catId}_${idx}" data-url="${esc(src)}"${checked?" checked":""}>`
+      +`<img src="${esc(src)}" loading="lazy" onerror="this.style.display='none'" onload="imgSizeLoad(this)" title="${esc(src)}">`
+      +`<div class="img-size"></div>`
+      +(lbl?`<div class="img-label">${esc(lbl)}</div>`:'')
+      +`<div class="thumb-actions">`
+      +`<a href="${esc(src)}" target="_blank" class="thumb-act" onclick="event.stopPropagation()" title="開新分頁">⬇</a>`
+      +`<button class="thumb-act" onclick="event.stopPropagation();cp(this,'${esc(src)}')" title="複製URL">📋</button>`
+      +`</div></div>`;
   }).join("");
   return `<div class="section" id="cat_${catId}"><div class="img-zone-hd"><div class="slabel">${label}（${srcs.length} 張）</div><button class="sel-btn" onclick="toggleAllInCat('${catId}',true)">全選</button><button class="sel-btn" onclick="toggleAllInCat('${catId}',false)">取消</button></div><div class="img-grid">${thumbs}</div></div>`;
+}
+function imgSizeLoad(img){
+  const el=img.closest('.img-thumb').querySelector('.img-size');
+  if(el) el.textContent=img.naturalWidth+' × '+img.naturalHeight;
 }
 function imgThumbClick(e,wrap,ckId){
   if(e.target.type==="checkbox") return;
