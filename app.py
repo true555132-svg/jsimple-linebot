@@ -5007,6 +5007,23 @@ body{font-family:-apple-system,sans-serif;background:#f5f5f5;color:#333}
 .img-form{margin-top:14px}
 .img-form textarea{width:100%;border:1.5px solid #ddd;border-radius:10px;padding:10px;font-size:13px;height:90px;resize:vertical;font-family:-apple-system,sans-serif;outline:none}
 .img-form textarea:focus{border-color:#1a1a1a}
+/* 選圖 UI */
+.img-zone-hd{display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin-bottom:6px}
+.img-zone-hd .slabel{margin-bottom:0;flex:none}
+.sel-btn{background:#f0f0f0;color:#555;border:none;border-radius:6px;padding:3px 9px;font-size:11px;cursor:pointer;font-family:-apple-system,sans-serif}
+.sel-btn:hover{background:#e0e0e0}
+.img-grid{display:flex;gap:8px;flex-wrap:wrap;margin-top:6px}
+.img-thumb{position:relative;cursor:pointer;flex-shrink:0}
+.img-thumb input[type=checkbox]{position:absolute;top:4px;left:4px;width:16px;height:16px;cursor:pointer;z-index:2;accent-color:#1a73e8}
+.img-thumb img{width:80px;height:80px;object-fit:cover;border-radius:8px;border:2px solid transparent;transition:border-color .15s;display:block}
+.img-thumb.checked img{border-color:#1a73e8;box-shadow:0 0 0 1px #1a73e8}
+.img-label{font-size:9px;color:#888;text-align:center;max-width:80px;overflow:hidden;white-space:nowrap;text-overflow:ellipsis;margin-top:2px}
+.sel-action-bar{position:sticky;bottom:0;background:#fff;border-top:1px solid #f0f0f0;padding:12px 0 4px;display:flex;gap:8px;align-items:center;margin-top:12px}
+.sel-count{font-size:12px;color:#888;flex:1}
+.btn-confirm{background:#1a1a1a;color:#fff;border:none;border-radius:9px;padding:8px 18px;font-size:13px;font-weight:700;cursor:pointer;font-family:-apple-system,sans-serif}
+.btn-confirm:hover{background:#333}
+.btn-zip{background:#e3f2fd;color:#1565c0;border:none;border-radius:9px;padding:8px 14px;font-size:13px;font-weight:600;cursor:pointer;font-family:-apple-system,sans-serif}
+.btn-zip:hover{background:#bbdefb}
 .btn-sm{background:#333;color:#fff;border:none;border-radius:8px;padding:6px 14px;font-size:13px;cursor:pointer;font-family:-apple-system,sans-serif;margin-top:6px}
 .btn-sm:hover{background:#555}
 .hidden{display:none}
@@ -5096,7 +5113,7 @@ body{font-family:-apple-system,sans-serif;background:#f5f5f5;color:#333}
 
 <script>
 const KEY = "{{ key }}";
-let jobs = [], filter = "all", pollTimer = null, openId = null;
+let jobs = [], filter = "all", pollTimer = null, openId = null, _selImgs = new Set();
 
 const api = (url, opts={}) => fetch(url+(url.includes("?")?"&":"?")+"key="+KEY, {headers:{"Content-Type":"application/json"},...opts}).then(r=>r.json());
 
@@ -5207,7 +5224,6 @@ function renderModal(j, editMode=false){
   if(j.status==="error"){
     h+=`<div class="err-box">${esc(j.error_msg||"未知錯誤")}</div>`;
     if(j.raw_title) h+=`<div class="section"><div class="slabel">原始標題</div><div class="rbox">${esc(j.raw_title)}</div></div>`;
-    h+=imgFormHtml(j.id,[]);
     document.getElementById("modalBody").innerHTML=h; return;
   }
   if(["pending","scraping","rewriting"].includes(j.status)){
@@ -5232,60 +5248,35 @@ function renderModal(j, editMode=false){
     }
     if(j.ai_desc) h+=`<div class="section"><div class="slabel">商品描述</div><div class="rbox" style="max-height:320px;overflow-y:auto">${esc(j.ai_desc)}<button class="copy-btn" onclick='cp(this,${JSON.stringify(j.ai_desc)})'>複製</button></div></div>`;
   }
-  // 結構化圖片顯示（product_images）
+  // 圖片選取 UI（分區勾選）
   const pi = j.product_images || {};
   const mainImgs   = pi.main_images   || [];
   const detailImgs = pi.detail_images || [];
+  const skuImgs    = pi.sku_images    || [];
   const videoUrls  = pi.video_urls    || [];
-  const imgStatusMap={"pending_images":"等待本機 Worker 處理...","processing":"處理中（本機 Worker）...","done":"白底完成","failed":"處理失敗","no_images":"無圖片"};
+  _selImgs = new Set(j.raw_images || []);
+  const imgStatusMap={"pending_images":"等待處理...","processing":"處理中...","done":"白底完成","failed":"處理失敗","no_images":"無圖片"};
   const imgStatusLabel=imgStatusMap[j.img_status]||"";
-  // 主圖區：勾選 checkbox，選好再白底
-  const allSrcs = mainImgs.length
-    ? mainImgs.map(i=>typeof i==='object'?i.src:i)
-    : (j.raw_images||[]);
-  const rawZipUrl = `/api/products/${j.id}/images/zip?type=raw&key=${KEY}`;
-  if(allSrcs.length){
-    const imgPending = j.img_status==="processing" || j.img_status==="pending_images";
-    const statusSpan = imgPending
-      ? `<span style="font-size:12px;color:#888"><span class="spinner"></span>${imgStatusLabel}</span>`
-      : (imgStatusLabel ? `<span style="font-size:11px;color:#2e7d32;margin-left:4px">${imgStatusLabel}</span>` : "");
-    if(imgPending && openId===j.id) setTimeout(()=>{if(openId===j.id)openJob(j.id);},3000);
-    h+=`<div class="section">
-      <div class="slabel" style="display:flex;align-items:center;gap:6px;flex-wrap:wrap">
-        主圖（${allSrcs.length} 張）
-        <button class="btn-sm" onclick="selectAll(${j.id},true)">全選</button>
-        <button class="btn-sm" onclick="selectAll(${j.id},false)">全不選</button>
-        <button class="btn-sm" onclick="processSelected(${j.id})" style="background:#1a73e8;color:#fff">✓ 白底（選取）</button>
-        <a href="${rawZipUrl}" class="export-btn" style="font-size:11px">⬇ 原圖 ZIP</a>
-        ${statusSpan}
-      </div>
-      <div class="imgs-row" id="imgRow_${j.id}" style="flex-wrap:wrap">${allSrcs.map((src,idx)=>`
-        <label style="cursor:pointer;text-align:center;margin:4px">
-          <input type="checkbox" class="imgChk_${j.id}" value="${esc(src)}" checked style="display:block;margin:0 auto 2px">
-          <img src="${esc(src)}" loading="lazy" onerror="this.parentElement.style.display='none'" style="max-width:90px;max-height:90px;border:2px solid #1a73e8;border-radius:4px">
-        </label>`).join("")}
-      </div>
-    </div>`;}
+  const mainSrcs = mainImgs.length ? mainImgs.map(i=>typeof i==='object'?i.src:i) : (j.raw_images||[]);
+  if(mainSrcs.length) h+=imgCatHtml("main","主圖",mainSrcs,[]);
   if(detailImgs.length){
-    const srcs = detailImgs.map(i=>typeof i==='object'?i.src:i);
-    h+=`<div class="section"><div class="slabel">詳情圖（${srcs.length} 張）</div><div class="imgs-row">${srcs.map(img=>`<img src="${esc(img)}" loading="lazy" onerror="this.style.display='none'" title="${esc(img)}">`).join("")}</div></div>`;
+    const srcs=detailImgs.map(i=>typeof i==='object'?i.src:i);
+    h+=imgCatHtml("detail","詳情圖",srcs,[]);
   }
-  const skuImgs = pi.sku_images || [];
   if(skuImgs.length){
-    const skuSrcs = skuImgs.map(i=>typeof i==='object'?i.src:i);
-    const skuLabels = skuImgs.map(i=>typeof i==='object'?(i.label||''):'');
-    const skuZipUrl = `/api/products/${j.id}/images/zip?type=sku&key=${KEY}`;
-    h+=`<div class="section"><div class="slabel" style="display:flex;align-items:center;gap:8px">SKU 規格圖（${skuSrcs.length} 張）<a href="${skuZipUrl}" class="export-btn" style="font-size:11px">⬇ ZIP</a></div><div class="imgs-row" style="flex-wrap:wrap">${skuSrcs.map((src,idx)=>`<div style="text-align:center;margin:4px"><img src="${esc(src)}" loading="lazy" onerror="this.style.display='none'" style="max-width:80px;max-height:80px;border:1px solid #eee;border-radius:4px"><div style="font-size:10px;color:#888;max-width:80px;overflow:hidden;white-space:nowrap;text-overflow:ellipsis">${esc(skuLabels[idx]||'')}</div></div>`).join("")}</div></div>`;
+    const srcs=skuImgs.map(i=>typeof i==='object'?i.src:i);
+    const labels=skuImgs.map(i=>typeof i==='object'?(i.label||''):'');
+    h+=imgCatHtml("sku","SKU 規格圖",srcs,labels);
   }
   if(videoUrls.length){
     h+=`<div class="section"><div class="slabel">影片（${videoUrls.length} 個）</div><div>${videoUrls.map(v=>`<a href="${esc(v)}" target="_blank" style="font-size:12px;display:block;margin:2px 0;color:#1a73e8;word-break:break-all">${esc(v.slice(0,80))}</a>`).join("")}</div></div>`;
   }
   if(j.processed_images&&j.processed_images.length){
     const zipUrl=`/api/products/${j.id}/images/zip?key=${KEY}`;
-    h+=`<div class="section"><div class="slabel" style="display:flex;align-items:center;gap:8px">已處理圖片（白底，${j.processed_images.length} 張）<a href="${zipUrl}" class="export-btn" style="font-size:11px">⬇ ZIP</a></div><div class="imgs-row">${j.processed_images.map(img=>`<a href="${esc(img)}" target="_blank"><img src="${esc(img)}" loading="lazy" onerror="this.style.display='none'"></a>`).join("")}</div></div>`;
+    h+=`<div class="section"><div class="slabel" style="display:flex;align-items:center;gap:8px">已處理圖片（白底，${j.processed_images.length} 張）<a href="${zipUrl}" class="export-btn" style="font-size:11px">⬇ ZIP</a></div><div class="img-grid">${j.processed_images.map(img=>`<div class="img-thumb"><img src="${esc(img)}" loading="lazy" onerror="this.style.display='none'"></div>`).join("")}</div></div>`;
   }
   h+=`<hr class="divider">`;
-  h+=imgFormHtml(j.id, j.raw_images||[]);
+  h+=`<div class="sel-action-bar"><span class="sel-count" id="selCount">已選 ${_selImgs.size} 張</span><button class="btn-zip" onclick="downloadZipSelected(${j.id})">⬇ ZIP 下載</button><button class="btn-confirm" onclick="confirmSelect(${j.id})">確認選圖</button></div>`;
   h+=`<br><button class="raw-toggle" onclick="toggleRaw(this)">顯示原始資料 ▾</button>`;
   h+=`<div id="rawSec" class="hidden" style="margin-top:12px">`;
   if(j.raw_title) h+=`<div class="section"><div class="slabel">原始標題</div><div class="rbox">${esc(j.raw_title)}</div></div>`;
@@ -5309,41 +5300,56 @@ async function saveEdit(id){
   else toast("儲存失敗："+r.error);
 }
 
-function imgFormHtml(id, existing){
-  const joined = existing.join("\\n");
-  return `<div class="section img-form">
-    <div class="slabel">手動補圖片 URL（第三層，一行一張）</div>
-    <textarea id="imgTa_${id}" rows="4" placeholder="https://img.alicdn.com/...">${joined}</textarea>
-    <button class="btn-sm" onclick="saveImgs(${id})" style="margin-top:6px">儲存圖片</button>
-    <span id="saveImgMsg_${id}" style="font-size:11px;color:#2e7d32;margin-left:8px"></span>
-  </div>`;
+function imgCatHtml(catId, label, srcs, labels){
+  const thumbs=srcs.map((src,idx)=>{
+    const checked=_selImgs.has(src);
+    return `<div class="img-thumb${checked?" checked":""}" onclick="imgThumbClick(event,this,'${catId}_${idx}')"><input type="checkbox" id="ck_${catId}_${idx}" data-url="${esc(src)}"${checked?" checked":""}><img src="${esc(src)}" loading="lazy" onerror="this.style.display='none'" title="${esc(src)}"><div class="img-label">${esc(labels[idx]||'')}</div></div>`;
+  }).join("");
+  return `<div class="section" id="cat_${catId}"><div class="img-zone-hd"><div class="slabel">${label}（${srcs.length} 張）</div><button class="sel-btn" onclick="toggleAllInCat('${catId}',true)">全選</button><button class="sel-btn" onclick="toggleAllInCat('${catId}',false)">取消</button></div><div class="img-grid">${thumbs}</div></div>`;
 }
-
-async function saveImgs(id){
-  const ta=document.getElementById("imgTa_"+id);
-  if(!ta) return;
-  const urls=ta.value.split("\\n").map(s=>s.trim()).filter(Boolean);
-  const msg=document.getElementById("saveImgMsg_"+id);
-  if(msg) msg.textContent="儲存中...";
-  const r=await api("/api/products/"+id+"/images",{method:"POST",body:JSON.stringify({urls})});
-  if(r.ok){
-    if(msg) msg.textContent=`已儲存 ${r.count} 張`;
-    toast("圖片已儲存");
-  } else {
-    if(msg) msg.textContent="失敗";
-    toast("儲存失敗："+r.error);
-  }
+function imgThumbClick(e,wrap,ckId){
+  if(e.target.type==="checkbox") return;
+  const cb=document.getElementById("ck_"+ckId);
+  if(!cb) return;
+  cb.checked=!cb.checked;
+  syncThumb(cb,wrap);
 }
-
-function selectAll(id, checked){
-  document.querySelectorAll(".imgChk_"+id).forEach(c=>c.checked=checked);
+function syncThumb(cb,wrap){
+  const url=cb.dataset.url;
+  if(cb.checked){_selImgs.add(url);wrap.classList.add("checked");}
+  else{_selImgs.delete(url);wrap.classList.remove("checked");}
+  const el=document.getElementById("selCount");
+  if(el) el.textContent=`已選 ${_selImgs.size} 張`;
 }
-async function processSelected(id){
-  const checked=[...document.querySelectorAll(".imgChk_"+id+":checked")].map(c=>c.value);
-  if(!checked.length){toast("請至少勾選一張圖片");return;}
-  const r=await api("/api/products/"+id+"/process-images",{method:"POST",body:JSON.stringify({urls:checked})});
-  if(r.ok){toast(`開始處理 ${checked.length} 張，本機 Worker 執行中...`);setTimeout(()=>openJob(id),3000);}
-  else toast("失敗："+r.error);
+function toggleAllInCat(catId,checked){
+  document.querySelectorAll(`#cat_${catId} .img-thumb`).forEach(wrap=>{
+    const cb=wrap.querySelector("input[type=checkbox]");
+    if(!cb) return;
+    cb.checked=checked;
+    syncThumb(cb,wrap);
+  });
+}
+async function confirmSelect(id){
+  const urls=[..._selImgs];
+  const r=await api("/api/products/"+id+"/select-images",{method:"POST",body:JSON.stringify({urls})});
+  if(r.ok) toast(`已確認 ${r.count} 張圖片為輸出圖`);
+  else toast("儲存失敗："+r.error);
+}
+async function downloadZipSelected(id){
+  const urls=[..._selImgs];
+  if(!urls.length){toast("請先勾選圖片");return;}
+  toast("打包中，請稍候...");
+  try{
+    const res=await fetch(`/api/products/${id}/images/zip-selected?key=${KEY}`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({urls})});
+    if(!res.ok){toast("下載失敗");return;}
+    const blob=await res.blob();
+    const a=document.createElement("a");
+    a.href=URL.createObjectURL(blob);
+    a.download=`product_${id}_images.zip`;
+    a.click();
+    URL.revokeObjectURL(a.href);
+    toast("下載完成");
+  }catch(e){toast("下載失敗");}
 }
 
 function toggleRaw(btn){
@@ -5518,6 +5524,56 @@ def api_products_process_images(job_id):
         update_fields["raw_images"] = json.dumps(selected_urls, ensure_ascii=False)
     _pj_update(job_id, **update_fields)
     return jsonify({"ok": True})
+
+@app.route("/api/products/<int:job_id>/select-images", methods=["POST"])
+def api_products_select_images(job_id):
+    ok, _ = auth_required()
+    if not ok:
+        return jsonify({"error": "unauthorized"}), 403
+    job = _pj_get(job_id)
+    if not job:
+        return jsonify({"error": "not found"}), 404
+    data = request.get_json(force=True)
+    urls = [u.strip() for u in (data.get("urls") or []) if u.strip()]
+    _pj_update(job_id, raw_images=json.dumps(urls, ensure_ascii=False))
+    return jsonify({"ok": True, "count": len(urls)})
+
+
+@app.route("/api/products/<int:job_id>/images/zip-selected", methods=["POST"])
+def api_products_images_zip_selected(job_id):
+    ok, _ = auth_required()
+    if not ok:
+        return jsonify({"error": "unauthorized"}), 403
+    job = _pj_get(job_id)
+    if not job:
+        return jsonify({"error": "not found"}), 404
+    data = request.get_json(force=True)
+    imgs = data.get("urls", [])
+    if not imgs:
+        return jsonify({"error": "沒有選取圖片"}), 400
+    import io, zipfile, re as _re
+    buf = io.BytesIO()
+    downloaded = 0
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        for i, img_url in enumerate(imgs):
+            try:
+                req = urllib.request.Request(img_url, headers={"User-Agent": "Mozilla/5.0", "Referer": "https://www.1688.com/"})
+                with urllib.request.urlopen(req, timeout=15) as r:
+                    img_data = r.read()
+                ext = img_url.split(".")[-1].split("?")[0].lower()
+                if ext not in ("jpg", "jpeg", "png", "webp"):
+                    ext = "jpg"
+                zf.writestr(f"img_{i+1:02d}.{ext}", img_data)
+                downloaded += 1
+            except Exception:
+                pass
+    if downloaded == 0:
+        return jsonify({"error": "圖片下載失敗"}), 500
+    buf.seek(0)
+    safe = _re.sub(r'[^\w]', '_', (job.get('ai_name') or 'product')[:20])
+    return Response(buf.getvalue(), mimetype="application/zip",
+        headers={"Content-Disposition": f'attachment; filename="{safe}_images.zip"'})
+
 
 # ── 本機 Worker API ───────────────────────────────────────────
 
