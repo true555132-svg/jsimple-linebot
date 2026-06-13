@@ -559,6 +559,31 @@ def scrape_taobao(page, url):
         except Exception: pass
 
     product_images = _extract_images_dom(page, 'taobao')
+    # 淘寶 SKU 規格圖
+    try:
+        sku_js = page.evaluate("""
+() => {
+    const imgs = []; const seen = new Set();
+    const add = (src, lbl) => { if(src && !seen.has(src)){ seen.add(src); imgs.push({src: src.startsWith('//')?'https:'+src:src, label:lbl||''}); } };
+    try {
+        const d = window.__GLOBAL_DATA__ || {};
+        const props = (d.item && d.item.props && d.item.props.props) || [];
+        props.forEach(p => (p.values||[]).forEach(v => add(v.imageUrl||v.picUrl||'', (p.name||'')+(v.name||''))));
+    } catch(e){}
+    if(imgs.length===0){
+        document.querySelectorAll('[class*=sku] img,[class*=Sku] img,.J_TSaleProp img,.sku-prop img').forEach(el => {
+            const src = el.src || el.dataset.src || el.dataset.lazySrc || '';
+            if(src && (src.includes('alicdn') || src.includes('taobao'))) add(src, el.alt||'');
+        });
+    }
+    return imgs;
+}
+""")
+        if sku_js:
+            product_images["sku_images"] = sku_js
+            print(f"    [Taobao SKU] {len(sku_js)} 張")
+    except Exception as e:
+        print(f"    [Taobao SKU err] {e}")
     result["product_images"] = product_images
     result["raw_images"] = [i["src"] for i in product_images["main_images"]][:8]
 

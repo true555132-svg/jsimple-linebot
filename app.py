@@ -5013,12 +5013,17 @@ body{font-family:-apple-system,sans-serif;background:#f5f5f5;color:#333}
 .sel-btn{background:#f0f0f0;color:#555;border:none;border-radius:6px;padding:3px 9px;font-size:11px;cursor:pointer;font-family:-apple-system,sans-serif}
 .sel-btn:hover{background:#e0e0e0}
 .img-grid{display:flex;gap:8px;flex-wrap:wrap;margin-top:6px}
-.img-thumb{position:relative;cursor:pointer;flex-shrink:0;width:104px;text-align:center}
+.img-thumb{position:relative;cursor:pointer;flex-shrink:0;width:128px;text-align:center}
 .img-thumb input[type=checkbox]{position:absolute;top:4px;left:4px;width:16px;height:16px;cursor:pointer;z-index:2;accent-color:#1a73e8}
-.img-thumb img{width:100px;height:100px;object-fit:cover;border-radius:6px;border:2px solid #eee;transition:border-color .15s;display:block;margin:0 auto}
+.img-thumb img{width:120px;height:120px;object-fit:cover;border-radius:6px;border:2px solid #eee;transition:border-color .15s;display:block;margin:0 auto}
 .img-thumb.checked img{border-color:#1a73e8;box-shadow:0 0 0 1px #1a73e8}
+/* category colours */
+.img-thumb.cat-sku input[type=checkbox]{accent-color:#f57c00}
+.img-thumb.cat-sku.checked img{border-color:#ff9800;box-shadow:0 0 0 1px #ff9800}
+.img-thumb.cat-detail input[type=checkbox]{accent-color:#7b1fa2}
+.img-thumb.cat-detail.checked img{border-color:#9c27b0;box-shadow:0 0 0 1px #9c27b0}
 .img-size{font-size:9px;color:#999;text-align:center;margin:3px 0 1px;min-height:13px;line-height:1.3}
-.img-label{font-size:9px;color:#666;text-align:center;max-width:100px;overflow:hidden;white-space:nowrap;text-overflow:ellipsis;margin-bottom:2px}
+.img-label{font-size:9px;color:#666;text-align:center;max-width:120px;overflow:hidden;white-space:nowrap;text-overflow:ellipsis;margin-bottom:2px}
 .thumb-actions{display:flex;justify-content:center;gap:3px;margin-top:3px}
 .thumb-act{background:#f0f0f0;border:none;border-radius:4px;padding:2px 6px;font-size:11px;cursor:pointer;color:#555;text-decoration:none;display:inline-block;line-height:1.5}
 .thumb-act:hover{background:#ddd;color:#333}
@@ -5263,6 +5268,9 @@ function renderModal(j, editMode=false){
   const imgStatusLabel=imgStatusMap[j.img_status]||"";
   const mainSrcs = mainImgs.length ? mainImgs.map(i=>typeof i==='object'?i.src:i) : (j.raw_images||[]);
   if(mainSrcs.length) h+=imgCatHtml("main","主圖",mainSrcs,[]);
+  if(videoUrls.length){
+    h+=`<div class="section"><div class="slabel">影片（${videoUrls.length} 個）</div><div>${videoUrls.map(v=>`<a href="${esc(v)}" target="_blank" style="font-size:12px;display:block;margin:2px 0;color:#1a73e8;word-break:break-all">${esc(v.slice(0,80))}</a>`).join("")}</div></div>`;
+  }
   if(skuImgs.length){
     const srcs=skuImgs.map(i=>typeof i==='object'?i.src:i);
     const labels=skuImgs.map(i=>typeof i==='object'?(i.label||''):'');
@@ -5271,9 +5279,6 @@ function renderModal(j, editMode=false){
   if(detailImgs.length){
     const srcs=detailImgs.map(i=>typeof i==='object'?i.src:i);
     h+=imgCatHtml("detail","詳情圖",srcs,[]);
-  }
-  if(videoUrls.length){
-    h+=`<div class="section"><div class="slabel">影片（${videoUrls.length} 個）</div><div>${videoUrls.map(v=>`<a href="${esc(v)}" target="_blank" style="font-size:12px;display:block;margin:2px 0;color:#1a73e8;word-break:break-all">${esc(v.slice(0,80))}</a>`).join("")}</div></div>`;
   }
   if(j.processed_images&&j.processed_images.length){
     const zipUrl=`/api/products/${j.id}/images/zip?key=${KEY}`;
@@ -5305,10 +5310,11 @@ async function saveEdit(id){
 }
 
 function imgCatHtml(catId, label, srcs, labels){
+  const catCls={main:'',sku:' cat-sku',detail:' cat-detail'}[catId]||'';
   const thumbs=srcs.map((src,idx)=>{
     const checked=_selImgs.has(src);
     const lbl=labels[idx]||'';
-    return `<div class="img-thumb${checked?" checked":""}" onclick="imgThumbClick(event,this,'${catId}_${idx}')">`
+    return `<div class="img-thumb${catCls}${checked?" checked":""}" onclick="imgThumbClick(event,this,'${catId}_${idx}')">`
       +`<input type="checkbox" id="ck_${catId}_${idx}" data-url="${esc(src)}"${checked?" checked":""}>`
       +`<img src="${esc(src)}" loading="lazy" onerror="this.style.display='none'" onload="imgSizeLoad(this)" title="${esc(src)}">`
       +`<div class="img-size"></div>`
