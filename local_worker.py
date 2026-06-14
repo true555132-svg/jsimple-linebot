@@ -578,30 +578,44 @@ def scrape_taobao(page, url):
             main_js = page.evaluate("""
 () => {
     const imgs = []; const seen = new Set();
-    // 策略1: 找所有 alicdn 方形大圖
-    document.querySelectorAll('img').forEach(el => {
-        const src = el.src || el.dataset.src || el.dataset.lazySrc || '';
-        if (!src || !src.includes('alicdn') || seen.has(src)) return;
-        const w = el.naturalWidth || el.width || 0;
-        const h = el.naturalHeight || el.height || 0;
-        // 方形大圖且在頁面前半段
-        const rect = el.getBoundingClientRect();
-        if (w >= 400 && h >= 400 && rect.left < window.innerWidth * 0.6) {
-            seen.add(src); imgs.push({src, w, h});
+
+    // 策略1: 從 <script> 標籤的 JSON 資料撈 alicdn imgextra 大圖
+    const RE = /https?:\/\/img\.alicdn\.com\/imgextra\/[^"'\s]+\.(jpg|png|webp)/gi;
+    const RE2 = /\/\/img\.alicdn\.com\/imgextra\/[^"'\s]+\.(jpg|png|webp)/gi;
+    const skipKw = ['icon','logo','avatar','shop','brand','banner','loading','placeholder','default'];
+    for (const script of document.querySelectorAll('script')) {
+        const txt = script.textContent || '';
+        if (!txt.includes('alicdn')) continue;
+        for (const re of [RE, RE2]) {
+            let m;
+            while ((m = re.exec(txt)) !== null) {
+                let url = m[0];
+                if (url.startsWith('//')) url = 'https:' + url;
+                // 移除尺寸後綴，拿原圖
+                url = url.replace(/_\d+x\d+[a-z]*\.(jpg|png|webp)/i, '.$1').split('?')[0];
+                if (seen.has(url)) continue;
+                if (skipKw.some(k => url.toLowerCase().includes(k))) continue;
+                seen.add(url);
+                imgs.push({src: url, w: 0, h: 0});
+            }
         }
-    });
-    // 策略2: 縮圖列表
+        if (imgs.length >= 10) break;
+    }
+
+    // 策略2: DOM 找目前可見的大圖（備用）
     if (imgs.length === 0) {
-        document.querySelectorAll('[class*=thumb] img,[class*=Thumb] img').forEach(el => {
-            const src = el.src || el.dataset.src || '';
-            if (src && src.includes('alicdn') && !seen.has(src)) {
+        document.querySelectorAll('img').forEach(el => {
+            const src = el.getAttribute('src') || el.getAttribute('data-src') || el.getAttribute('data-lazysrc') || '';
+            if (!src.includes('alicdn') || seen.has(src)) return;
+            const rect = el.getBoundingClientRect();
+            if (rect.width >= 200 && rect.height >= 200 && rect.left < window.innerWidth * 0.55) {
                 seen.add(src);
-                // 換成原圖（移除尺寸後綴）
-                const orig = src.replace(/_\d+x\d+.*?\.(jpg|png|webp)/, '.$1');
-                imgs.push({src: orig, w: 0, h: 0});
+                imgs.push({src: src.startsWith('//') ? 'https:' + src : src, w: 0, h: 0});
             }
         });
     }
+
+    // 去掉重複、最多 10 張
     return imgs.slice(0, 10);
 }
 """)
