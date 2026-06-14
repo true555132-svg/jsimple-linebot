@@ -673,6 +673,47 @@ def scrape_taobao(page, url):
             print(f"    [Taobao SKU] {len(sku_js)} 張")
     except Exception as e:
         print(f"    [Taobao SKU err] {e}")
+    # 淡寶評價圖片（買家秀）
+    try:
+        tab_clicked = False
+        for tab_sel in ["text=用户评价", '[data-name*="评价"]', ".J_TabBar a"]:
+            try:
+                page.click(tab_sel, timeout=2500)
+                page.wait_for_timeout(2500)
+                tab_clicked = True
+                break
+            except Exception:
+                pass
+        for _ in range(4):
+            page.evaluate("window.scrollBy(0, 800)")
+            page.wait_for_timeout(600)
+        review_js = """
+(function(){
+    var imgs=[]; var seen={};
+    var sels=[".review-detail img",".pic-box img","[class*=review] img","[class*=rate] img","[class*=Rate] img",".content--controls img"];
+    function add(src){
+        if(!src||src.indexOf("alicdn")<0||seen[src]) return;
+        var full=src.replace(/_(\\d+)x(\\d+)[a-z]*\\.(jpg|jpeg|png|webp)/i,".$3").split("?")[0];
+        if(seen[full]) return;
+        seen[src]=seen[full]=1;
+        imgs.push({src:full.indexOf("//")==0?"https:"+full:full,w:0,h:0});
+    }
+    for(var i=0;i<sels.length;i++){
+        var els=document.querySelectorAll(sels[i]);
+        for(var j=0;j<els.length;j++) add(els[j].getAttribute("src")||els[j].getAttribute("data-src")||"");
+    }
+    return imgs.slice(0,40);
+})()
+"""
+        review_imgs = page.evaluate(review_js)
+        if review_imgs:
+            product_images["review_images"] = review_imgs
+            print(f"    [review] {len(review_imgs)} 張評價圖")
+        else:
+            print("    [review] 未找到評價圖")
+    except Exception as e:
+        print(f"    [review err] {e}")
+
     result["product_images"] = product_images
     result["raw_images"] = [i["src"] for i in product_images["main_images"]][:8]
 

@@ -5023,6 +5023,8 @@ body{font-family:-apple-system,sans-serif;background:#f5f5f5;color:#333}
 .img-thumb.cat-sku input[type=checkbox]{accent-color:#f57c00}
 .img-thumb.cat-sku.checked img{border-color:#ff9800;box-shadow:0 0 0 1px #ff9800}
 .img-thumb.cat-detail input[type=checkbox]{accent-color:#7b1fa2}
+.img-thumb.cat-review input[type=checkbox]{accent-color:#795548}
+.img-thumb.cat-review.checked img{border-color:#795548;box-shadow:0 0 0 1px #795548}
 .img-thumb.cat-detail.checked img{border-color:#9c27b0;box-shadow:0 0 0 1px #9c27b0}
 .img-size{font-size:9px;color:#999;text-align:center;margin:3px 0 1px;min-height:13px;line-height:1.3}
 .img-label{font-size:9px;color:#666;text-align:center;max-width:120px;overflow:hidden;white-space:nowrap;text-overflow:ellipsis;margin-bottom:2px}
@@ -5307,6 +5309,12 @@ function renderModal(j, editMode=false){
     _addLb(srcs,[],"詳情");
     h+=imgCatHtml("detail","詳情圖",srcs,[]);
   }
+  const reviewImgs=pi.review_images||[];
+  if(reviewImgs.length){
+    const rvSrcs=reviewImgs.map(i=>typeof i==='object'?i.src:i);
+    _addLb(rvSrcs,[],"評價圖");
+    h+=imgCatHtml("review","買家評價圖",rvSrcs,[]);
+  }
   if(j.processed_images&&j.processed_images.length){
     const zipUrl=`/api/products/${j.id}/images/zip?key=${KEY}`;
     h+=`<div class="section"><div class="slabel" style="display:flex;align-items:center;gap:8px">已處理圖片（白底，${j.processed_images.length} 張）<a href="${zipUrl}" class="export-btn" style="font-size:11px">⬇ ZIP</a></div><div class="img-grid">${j.processed_images.map(img=>`<div class="img-thumb"><img src="${esc(img)}" loading="lazy" onerror="this.style.display='none'"></div>`).join("")}</div></div>`;
@@ -5344,7 +5352,7 @@ async function saveEdit(id){
 }
 
 function imgCatHtml(catId, label, srcs, labels){
-  const catCls={main:'',sku:' cat-sku',detail:' cat-detail'}[catId]||'';
+  const catCls={main:'',sku:' cat-sku',detail:' cat-detail',review:' cat-review'}[catId]||'';
   const thumbs=srcs.map((src,idx)=>{
     const checked=_selImgs.has(src);
     const lbl=labels[idx]||'';
