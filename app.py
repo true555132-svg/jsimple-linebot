@@ -5038,6 +5038,21 @@ body{font-family:-apple-system,sans-serif;background:#f5f5f5;color:#333}
 .btn-translate{background:#e8f5e9;color:#2e7d32;border:none;border-radius:9px;padding:8px 14px;font-size:13px;font-weight:600;cursor:pointer;font-family:-apple-system,sans-serif}
 .btn-translate:hover{background:#c8e6c9}
 .btn-translate:disabled{background:#f5f5f5;color:#bbb;cursor:default}
+/* Lightbox */
+.lb-overlay{position:fixed;inset:0;background:rgba(0,0,0,.88);z-index:9999;display:flex;align-items:center;justify-content:center}
+.lb-content{max-width:90vw;max-height:90vh;display:flex;flex-direction:column;align-items:center}
+.lb-content img{max-width:88vw;max-height:80vh;object-fit:contain;border-radius:8px}
+.lb-info{color:#fff;font-size:13px;margin-top:10px;display:flex;gap:16px;align-items:center}
+.lb-label{font-weight:600;max-width:300px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.lb-count{color:#aaa;font-size:12px}
+.lb-nav{position:fixed;top:50%;transform:translateY(-50%);background:rgba(255,255,255,.15);border:none;color:#fff;font-size:40px;cursor:pointer;padding:10px 18px;border-radius:8px;line-height:1;z-index:10000}
+.lb-nav:hover{background:rgba(255,255,255,.3)}
+.lb-prev{left:12px}
+.lb-next{right:12px}
+.lb-close{position:fixed;top:14px;right:18px;background:none;border:none;color:#fff;font-size:28px;cursor:pointer;z-index:10000;line-height:1}
+.lb-close:hover{color:#ddd}
+.sel-btn-green{background:#e8f5e9;color:#2e7d32}
+.sel-btn-green:hover{background:#c8e6c9}
 .translated-sec{background:#f0fdf4;border:1px solid #86efac;border-radius:10px;padding:12px;margin-top:10px}
 .translated-sec .slabel{color:#16a34a}
 .btn-sm{background:#333;color:#fff;border:none;border-radius:8px;padding:6px 14px;font-size:13px;cursor:pointer;font-family:-apple-system,sans-serif;margin-top:6px}
@@ -5129,7 +5144,7 @@ body{font-family:-apple-system,sans-serif;background:#f5f5f5;color:#333}
 
 <script>
 const KEY = "{{ key }}";
-let jobs = [], filter = "all", pollTimer = null, openId = null, _selImgs = new Set();
+let jobs = [], filter = "all", pollTimer = null, openId = null, _selImgs = new Set(), _lbImgs = [], _lbIdx = 0, _curJobId = 0;
 
 const api = (url, opts={}) => fetch(url+(url.includes("?")?"&":"?")+"key="+KEY, {headers:{"Content-Type":"application/json"},...opts}).then(r=>r.json());
 
@@ -5271,20 +5286,25 @@ function renderModal(j, editMode=false){
   const skuImgs    = pi.sku_images    || [];
   const videoUrls  = pi.video_urls    || [];
   _selImgs = new Set(j.raw_images || []);
+  _curJobId = j.id;
+  _lbImgs = [];
+  const _addLb = (srcs, labels, cat) => srcs.forEach((s,i) => _lbImgs.push({src:s, label:labels&&labels[i]?labels[i]:cat, cat}));
   const imgStatusMap={"pending_images":"等待處理...","processing":"處理中...","done":"白底完成","failed":"處理失敗","no_images":"無圖片"};
   const imgStatusLabel=imgStatusMap[j.img_status]||"";
   const mainSrcs = mainImgs.length ? mainImgs.map(i=>typeof i==='object'?i.src:i) : (j.raw_images||[]);
-  if(mainSrcs.length) h+=imgCatHtml("main","主圖",mainSrcs,[]);
+  if(mainSrcs.length){_addLb(mainSrcs,[],"主圖");h+=imgCatHtml("main","主圖",mainSrcs,[]);}
   if(videoUrls.length){
     h+=`<div class="section"><div class="slabel">影片（${videoUrls.length} 個）</div><div>${videoUrls.map(v=>`<a href="${esc(v)}" target="_blank" style="font-size:12px;display:block;margin:2px 0;color:#1a73e8;word-break:break-all">${esc(v.slice(0,80))}</a>`).join("")}</div></div>`;
   }
   if(skuImgs.length){
     const srcs=skuImgs.map(i=>typeof i==='object'?i.src:i);
     const labels=skuImgs.map(i=>typeof i==='object'?(i.label||''):'');
+    _addLb(srcs,labels,"SKU");
     h+=imgCatHtml("sku","SKU 規格圖",srcs,labels);
   }
   if(detailImgs.length){
     const srcs=detailImgs.map(i=>typeof i==='object'?i.src:i);
+    _addLb(srcs,[],"詳情");
     h+=imgCatHtml("detail","詳情圖",srcs,[]);
   }
   if(j.processed_images&&j.processed_images.length){
@@ -5336,9 +5356,10 @@ function imgCatHtml(catId, label, srcs, labels){
       +`<div class="thumb-actions">`
       +`<a href="${esc(src)}" target="_blank" class="thumb-act" onclick="event.stopPropagation()" title="開新分頁">⬇</a>`
       +`<button class="thumb-act" onclick="event.stopPropagation();cp(this,'${esc(src)}')" title="複製URL">📋</button>`
+      +`<button class="thumb-act" onclick="event.stopPropagation();openLightbox('${esc(src)}')" title="放大檢視">⛶</button>`
       +`</div></div>`;
   }).join("");
-  return `<div class="section" id="cat_${catId}"><div class="img-zone-hd"><div class="slabel">${label}（${srcs.length} 張）</div><button class="sel-btn" onclick="toggleAllInCat('${catId}',true)">全選</button><button class="sel-btn" onclick="toggleAllInCat('${catId}',false)">取消</button></div><div class="img-grid">${thumbs}</div></div>`;
+  return `<div class="section" id="cat_${catId}"><div class="img-zone-hd"><div class="slabel">${label}（${srcs.length} 張）</div><button class="sel-btn" onclick="toggleAllInCat('${catId}',true)">全選</button><button class="sel-btn" onclick="toggleAllInCat('${catId}',false)">取消</button><button class="sel-btn sel-btn-green" onclick="translateCat('${catId}')">文A 翻譯此區</button></div><div class="img-grid">${thumbs}</div></div>`;
 }
 function imgSizeLoad(img){
   const w=img.naturalWidth, h=img.naturalHeight;
@@ -5369,20 +5390,6 @@ function toggleAllInCat(catId,checked){
     syncThumb(cb,wrap);
   });
 }
-async function translateSelected(id){
-  const urls=[..._selImgs];
-  if(!urls.length){toast("請先勾選要翻譯的圖片");return;}
-  const btn=document.getElementById("btnTr_"+id);
-  if(btn){btn.disabled=true;btn.textContent="翻譯中...";}
-  const r=await api("/api/products/"+id+"/translate-images",{method:"POST",body:JSON.stringify({urls})});
-  if(r.ok){
-    toast("翻譯開始，約需 1-3 分鐘...");
-    setTimeout(()=>pollTranslate(id,0),5000);
-  } else {
-    toast("翻譯失敗："+(r.error||""));
-    if(btn){btn.disabled=false;btn.textContent="文A 翻譯選取";}
-  }
-}
 async function pollTranslate(id, tries){
   if(tries>24){toast("翻譯超時，請重試");return;}
   const j=await api("/api/products/"+id);
@@ -5399,6 +5406,52 @@ async function useTranslated(id){
   if(!urls.length){toast("沒有翻譯圖片");return;}
   const r=await api("/api/products/"+id+"/select-images",{method:"POST",body:JSON.stringify({urls})});
   if(r.ok) toast("已設定翻譯圖為輸出圖");
+}
+function openLightbox(src){
+  const idx=_lbImgs.findIndex(i=>i.src===src);
+  _lbIdx=idx>=0?idx:0;
+  _showLb();
+}
+function _showLb(){
+  const img=_lbImgs[_lbIdx];
+  if(!img) return;
+  document.getElementById('lbImg').src=img.src;
+  document.getElementById('lbLabel').textContent=img.label||'';
+  document.getElementById('lbCount').textContent=(_lbIdx+1)+' / '+_lbImgs.length;
+  document.getElementById('lbBox').classList.remove('hidden');
+}
+function lbPrev(){_lbIdx=(_lbIdx-1+_lbImgs.length)%_lbImgs.length;_showLb();}
+function lbNext(){_lbIdx=(_lbIdx+1)%_lbImgs.length;_showLb();}
+function lbClose(){document.getElementById('lbBox').classList.add('hidden');}
+document.addEventListener('keydown',e=>{
+  if(document.getElementById('lbBox').classList.contains('hidden')) return;
+  if(e.key==='ArrowLeft') lbPrev();
+  else if(e.key==='ArrowRight') lbNext();
+  else if(e.key==='Escape') lbClose();
+});
+async function translateCat(catId){
+  const el=document.getElementById('cat_'+catId);
+  if(!el) return;
+  const urls=[...el.querySelectorAll('.img-thumb input[type=checkbox]')].map(cb=>cb.dataset.url).filter(Boolean);
+  if(!urls.length){toast('此區沒有圖片');return;}
+  await _doTranslate(_curJobId,urls);
+}
+async function translateSelected(id){
+  const urls=[..._selImgs];
+  await _doTranslate(id,urls);
+}
+async function _doTranslate(id,urls){
+  if(!urls.length){toast('請先選取要翻譯的圖片');return;}
+  const btn=document.getElementById('btnTr_'+id);
+  if(btn){btn.disabled=true;btn.textContent='翻譯中...';}
+  const r=await api('/api/products/'+id+'/translate-images',{method:'POST',body:JSON.stringify({urls})});
+  if(r.ok){
+    toast('翻譯開始，約需 1-3 分鐘...');
+    setTimeout(()=>pollTranslate(id,0),5000);
+  } else {
+    toast('翻譯失敗：'+(r.error||''));
+    if(btn){btn.disabled=false;btn.textContent='文A 翻譯選取';}
+  }
 }
 async function confirmSelect(id){
   const urls=[..._selImgs];
@@ -5459,6 +5512,15 @@ function esc(s){return String(s||"").replace(/&/g,"&amp;").replace(/</g,"&lt;").
 document.getElementById("urlInput").addEventListener("keydown",e=>{if(e.key==="Enter")submitUrl();});
 loadJobs();
 </script>
+<div id="lbBox" class="lb-overlay hidden" onclick="lbClose()">
+  <button class="lb-close" onclick="lbClose()">✕</button>
+  <button class="lb-nav lb-prev" onclick="event.stopPropagation();lbPrev()">&#8249;</button>
+  <div class="lb-content" onclick="event.stopPropagation()">
+    <img id="lbImg" src="" alt="">
+    <div class="lb-info"><span class="lb-label" id="lbLabel"></span><span class="lb-count" id="lbCount"></span></div>
+  </div>
+  <button class="lb-nav lb-next" onclick="event.stopPropagation();lbNext()">&#8250;</button>
+</div>
 </body></html>"""
 
 # ── 後台路由 ──────────────────────────────────────────────────
