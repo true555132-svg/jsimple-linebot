@@ -199,7 +199,14 @@ _GALLERY_SEL = {
     'taobao': [
         '.J_ThumbList img',
         '.mainPicWraper img',
+        '#J_ImgBooth img',
+        '.tb-gallery img',
+        '[class*="mainPic"] img',
+        '[class*="mainImage"] img',
+        '[class*="PicGallery"] img',
+        '[class*="galleryItem"] img',
         '[class*="gallery"] img',
+        '[class*="thumbItem"] img',
     ],
 }
 _DESC_SEL = {
@@ -239,7 +246,13 @@ def _extract_images_dom(page, platform='1688'):
     main_srcs = {i['src'] for i in out['main_images']}
 
     def _add_detail(img):
-        if img and img['src'] not in main_srcs and img['w'] >= 1000 and img['h'] >= 250:
+        if not img or img['src'] in main_srcs:
+            return
+        w_, h_ = img['w'], img['h']
+        # 過濾追蹤像素：已知尺寸時，寬或高小於 100 的直接跳過
+        if (w_ > 0 and w_ < 100) or (h_ > 0 and h_ < 100):
+            return
+        if w_ >= 1000 and h_ >= 250:
             main_srcs.add(img['src'])
             out['detail_images'].append(img)
 
@@ -559,21 +572,83 @@ def scrape_taobao(page, url):
         except Exception: pass
 
     product_images = _extract_images_dom(page, 'taobao')
+    # 淘寶主圖 JS fallback（當 DOM selector 抓不到時）
+    if not product_images['main_images']:
+        try:
+            main_js = page.evaluate("""
+() => {
+    const imgs = []; const seen = new Set();
+    // 策略1: 找所有 alicdn 方形大圖
+    document.querySelectorAll('img').forEach(el => {
+        const src = el.src || el.dataset.src || el.dataset.lazySrc || '';
+        if (!src || !src.includes('alicdn') || seen.has(src)) return;
+        const w = el.naturalWidth || el.width || 0;
+        const h = el.naturalHeight || el.height || 0;
+        // 方形大圖且在頁面前半段
+        const rect = el.getBoundingClientRect();
+        if (w >= 400 && h >= 400 && rect.left < window.innerWidth * 0.6) {
+            seen.add(src); imgs.push({src, w, h});
+        }
+    });
+    // 策略2: 縮圖列表
+    if (imgs.length === 0) {
+        document.querySelectorAll('[class*=thumb] img,[class*=Thumb] img').forEach(el => {
+            const src = el.src || el.dataset.src || '';
+            if (src && src.includes('alicdn') && !seen.has(src)) {
+                seen.add(src);
+                // 換成原圖（移除尺寸後綴）
+                const orig = src.replace(/_\d+x\d+.*?\.(jpg|png|webp)/, '.$1');
+                imgs.push({src: orig, w: 0, h: 0});
+            }
+        });
+    }
+    return imgs.slice(0, 10);
+}
+""")
+            if main_js:
+                product_images['main_images'] = main_js
+                result['raw_images'] = [i['src'] for i in main_js[:8]]
+                print(f"    [Taobao main JS fallback] {len(main_js)} 張")
+        except Exception as e:
+            print(f"    [Taobao main JS err] {e}")
     # 淘寶 SKU 規格圖
     try:
         sku_js = page.evaluate("""
 () => {
     const imgs = []; const seen = new Set();
-    const add = (src, lbl) => { if(src && !seen.has(src)){ seen.add(src); imgs.push({src: src.startsWith('//')?'https:'+src:src, label:lbl||''}); } };
+    const add = (src, lbl) => {
+        if(!src || seen.has(src)) return;
+        seen.add(src);
+        imgs.push({src: src.startsWith('//')?'https:'+src:src, label:lbl||''});
+    };
+    // 路徑1: __GLOBAL_DATA__
     try {
         const d = window.__GLOBAL_DATA__ || {};
-        const props = (d.item && d.item.props && d.item.props.props) || [];
+        const props = (d.item&&d.item.props&&d.item.props.props)
+                   || (d.initData&&d.initData.item&&d.initData.item.props&&d.initData.item.props.props)
+                   || [];
         props.forEach(p => (p.values||[]).forEach(v => add(v.imageUrl||v.picUrl||'', (p.name||'')+(v.name||''))));
     } catch(e){}
+    // 路徑2: skuCore in page JSON
+    if(imgs.length===0) {
+        try {
+            const scripts = document.querySelectorAll('script');
+            for(const s of scripts) {
+                if(!s.text.includes('skuCore')) continue;
+                const m = s.text.match(/skuCore.*?props.*?\[(.{0,5000}?)\]/);
+                if(m) {
+                    const raw = JSON.parse('['+m[1]+']');
+                    raw.forEach(p => (p.values||[]).forEach(v => add(v.imageUrl||'', (p.name||'')+(v.name||''))));
+                    break;
+                }
+            }
+        } catch(e){}
+    }
+    // 路徑3: DOM fallback
     if(imgs.length===0){
-        document.querySelectorAll('[class*=sku] img,[class*=Sku] img,.J_TSaleProp img,.sku-prop img').forEach(el => {
+        document.querySelectorAll('[class*=sku] img,[class*=Sku] img,.J_TSaleProp img,.sku-prop img,[class*=color] img,[class*=Color] img').forEach(el => {
             const src = el.src || el.dataset.src || el.dataset.lazySrc || '';
-            if(src && (src.includes('alicdn') || src.includes('taobao'))) add(src, el.alt||'');
+            if(src && src.includes('alicdn') && el.width >= 30) add(src, el.alt||'');
         });
     }
     return imgs;

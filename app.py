@@ -5327,8 +5327,11 @@ function imgCatHtml(catId, label, srcs, labels){
   return `<div class="section" id="cat_${catId}"><div class="img-zone-hd"><div class="slabel">${label}（${srcs.length} 張）</div><button class="sel-btn" onclick="toggleAllInCat('${catId}',true)">全選</button><button class="sel-btn" onclick="toggleAllInCat('${catId}',false)">取消</button></div><div class="img-grid">${thumbs}</div></div>`;
 }
 function imgSizeLoad(img){
-  const el=img.closest('.img-thumb').querySelector('.img-size');
-  if(el) el.textContent=img.naturalWidth+' × '+img.naturalHeight;
+  const w=img.naturalWidth, h=img.naturalHeight;
+  const wrap=img.closest('.img-thumb');
+  if(w>0 && h>0 && (w<100 || h<100)){wrap.style.display='none';return;}
+  const el=wrap.querySelector('.img-size');
+  if(el&&w>0) el.textContent=w+' × '+h;
 }
 function imgThumbClick(e,wrap,ckId){
   if(e.target.type==="checkbox") return;
