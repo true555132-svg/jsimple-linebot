@@ -128,6 +128,8 @@ def _init_messages_db():
                 "ALTER TABLE product_jobs ADD COLUMN IF NOT EXISTS raw_extra TEXT DEFAULT '{}'",
                 "ALTER TABLE product_jobs ADD COLUMN IF NOT EXISTS brand TEXT DEFAULT ''",
                 "ALTER TABLE product_jobs ADD COLUMN IF NOT EXISTS product_images TEXT DEFAULT '{}'",
+                "ALTER TABLE product_jobs ADD COLUMN IF NOT EXISTS translated_images TEXT DEFAULT '[]'",
+                "ALTER TABLE product_jobs ADD COLUMN IF NOT EXISTS translate_status TEXT DEFAULT ''",
                 "ALTER TABLE messages ADD COLUMN IF NOT EXISTS quote_token TEXT DEFAULT ''",
                 "ALTER TABLE messages ADD COLUMN IF NOT EXISTS reply_quote_token TEXT DEFAULT ''",
             ]:
@@ -4108,13 +4110,13 @@ def _pj_get(job_id):
     try:
         conn = _pg_conn(); cur = conn.cursor()
         cur.execute(
-            "SELECT id,url,platform,status,raw_title,raw_desc,raw_images,raw_price,ai_name,ai_desc,ai_keywords,error_msg,created_at,processed_images,img_status,raw_extra,brand FROM product_jobs WHERE id=%s",
+            "SELECT id,url,platform,status,raw_title,raw_desc,raw_images,raw_price,ai_name,ai_desc,ai_keywords,error_msg,created_at,processed_images,img_status,raw_extra,brand,COALESCE(translated_images,'[]'),COALESCE(translate_status,'') FROM product_jobs WHERE id=%s",
             (job_id,)
         )
         row = cur.fetchone()
         if not row:
             cur.close(); conn.close(); return None
-        result = {"id":row[0],"url":row[1],"platform":row[2],"status":row[3],"raw_title":row[4],"raw_desc":row[5],"raw_images":json.loads(row[6] or "[]"),"raw_price":row[7],"ai_name":row[8],"ai_desc":row[9],"ai_keywords":row[10],"error_msg":row[11],"created_at":row[12],"processed_images":json.loads(row[13] or "[]"),"img_status":row[14] or "","raw_extra":json.loads(row[15] or "{}"),"brand":row[16] or ""}
+        result = {"id":row[0],"url":row[1],"platform":row[2],"status":row[3],"raw_title":row[4],"raw_desc":row[5],"raw_images":json.loads(row[6] or "[]"),"raw_price":row[7],"ai_name":row[8],"ai_desc":row[9],"ai_keywords":row[10],"error_msg":row[11],"created_at":row[12],"processed_images":json.loads(row[13] or "[]"),"img_status":row[14] or "","raw_extra":json.loads(row[15] or "{}"),"brand":row[16] or "","translated_images":json.loads(row[17] or "[]"),"translate_status":row[18] or ""}
         # product_images 欄位可能尚未存在（migration 未完成）
         try:
             cur.execute("SELECT product_images FROM product_jobs WHERE id=%s", (job_id,))
@@ -5033,6 +5035,11 @@ body{font-family:-apple-system,sans-serif;background:#f5f5f5;color:#333}
 .btn-confirm:hover{background:#333}
 .btn-zip{background:#e3f2fd;color:#1565c0;border:none;border-radius:9px;padding:8px 14px;font-size:13px;font-weight:600;cursor:pointer;font-family:-apple-system,sans-serif}
 .btn-zip:hover{background:#bbdefb}
+.btn-translate{background:#e8f5e9;color:#2e7d32;border:none;border-radius:9px;padding:8px 14px;font-size:13px;font-weight:600;cursor:pointer;font-family:-apple-system,sans-serif}
+.btn-translate:hover{background:#c8e6c9}
+.btn-translate:disabled{background:#f5f5f5;color:#bbb;cursor:default}
+.translated-sec{background:#f0fdf4;border:1px solid #86efac;border-radius:10px;padding:12px;margin-top:10px}
+.translated-sec .slabel{color:#16a34a}
 .btn-sm{background:#333;color:#fff;border:none;border-radius:8px;padding:6px 14px;font-size:13px;cursor:pointer;font-family:-apple-system,sans-serif;margin-top:6px}
 .btn-sm:hover{background:#555}
 .hidden{display:none}
@@ -5285,7 +5292,14 @@ function renderModal(j, editMode=false){
     h+=`<div class="section"><div class="slabel" style="display:flex;align-items:center;gap:8px">已處理圖片（白底，${j.processed_images.length} 張）<a href="${zipUrl}" class="export-btn" style="font-size:11px">⬇ ZIP</a></div><div class="img-grid">${j.processed_images.map(img=>`<div class="img-thumb"><img src="${esc(img)}" loading="lazy" onerror="this.style.display='none'"></div>`).join("")}</div></div>`;
   }
   h+=`<hr class="divider">`;
-  h+=`<div class="sel-action-bar"><span class="sel-count" id="selCount">已選 ${_selImgs.size} 張</span><button class="btn-zip" onclick="downloadZipSelected(${j.id})">⬇ ZIP 下載</button><button class="btn-confirm" onclick="confirmSelect(${j.id})">確認選圖</button></div>`;
+  const trImgs=j.translated_images||[];
+  if(trImgs.length){
+    h+=`<div class="translated-sec"><div class="slabel">翻譯完成（${trImgs.length} 張）</div>`
+      +`<div class="img-grid">${trImgs.map((src,i)=>`<div class="img-thumb"><img src="${esc(src)}" loading="lazy" onerror="this.style.display='none'"><div class="thumb-actions"><a href="${esc(src)}" target="_blank" class="thumb-act">⬇</a><button class="thumb-act" onclick="event.stopPropagation();cp(this,'${esc(src)}')">📋</button></div></div>`).join("")}</div>`
+      +`<button class="sel-btn" style="margin-top:8px" onclick="useTranslated(${j.id})">✓ 以翻譯圖作為輸出</button>`
+      +`</div>`;
+  }
+  h+=`<div class="sel-action-bar"><span class="sel-count" id="selCount">已選 ${_selImgs.size} 張</span><button class="btn-translate" id="btnTr_${j.id}" onclick="translateSelected(${j.id})">文A 翻譯選取</button><button class="btn-zip" onclick="downloadZipSelected(${j.id})">⬇ ZIP 下載</button><button class="btn-confirm" onclick="confirmSelect(${j.id})">確認選圖</button></div>`;
   h+=`<br><button class="raw-toggle" onclick="toggleRaw(this)">顯示原始資料 ▾</button>`;
   h+=`<div id="rawSec" class="hidden" style="margin-top:12px">`;
   if(j.raw_title) h+=`<div class="section"><div class="slabel">原始標題</div><div class="rbox">${esc(j.raw_title)}</div></div>`;
@@ -5354,6 +5368,37 @@ function toggleAllInCat(catId,checked){
     cb.checked=checked;
     syncThumb(cb,wrap);
   });
+}
+async function translateSelected(id){
+  const urls=[..._selImgs];
+  if(!urls.length){toast("請先勾選要翻譯的圖片");return;}
+  const btn=document.getElementById("btnTr_"+id);
+  if(btn){btn.disabled=true;btn.textContent="翻譯中...";}
+  const r=await api("/api/products/"+id+"/translate-images",{method:"POST",body:JSON.stringify({urls})});
+  if(r.ok){
+    toast("翻譯開始，約需 1-3 分鐘...");
+    setTimeout(()=>pollTranslate(id,0),5000);
+  } else {
+    toast("翻譯失敗："+(r.error||""));
+    if(btn){btn.disabled=false;btn.textContent="文A 翻譯選取";}
+  }
+}
+async function pollTranslate(id, tries){
+  if(tries>24){toast("翻譯超時，請重試");return;}
+  const j=await api("/api/products/"+id);
+  if(j.translate_status==="done"||((j.translated_images||[]).length>0&&j.translate_status!=="processing")){
+    toast("翻譯完成！");
+    if(openId===id) openJob(id);
+  } else {
+    setTimeout(()=>pollTranslate(id,tries+1),5000);
+  }
+}
+async function useTranslated(id){
+  const j=await api("/api/products/"+id);
+  const urls=j.translated_images||[];
+  if(!urls.length){toast("沒有翻譯圖片");return;}
+  const r=await api("/api/products/"+id+"/select-images",{method:"POST",body:JSON.stringify({urls})});
+  if(r.ok) toast("已設定翻譯圖為輸出圖");
 }
 async function confirmSelect(id){
   const urls=[..._selImgs];
@@ -5599,6 +5644,183 @@ def api_products_images_zip_selected(job_id):
     safe = _re.sub(r'[^\w]', '_', (job.get('ai_name') or 'product')[:20])
     return Response(buf.getvalue(), mimetype="application/zip",
         headers={"Content-Disposition": f'attachment; filename="{safe}_images.zip"'})
+
+
+
+def _get_cjk_font(size=22):
+    """取得支援中文的字型，找不到就下載 NotoSans"""
+    from PIL import ImageFont
+    import os, urllib.request as ureq
+    paths = [
+        "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
+        "/usr/share/fonts/opentype/noto/NotoSansCJKsc-Regular.otf",
+        "/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc",
+        "/usr/share/fonts/truetype/arphic/uming.ttc",
+        "/tmp/NotoSansCJK.ttc",
+    ]
+    for p in paths:
+        if os.path.exists(p):
+            try:
+                return ImageFont.truetype(p, size)
+            except Exception:
+                pass
+    # Download fallback
+    cache = "/tmp/NotoSansCJK.ttc"
+    if not os.path.exists(cache):
+        try:
+            ureq.urlretrieve(
+                "https://github.com/googlefonts/noto-cjk/raw/main/Sans/OTF/TraditionalChinese/NotoSansCJKtc-Regular.otf",
+                cache
+            )
+            return ImageFont.truetype(cache, size)
+        except Exception:
+            pass
+    return ImageFont.load_default()
+
+
+def _translate_images_job(job_id, img_urls):
+    """背景 thread：Claude Vision OCR+翻譯 → Stability AI inpaint → Pillow 貼字"""
+    import io, base64, re as _re2
+    try:
+        import requests as req_lib
+        from PIL import Image, ImageDraw
+    except ImportError as e:
+        print(f"[translate] import error: {e}")
+        _pj_update(job_id, translate_status="failed")
+        return
+
+    STABILITY_KEY = os.getenv("STABILITY_API_KEY", "")
+    if not STABILITY_KEY:
+        _pj_update(job_id, translate_status="failed")
+        print("[translate] STABILITY_API_KEY not set")
+        return
+
+    translated_urls = []
+
+    for idx, url in enumerate(img_urls):
+        try:
+            print(f"[translate] {idx+1}/{len(img_urls)} {url[:60]}")
+
+            # 1. Download image
+            req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0", "Referer": "https://www.1688.com/"})
+            with urllib.request.urlopen(req, timeout=20) as r:
+                img_bytes = r.read()
+
+            # Detect media type
+            media_type = "image/jpeg"
+            if img_bytes[:8] == b'\x89PNG\r\n\x1a\n': media_type = "image/png"
+            elif img_bytes[:4] == b'RIFF': media_type = "image/webp"
+
+            # 2. Claude Vision: OCR + translate
+            img_b64 = base64.standard_b64encode(img_bytes).decode()
+            claude_resp = urllib.request.urlopen(
+                urllib.request.Request(
+                    "https://api.anthropic.com/v1/messages",
+                    data=json.dumps({
+                        "model": "claude-haiku-4-5-20251001",
+                        "max_tokens": 2000,
+                        "messages": [{
+                            "role": "user",
+                            "content": [
+                                {"type": "image", "source": {"type": "base64", "media_type": media_type, "data": img_b64}},
+                                {"type": "text", "text": '找出圖片中所有中文文字區塊，只返回JSON：{"texts":[{"s":"簡體原文","t":"繁體翻譯","x":0,"y":0,"w":100,"h":10}]}，x/y/w/h為百分比(0-100)。無文字返回{"texts":[]}'}
+                            ]
+                        }]
+                    }).encode(),
+                    headers={"x-api-key": ANTHROPIC_API_KEY, "anthropic-version": "2023-06-01", "content-type": "application/json"},
+                    method="POST"
+                ), timeout=30
+            )
+            claude_data = json.loads(claude_resp.read())
+            raw_text = claude_data["content"][0]["text"].strip()
+            m = _re2.search(r'\{.*\}', raw_text, _re2.DOTALL)
+            if not m:
+                translated_urls.append(url); continue
+
+            ocr_result = json.loads(m.group())
+            texts = ocr_result.get("texts", [])
+            print(f"  [Claude OCR] {len(texts)} 文字區塊")
+
+            if not texts:
+                translated_urls.append(url); continue
+
+            # 3. Create mask image
+            img_pil = Image.open(io.BytesIO(img_bytes)).convert("RGB")
+            W, H = img_pil.size
+            mask_img = Image.new("L", (W, H), 0)
+            draw_m = ImageDraw.Draw(mask_img)
+            for t in texts:
+                px = max(0, int((t.get("x", 0) - 1) / 100 * W))
+                py = max(0, int((t.get("y", 0) - 1) / 100 * H))
+                pw = min(W, int((t.get("x", 0) + t.get("w", 100) + 1) / 100 * W))
+                ph = min(H, int((t.get("y", 0) + t.get("h", 10) + 1) / 100 * H))
+                draw_m.rectangle([px, py, pw, ph], fill=255)
+
+            # 4. Stability AI erase
+            img_buf = io.BytesIO(); img_pil.save(img_buf, "PNG"); img_buf.seek(0)
+            mask_buf = io.BytesIO(); mask_img.convert("RGB").save(mask_buf, "PNG"); mask_buf.seek(0)
+
+            stab = req_lib.post(
+                "https://api.stability.ai/v2beta/stable-image/edit/erase",
+                headers={"Authorization": f"Bearer {STABILITY_KEY}", "Accept": "image/*"},
+                files={"image": ("img.png", img_buf.getvalue(), "image/png"),
+                       "mask": ("mask.png", mask_buf.getvalue(), "image/png")},
+                data={"output_format": "png"},
+                timeout=60
+            )
+            if stab.status_code != 200:
+                print(f"  [Stability] error {stab.status_code}: {stab.text[:100]}")
+                translated_urls.append(url); continue
+
+            # 5. Overlay translated text
+            result_img = Image.open(io.BytesIO(stab.content)).convert("RGB")
+            draw = ImageDraw.Draw(result_img)
+            font_size = max(14, H // 40)
+            font = _get_cjk_font(font_size)
+
+            for t in texts:
+                tx = int(t.get("x", 0) / 100 * W) + 4
+                ty = int(t.get("y", 0) / 100 * H) + 2
+                draw.text((tx, ty), t.get("t", ""), fill=(20, 20, 20), font=font)
+
+            # 6. Upload result
+            out_buf = io.BytesIO()
+            result_img.save(out_buf, "JPEG", quality=92)
+            fname = f"translated_{job_id}_{idx+1}.jpg"
+            turl, _ = upload_image_to_supabase(fname, out_buf.getvalue(), "image/jpeg")
+            if not turl:
+                turl, _ = upload_image_to_github(fname, out_buf.getvalue())
+            translated_urls.append(turl or url)
+            print(f"  [translate] done: {turl or url}")
+
+        except Exception as e:
+            print(f"  [translate ERROR] {e}")
+            translated_urls.append(url)
+
+    _pj_update(job_id,
+               translated_images=json.dumps(translated_urls, ensure_ascii=False),
+               translate_status="done")
+    print(f"[translate] finished {len(translated_urls)} images for job {job_id}")
+
+
+@app.route("/api/products/<int:job_id>/translate-images", methods=["POST"])
+def api_translate_images(job_id):
+    ok, _ = auth_required()
+    if not ok:
+        return jsonify({"error": "unauthorized"}), 403
+    if not os.getenv("STABILITY_API_KEY"):
+        return jsonify({"error": "STABILITY_API_KEY 未設定"}), 500
+    job = _pj_get(job_id)
+    if not job:
+        return jsonify({"error": "not found"}), 404
+    data = request.get_json(force=True)
+    urls = [u.strip() for u in (data.get("urls") or []) if u.strip()]
+    if not urls:
+        return jsonify({"error": "請選取要翻譯的圖片"}), 400
+    _pj_update(job_id, translate_status="processing")
+    import threading
+    threading.Thread(target=_translate_images_job, args=(job_id, urls), daemon=True).start()
+    return jsonify({"ok": True, "count": len(urls)})
 
 
 # ── 本機 Worker API ───────────────────────────────────────────
