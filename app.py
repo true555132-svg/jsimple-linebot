@@ -5785,7 +5785,7 @@ def _translate_images_job(job_id, img_urls):
                             "role": "user",
                             "content": [
                                 {"type": "image", "source": {"type": "base64", "media_type": media_type, "data": img_b64}},
-                                {"type": "text", "text": '找出圖片中所有中文文字區塊，只返回JSON：{"texts":[{"s":"簡體原文","t":"繁體翻譯","x":0,"y":0,"w":100,"h":10}]}，x/y/w/h為百分比(0-100)。無文字返回{"texts":[]}'}
+                                {"type": "text", "text": '請仔細掃描圖片中每一個位置的中文文字，包括：大標題、小字說明、角落文字、裝飾字、標籤文字，全部都要找出來。每個文字區塊分開列出。只返回JSON：{"texts":[{"s":"簡體原文","t":"繁體翻譯","x":左邊界%,"y":上邊界%,"w":寬度%,"h":高度%}]}，百分比為0到100。沒有中文則返回{"texts":[]}'}
                             ]
                         }]
                     }).encode(),
@@ -5812,10 +5812,10 @@ def _translate_images_job(job_id, img_urls):
             mask_img = Image.new("L", (W, H), 0)
             draw_m = ImageDraw.Draw(mask_img)
             for t in texts:
-                px = max(0, int((t.get("x", 0) - 1) / 100 * W))
-                py = max(0, int((t.get("y", 0) - 1) / 100 * H))
-                pw = min(W, int((t.get("x", 0) + t.get("w", 100) + 1) / 100 * W))
-                ph = min(H, int((t.get("y", 0) + t.get("h", 10) + 1) / 100 * H))
+                px = max(0, int((t.get("x", 0) - 3) / 100 * W))
+                py = max(0, int((t.get("y", 0) - 3) / 100 * H))
+                pw = min(W, int((t.get("x", 0) + t.get("w", 100) + 3) / 100 * W))
+                ph = min(H, int((t.get("y", 0) + t.get("h", 10) + 3) / 100 * H))
                 draw_m.rectangle([px, py, pw, ph], fill=255)
 
             # 4. Stability AI erase
