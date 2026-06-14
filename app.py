@@ -5748,8 +5748,47 @@ def _get_cjk_font(size=22):
     return ImageFont.load_default()
 
 
+def _sample_bg_info(img_pil, x1, y1, x2, y2):
+    """返回 (variance, avg_brightness, edge_color)。純 Pillow，不依賴 numpy。
+    variance  = RGB 各 channel stddev 的 RMS（等效 np.std 行為）
+    brightness= 灰階平均亮度
+    edge_color= bbox 外圍 3px 採樣均色（避開文字像素）
+    """
+    from PIL import ImageStat
+    W, H = img_pil.size
+    region = img_pil.crop((x1, y1, x2, y2))
+    rw, rh = region.size
+    if rw <= 0 or rh <= 0:
+        return 0.0, 200.0, (255, 255, 255)
+
+    stat_rgb = ImageStat.Stat(region)
+    variance = (sum(v * v for v in stat_rgb.stddev) / len(stat_rgb.stddev)) ** 0.5
+
+    stat_l = ImageStat.Stat(region.convert("L"))
+    avg_brightness = stat_l.mean[0]
+
+    # 背景色：從 bbox 外圍 3px 採樣，避免文字像素干擾
+    ox1, oy1 = max(0, x1 - 3), max(0, y1 - 3)
+    ox2, oy2 = min(W, x2 + 3), min(H, y2 + 3)
+    stat_outer = ImageStat.Stat(img_pil.crop((ox1, oy1, ox2, oy2)))
+    edge_color = tuple(int(v) for v in stat_outer.mean[:3])
+
+    return variance, avg_brightness, edge_color
+
+
+def _fit_and_draw(draw, xy, text, font, text_color=(15, 15, 15)):
+    """貼上翻譯文字，支援自訂文字顏色"""
+    draw.text(xy, text, fill=text_color, font=font)
+
+
 def _translate_images_job(job_id, img_urls):
-    """背景 thread：Claude Vision OCR+翻譯 → Stability AI inpaint → Pillow 貼字"""
+    """背景 thread：Claude Vision OCR+翻譯 → 依背景複雜度選 Pillow / Stability AI → 貼字
+
+    variance < 20  → pillow (直接覆蓋，padding=2)
+    20 <= var < 50 → pillow+pad (稍大 padding=6)
+    variance >= 50 → stability (才呼叫 Stability AI inpaint)
+    brightness < 128 → 白色文字；>= 128 → 深色文字
+    """
     import io, base64, re as _re2
     try:
         import requests as req_lib
@@ -5761,9 +5800,7 @@ def _translate_images_job(job_id, img_urls):
 
     STABILITY_KEY = os.getenv("STABILITY_API_KEY", "")
     if not STABILITY_KEY:
-        _pj_update(job_id, translate_status="failed")
-        print("[translate] STABILITY_API_KEY not set")
-        return
+        print("[translate] STABILITY_API_KEY not set — complex blocks will fallback to Pillow")
 
     translated_urls = []
 
@@ -5814,44 +5851,103 @@ def _translate_images_job(job_id, img_urls):
             if not texts:
                 translated_urls.append(url); continue
 
-            # 3. Create mask image
+            # 3. Load image，依 variance 分類每個文字區塊
             img_pil = Image.open(io.BytesIO(img_bytes)).convert("RGB")
             W, H = img_pil.size
-            mask_img = Image.new("L", (W, H), 0)
-            draw_m = ImageDraw.Draw(mask_img)
-            for t in texts:
-                px = max(0, int((t.get("x", 0) - 3) / 100 * W))
-                py = max(0, int((t.get("y", 0) - 3) / 100 * H))
-                pw = min(W, int((t.get("x", 0) + t.get("w", 100) + 3) / 100 * W))
-                ph = min(H, int((t.get("y", 0) + t.get("h", 10) + 3) / 100 * H))
-                draw_m.rectangle([px, py, pw, ph], fill=255)
-
-            # 4. Stability AI erase
-            img_buf = io.BytesIO(); img_pil.save(img_buf, "PNG"); img_buf.seek(0)
-            mask_buf = io.BytesIO(); mask_img.convert("RGB").save(mask_buf, "PNG"); mask_buf.seek(0)
-
-            stab = req_lib.post(
-                "https://api.stability.ai/v2beta/stable-image/edit/erase",
-                headers={"Authorization": f"Bearer {STABILITY_KEY}", "Accept": "image/*"},
-                files={"image": ("img.png", img_buf.getvalue(), "image/png"),
-                       "mask": ("mask.png", mask_buf.getvalue(), "image/png")},
-                data={"output_format": "png"},
-                timeout=60
-            )
-            if stab.status_code != 200:
-                print(f"  [Stability] error {stab.status_code}: {stab.text[:100]}")
-                translated_urls.append(url); continue
-
-            # 5. Overlay translated text
-            result_img = Image.open(io.BytesIO(stab.content)).convert("RGB")
-            draw = ImageDraw.Draw(result_img)
             font_size = max(14, H // 40)
             font = _get_cjk_font(font_size)
 
+            simple_blocks = []   # variance < 50：Pillow 覆蓋
+            complex_blocks = []  # variance >= 50：Stability AI
+
             for t in texts:
-                tx = int(t.get("x", 0) / 100 * W) + 4
-                ty = int(t.get("y", 0) / 100 * H) + 2
-                draw.text((tx, ty), t.get("t", ""), fill=(20, 20, 20), font=font)
+                rx = t.get("x", 0); ry = t.get("y", 0)
+                rw = t.get("w", 100); rh_t = t.get("h", 10)
+                x1 = max(0, int((rx - 3) / 100 * W))
+                y1 = max(0, int((ry - 3) / 100 * H))
+                x2 = min(W, int((rx + rw + 3) / 100 * W))
+                y2 = min(H, int((ry + rh_t + 3) / 100 * H))
+                if x2 <= x1: x2 = min(W, x1 + 10)
+                if y2 <= y1: y2 = min(H, y1 + 10)
+
+                variance, brightness, edge_color = _sample_bg_info(img_pil, x1, y1, x2, y2)
+                text_color = (255, 255, 255) if brightness < 128 else (15, 15, 15)
+                color_label = "white" if brightness < 128 else "dark"
+
+                block = {**t, "x1": x1, "y1": y1, "x2": x2, "y2": y2,
+                         "variance": variance, "brightness": brightness,
+                         "text_color": text_color, "edge_color": edge_color}
+
+                if variance < 20:
+                    block["method"] = "pillow"; block["pad"] = 2
+                    simple_blocks.append(block)
+                    print(f"    [{t.get('s', '')[:12]}] var={variance:.1f} bright={brightness:.0f} → pillow | {color_label}")
+                elif variance < 50:
+                    block["method"] = "pillow+pad"; block["pad"] = 6
+                    simple_blocks.append(block)
+                    print(f"    [{t.get('s', '')[:12]}] var={variance:.1f} bright={brightness:.0f} → pillow+pad | {color_label}")
+                else:
+                    block["method"] = "stability"
+                    complex_blocks.append(block)
+                    print(f"    [{t.get('s', '')[:12]}] var={variance:.1f} bright={brightness:.0f} → stability | {color_label}")
+
+            stability_saved = len(simple_blocks)
+            print(f"  [classify] pillow={len(simple_blocks)} stability={len(complex_blocks)} | 本張省下 {stability_saved}/{len(texts)} 次 Stability 呼叫")
+
+            # 4. Stability AI：只處理 complex blocks
+            if complex_blocks and STABILITY_KEY:
+                mask_img = Image.new("L", (W, H), 0)
+                draw_m = ImageDraw.Draw(mask_img)
+                for b in complex_blocks:
+                    draw_m.rectangle([b["x1"], b["y1"], b["x2"], b["y2"]], fill=255)
+
+                img_buf = io.BytesIO(); img_pil.save(img_buf, "PNG"); img_buf.seek(0)
+                mask_buf = io.BytesIO(); mask_img.convert("RGB").save(mask_buf, "PNG"); mask_buf.seek(0)
+
+                stab = req_lib.post(
+                    "https://api.stability.ai/v2beta/stable-image/edit/erase",
+                    headers={"Authorization": f"Bearer {STABILITY_KEY}", "Accept": "image/*"},
+                    files={"image": ("img.png", img_buf.getvalue(), "image/png"),
+                           "mask": ("mask.png", mask_buf.getvalue(), "image/png")},
+                    data={"output_format": "png"},
+                    timeout=60
+                )
+                if stab.status_code != 200:
+                    print(f"  [Stability] error {stab.status_code}: {stab.text[:100]}")
+                    # Fallback：complex blocks 轉為 pillow+pad
+                    for b in complex_blocks:
+                        b["method"] = "pillow_fallback"; b["pad"] = 6
+                    simple_blocks.extend(complex_blocks)
+                    complex_blocks = []
+                    result_img = img_pil.copy()
+                    print(f"  [Stability] fallback → Pillow for all blocks")
+                else:
+                    result_img = Image.open(io.BytesIO(stab.content)).convert("RGB")
+                    print(f"  [Stability] OK ({len(complex_blocks)} complex blocks erased)")
+            else:
+                if complex_blocks:
+                    # 無 key：complex 也走 pillow fallback
+                    for b in complex_blocks:
+                        b["method"] = "pillow_fallback"; b["pad"] = 6
+                    simple_blocks.extend(complex_blocks)
+                    complex_blocks = []
+                result_img = img_pil.copy()
+                print(f"  [Stability] skipped (all {len(simple_blocks)} blocks use Pillow)")
+
+            # 5. 疊字
+            draw = ImageDraw.Draw(result_img)
+
+            # Simple blocks：rectangle 覆蓋原文 + 貼翻譯字
+            for b in simple_blocks:
+                pad = b.get("pad", 2)
+                draw.rectangle([max(0, b["x1"] - pad), max(0, b["y1"] - pad),
+                                 min(W, b["x2"] + pad), min(H, b["y2"] + pad)],
+                                fill=b["edge_color"])
+                _fit_and_draw(draw, (b["x1"] + 2, b["y1"] + 1), b.get("t", ""), font, b["text_color"])
+
+            # Complex blocks：Stability 已清除原文，直接貼字
+            for b in complex_blocks:
+                _fit_and_draw(draw, (b["x1"] + 2, b["y1"] + 1), b.get("t", ""), font, b["text_color"])
 
             # 6. Upload result
             out_buf = io.BytesIO()
