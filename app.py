@@ -5969,21 +5969,21 @@ def _translate_images_job(job_id, img_urls):
             result_img = img_pil.copy()
 
             # 6a. Pillow cover (white/solid/simple)
+            # pad = 2~6px（來自 variance 分類），不用 bbox 百分比避免巨大方塊
             if simple:
                 draw = ImageDraw.Draw(result_img)
                 for b in simple:
                     x1,y1,x2,y2 = b['_px']
                     role = b.get("font_role","body")
-                    bw,bh = x2-x1, y2-y1
-                    px = max(12,int(bw*0.20)) if role=="title" else max(8,int(bw*0.15))
-                    py = max(12,int(bh*0.70)) if role=="title" else max(6,int(bh*0.45))
-                    rx1,ry1 = max(0,x1-px), max(0,y1-py)
-                    rx2,ry2 = min(W,x2+px), min(H,y2+py)
+                    pad = b.get('_pad', 4)
+                    rx1,ry1 = max(0,x1-pad), max(0,y1-pad)
+                    rx2,ry2 = min(W,x2+pad), min(H,y2+pad)
                     bg = b.get('_edge_color') or _sample_bg(img_pil, rx1,ry1,rx2,ry2)
                     draw.rectangle([rx1,ry1,rx2,ry2], fill=bg)
                     _fit_and_draw(draw, b.get("translated_text",""), rx1,ry1,rx2,ry2, role, b['_text_color'])
                     stats['pillow']+=1
-                    print(f"    Pillow [{role}]: '{b.get('text','')}' → '{b.get('translated_text','')}' | {color_label}")
+                    clabel = "white" if b.get('_brightness', 200) < 128 else "dark"
+                    print(f"    Pillow [{role}]: '{b.get('text','')}' → '{b.get('translated_text','')}' | {clabel}")
 
             # 6b. 無 STABILITY_KEY：complex 也走 Pillow fallback
             if complex_ and not STABILITY_KEY:
@@ -5991,11 +5991,9 @@ def _translate_images_job(job_id, img_urls):
                 for b in complex_:
                     x1,y1,x2,y2 = b['_px']
                     role = b.get("font_role","body")
-                    bw,bh = x2-x1,y2-y1
-                    px = max(12,int(bw*0.20)) if role=="title" else max(8,int(bw*0.15))
-                    py = max(12,int(bh*0.70)) if role=="title" else max(6,int(bh*0.45))
-                    rx1,ry1 = max(0,x1-px),max(0,y1-py)
-                    rx2,ry2 = min(W,x2+px),min(H,y2+py)
+                    pad = 6
+                    rx1,ry1 = max(0,x1-pad),max(0,y1-pad)
+                    rx2,ry2 = min(W,x2+pad),min(H,y2+pad)
                     bg = b.get('_edge_color') or _sample_bg(img_pil,rx1,ry1,rx2,ry2)
                     draw_fb.rectangle([rx1,ry1,rx2,ry2],fill=bg)
                     _fit_and_draw(draw_fb, b.get("translated_text",""), rx1,ry1,rx2,ry2, role, b['_text_color'])
@@ -6010,11 +6008,8 @@ def _translate_images_job(job_id, img_urls):
                 dm = _ID2.Draw(mask)
                 for b in complex_:
                     x1,y1,x2,y2 = b['_px']
-                    role = b.get("font_role","body")
-                    bw,bh = x2-x1,y2-y1
-                    px = max(12,int(bw*0.20)) if role=="title" else max(8,int(bw*0.15))
-                    py = max(12,int(bh*0.70)) if role=="title" else max(6,int(bh*0.45))
-                    dm.rectangle([max(0,x1-px),max(0,y1-py),min(W,x2+px),min(H,y2+py)],fill=255)
+                    mp = 8  # mask padding: 略大一點讓 inpaint 邊緣乾淨
+                    dm.rectangle([max(0,x1-mp),max(0,y1-mp),min(W,x2+mp),min(H,y2+mp)],fill=255)
 
                 ib = io.BytesIO(); result_img.save(ib,"PNG"); ib.seek(0)
                 mb = io.BytesIO(); mask.convert("RGB").save(mb,"PNG"); mb.seek(0)
@@ -6047,16 +6042,13 @@ def _translate_images_job(job_id, img_urls):
                         draw_fb.rectangle([x1,y1,x2,y2],fill=bg)
                     stats['pillow']+=len(complex_)
 
-                # Overlay text for complex
+                # Overlay text for complex（直接用原始 bbox，Stability 已清除原文）
                 draw_c = ImageDraw.Draw(result_img)
                 for b in complex_:
                     x1,y1,x2,y2 = b['_px']
                     role = b.get("font_role","body")
-                    bw,bh = x2-x1,y2-y1
-                    px = max(12,int(bw*0.20)) if role=="title" else max(8,int(bw*0.15))
-                    py = max(12,int(bh*0.70)) if role=="title" else max(6,int(bh*0.45))
                     _fit_and_draw(draw_c, b.get("translated_text",""),
-                                  max(0,x1-px),max(0,y1-py),min(W,x2+px),min(H,y2+py), role,
+                                  x1,y1,x2,y2, role,
                                   b.get('_text_color', (15,15,15)))
 
             # 7. Debug stats
