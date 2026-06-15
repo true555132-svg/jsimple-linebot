@@ -5717,10 +5717,11 @@ def api_products_images_zip_selected(job_id):
 
 
 
+
 def _get_cjk_font(size=22):
     """取得支援中文的字型，找不到就下載 NotoSans"""
     from PIL import ImageFont
-    import os, urllib.request as ureq
+    import os, urllib.request as _ureq
     paths = [
         "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
         "/usr/share/fonts/opentype/noto/NotoSansCJKsc-Regular.otf",
@@ -5734,11 +5735,10 @@ def _get_cjk_font(size=22):
                 return ImageFont.truetype(p, size)
             except Exception:
                 pass
-    # Download fallback
     cache = "/tmp/NotoSansCJK.ttc"
     if not os.path.exists(cache):
         try:
-            ureq.urlretrieve(
+            _ureq.urlretrieve(
                 "https://github.com/googlefonts/noto-cjk/raw/main/Sans/OTF/TraditionalChinese/NotoSansCJKtc-Regular.otf",
                 cache
             )
@@ -5782,16 +5782,15 @@ def _fit_and_draw(draw, xy, text, font, text_color=(15, 15, 15)):
 
 
 def _translate_images_job(job_id, img_urls):
-    """背景 thread：Claude Vision OCR+翻譯 → 依背景複雜度選 Pillow / Stability AI → 貼字
-
-    variance < 20  → pillow (直接覆蓋，padding=2)
-    20 <= var < 50 → pillow+pad (稍大 padding=6)
-    variance >= 50 → stability (才呼叫 Stability AI inpaint)
-    brightness < 128 → 白色文字；>= 128 → 深色文字
     """
-    import io, base64, re as _re2
+    圖片翻譯 v2：結構化 OCR → 語言過濾 → 依 variance 分流 Pillow/Stability → 動態字型
+    只翻簡體中文，日文/英文/數字一律跳過。
+    variance < 20 → pillow | 20-50 → pillow+pad | >= 50 → stability
+    brightness < 128 → 白字 | >= 128 → 深色字
+    """
+    import io, base64, re as _re3, traceback
     try:
-        import requests as req_lib
+        import requests as _req
         from PIL import Image, ImageDraw
     except ImportError as e:
         print(f"[translate] import error: {e}")
@@ -5802,172 +5801,286 @@ def _translate_images_job(job_id, img_urls):
     if not STABILITY_KEY:
         print("[translate] STABILITY_API_KEY not set — complex blocks will fallback to Pillow")
 
-    translated_urls = []
+    OCR_PROMPT = (
+        '請偵測圖片中所有文字區塊，直接輸出 JSON（不要 markdown）。\n'
+        '格式：{"blocks":[{"text":"原文","language":"zh-CN/zh-TW/ja/en/number/mixed",'
+        '"should_translate":true/false,"translated_text":"繁體（false時留空字串）",'
+        '"bbox":[x1,y1,x2,y2],"font_role":"title/subtitle/body/label/number",'
+        '"background_type":"white/solid/complex"}]}\n'
+        '規則（嚴格遵守）：\n'
+        '1. language分類：zh-CN=簡體中文漢字，zh-TW=繁體中文，ja=日文（含ひらがな/カタカナ），en=英文，number=純數字百分比\n'
+        '2. should_translate只有純zh-CN才true，其他全部false\n'
+        '3. translated_text：簡體→台灣繁體，混合文字只翻中文部分，英文/數字原樣保留\n'
+        '4. bbox：[左%,上%,右%,下%]，圖片寬高各為100\n'
+        '5. font_role：title=主標題大字，subtitle=副標題，body=說明文字，label=小標籤，number=數字\n'
+        '6. background_type：white=白色背景，solid=純色背景，complex=照片/漸層/複雜背景\n'
+        '範例（此圖色卡）：\n'
+        '- 「海盐蓝」→zh-CN,true,「海鹽藍」,title,white\n'
+        '- 「クリームホワイト」→ja,false,\"\",label,white\n'
+        '- 「Shading：80%」→en,false,\"\",number,white\n'
+        '- 「遮光率：80%」→zh-CN,true,「遮光率：80%」,label,white（數字保留不翻）\n'
+        '只輸出JSON，不要說明文字。'
+    )
 
-    for idx, url in enumerate(img_urls):
+    def _pct2px(pct, dim):
+        return max(0, min(dim, int(pct / 100 * dim)))
+
+    def _sample_bg(base_img, x1, y1, x2, y2):
+        W, H = base_img.size
+        samples = []
+        for px, py in [(max(0,x1-8),max(0,y1-8)), (min(W-1,x2+8),max(0,y1-8)),
+                       (max(0,x1-8),min(H-1,y2+8)), (min(W-1,x2+8),min(H-1,y2+8))]:
+            try:
+                s = base_img.getpixel((px, py))
+                samples.append(s[:3] if len(s) > 3 else s)
+            except Exception:
+                pass
+        if not samples:
+            return (255, 255, 255)
+        return tuple(sum(s[i] for s in samples) // len(samples) for i in range(3))
+
+    def _fit_and_draw(draw, text, x1, y1, x2, y2, role, text_color=(15, 15, 15)):
+        from PIL import ImageFont
+        box_w, box_h = x2 - x1, y2 - y1
+        start_sz = int(box_h * (0.80 if role == "title" else 0.75))
+        start_sz = max(10, min(start_sz, 120))
+        font, chosen_sz = None, start_sz
+        for sz in range(start_sz, 7, -2):
+            try:
+                f = _get_cjk_font(sz)
+                try:
+                    bb = f.getbbox(text)
+                    tw = bb[2] - bb[0]
+                except Exception:
+                    tw = len(text) * sz * 0.65
+                if tw <= box_w * 1.05:
+                    font, chosen_sz = f, sz
+                    break
+            except Exception:
+                pass
+        if font is None:
+            font = _get_cjk_font(10)
         try:
-            print(f"[translate] {idx+1}/{len(img_urls)} {url[:60]}")
+            bb = font.getbbox(text)
+            tw, th = bb[2]-bb[0], bb[3]-bb[1]
+        except Exception:
+            tw, th = len(text)*chosen_sz, chosen_sz
+        # Horizontal alignment
+        if role in ("title", "subtitle"):
+            tx = x1 + max(0, (box_w - tw) // 2)
+        else:
+            tx = x1 + 4
+        ty = y1 + max(0, (box_h - th) // 2)
+        draw.text((tx, ty), text, fill=text_color, font=font)
 
-            # 1. Download image
-            req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0", "Referer": "https://www.1688.com/"})
+    # ── main loop ─────────────────────────────────────────────
+    translated_urls = []
+    stats = dict(total=0, translated=0, skip_ja=0, skip_en=0, skip_num=0,
+                 skip_tw=0, pillow=0, stab=0, stab_fail=0)
+
+    for img_idx, url in enumerate(img_urls):
+        print(f"[translate] {img_idx+1}/{len(img_urls)} {url[:70]}")
+        try:
+            # 1. Download
+            req = urllib.request.Request(url, headers={"User-Agent":"Mozilla/5.0","Referer":"https://www.1688.com/"})
             with urllib.request.urlopen(req, timeout=20) as r:
                 img_bytes = r.read()
-
-            # Detect media type
             media_type = "image/jpeg"
             if img_bytes[:8] == b'\x89PNG\r\n\x1a\n': media_type = "image/png"
             elif img_bytes[:4] == b'RIFF': media_type = "image/webp"
 
-            # 2. Claude Vision: OCR + translate
+            # 2. Claude Vision OCR
             img_b64 = base64.standard_b64encode(img_bytes).decode()
             claude_resp = urllib.request.urlopen(
                 urllib.request.Request(
                     "https://api.anthropic.com/v1/messages",
                     data=json.dumps({
                         "model": "claude-haiku-4-5-20251001",
-                        "max_tokens": 2000,
-                        "messages": [{
-                            "role": "user",
-                            "content": [
-                                {"type": "image", "source": {"type": "base64", "media_type": media_type, "data": img_b64}},
-                                {"type": "text", "text": '請仔細掃描圖片中每一個位置的中文文字，包括：大標題、小字說明、角落文字、裝飾字、標籤文字，全部都要找出來。每個文字區塊分開列出。只返回JSON：{"texts":[{"s":"簡體原文","t":"繁體翻譯","x":左邊界%,"y":上邊界%,"w":寬度%,"h":高度%}]}，百分比為0到100。沒有中文則返回{"texts":[]}'}
-                            ]
-                        }]
+                        "max_tokens": 3000,
+                        "messages": [{"role":"user","content":[
+                            {"type":"image","source":{"type":"base64","media_type":media_type,"data":img_b64}},
+                            {"type":"text","text":OCR_PROMPT}
+                        ]}]
                     }).encode(),
-                    headers={"x-api-key": ANTHROPIC_API_KEY, "anthropic-version": "2023-06-01", "content-type": "application/json"},
+                    headers={"x-api-key":ANTHROPIC_API_KEY,"anthropic-version":"2023-06-01","content-type":"application/json"},
                     method="POST"
-                ), timeout=30
+                ), timeout=45
             )
-            claude_data = json.loads(claude_resp.read())
-            raw_text = claude_data["content"][0]["text"].strip()
-            m = _re2.search(r'\{.*\}', raw_text, _re2.DOTALL)
+            raw_text = json.loads(claude_resp.read())["content"][0]["text"].strip()
+            m = _re3.search(r'\{[\s\S]*\}', raw_text)
             if not m:
-                translated_urls.append(url); continue
+                print("  [OCR] no JSON"); translated_urls.append(url); continue
 
-            ocr_result = json.loads(m.group())
-            texts = ocr_result.get("texts", [])
-            print(f"  [Claude OCR] {len(texts)} 文字區塊")
+            blocks = json.loads(m.group()).get("blocks", [])
+            stats['total'] += len(blocks)
+            print(f"  [OCR] {len(blocks)} 區塊")
 
-            if not texts:
-                translated_urls.append(url); continue
+            # 3. Filter
+            to_do = []
+            for b in blocks:
+                lang = b.get("language","")
+                if not b.get("should_translate") or not b.get("translated_text","") or lang != "zh-CN":
+                    if lang=="ja": stats['skip_ja']+=1
+                    elif lang=="en": stats['skip_en']+=1
+                    elif lang=="number": stats['skip_num']+=1
+                    elif lang=="zh-TW": stats['skip_tw']+=1
+                    continue
+                stats['translated']+=1
+                to_do.append(b)
 
-            # 3. Load image，依 variance 分類每個文字區塊
+            if not to_do:
+                print("  [OCR] 無需翻譯"); translated_urls.append(url); continue
+
+            # 4. Convert bbox % → px，同時計算 variance / brightness
+            from PIL import Image
             img_pil = Image.open(io.BytesIO(img_bytes)).convert("RGB")
             W, H = img_pil.size
-            font_size = max(14, H // 40)
-            font = _get_cjk_font(font_size)
+            for b in to_do:
+                bx = b.get("bbox", [0, 0, 100, 100])
+                b['_px'] = (_pct2px(bx[0],W), _pct2px(bx[1],H), _pct2px(bx[2],W), _pct2px(bx[3],H))
 
-            simple_blocks = []   # variance < 50：Pillow 覆蓋
-            complex_blocks = []  # variance >= 50：Stability AI
-
-            for t in texts:
-                rx = t.get("x", 0); ry = t.get("y", 0)
-                rw = t.get("w", 100); rh_t = t.get("h", 10)
-                x1 = max(0, int((rx - 3) / 100 * W))
-                y1 = max(0, int((ry - 3) / 100 * H))
-                x2 = min(W, int((rx + rw + 3) / 100 * W))
-                y2 = min(H, int((ry + rh_t + 3) / 100 * H))
-                if x2 <= x1: x2 = min(W, x1 + 10)
-                if y2 <= y1: y2 = min(H, y1 + 10)
-
+            # 5. 依 variance 分類（不盲信 Claude background_type）
+            # var < 20 → pillow | 20-50 → pillow+pad | >= 50 → stability
+            simple  = []
+            complex_ = []
+            for b in to_do:
+                x1, y1, x2, y2 = b['_px']
                 variance, brightness, edge_color = _sample_bg_info(img_pil, x1, y1, x2, y2)
-                text_color = (255, 255, 255) if brightness < 128 else (15, 15, 15)
+                b['_variance'] = variance
+                b['_brightness'] = brightness
+                b['_edge_color'] = edge_color
+                b['_text_color'] = (255, 255, 255) if brightness < 128 else (15, 15, 15)
                 color_label = "white" if brightness < 128 else "dark"
-
-                block = {**t, "x1": x1, "y1": y1, "x2": x2, "y2": y2,
-                         "variance": variance, "brightness": brightness,
-                         "text_color": text_color, "edge_color": edge_color}
+                bg_hint = b.get("background_type", "white")
 
                 if variance < 20:
-                    block["method"] = "pillow"; block["pad"] = 2
-                    simple_blocks.append(block)
-                    print(f"    [{t.get('s', '')[:12]}] var={variance:.1f} bright={brightness:.0f} → pillow | {color_label}")
+                    b['_pad'] = 2; simple.append(b)
+                    print(f"    [{b.get('text','')[:12]}] var={variance:.1f} bright={brightness:.0f} ({bg_hint}) → pillow | {color_label}")
                 elif variance < 50:
-                    block["method"] = "pillow+pad"; block["pad"] = 6
-                    simple_blocks.append(block)
-                    print(f"    [{t.get('s', '')[:12]}] var={variance:.1f} bright={brightness:.0f} → pillow+pad | {color_label}")
+                    b['_pad'] = 6; simple.append(b)
+                    print(f"    [{b.get('text','')[:12]}] var={variance:.1f} bright={brightness:.0f} ({bg_hint}) → pillow+pad | {color_label}")
                 else:
-                    block["method"] = "stability"
-                    complex_blocks.append(block)
-                    print(f"    [{t.get('s', '')[:12]}] var={variance:.1f} bright={brightness:.0f} → stability | {color_label}")
+                    complex_.append(b)
+                    print(f"    [{b.get('text','')[:12]}] var={variance:.1f} bright={brightness:.0f} ({bg_hint}) → stability | {color_label}")
 
-            stability_saved = len(simple_blocks)
-            print(f"  [classify] pillow={len(simple_blocks)} stability={len(complex_blocks)} | 本張省下 {stability_saved}/{len(texts)} 次 Stability 呼叫")
+            stability_saved = len(simple)
+            print(f"  [classify] pillow={len(simple)} stability={len(complex_)} | 本張省下 {stability_saved}/{len(to_do)} 次 Stability 呼叫")
 
-            # 4. Stability AI：只處理 complex blocks
-            if complex_blocks and STABILITY_KEY:
-                mask_img = Image.new("L", (W, H), 0)
-                draw_m = ImageDraw.Draw(mask_img)
-                for b in complex_blocks:
-                    draw_m.rectangle([b["x1"], b["y1"], b["x2"], b["y2"]], fill=255)
+            result_img = img_pil.copy()
 
-                img_buf = io.BytesIO(); img_pil.save(img_buf, "PNG"); img_buf.seek(0)
-                mask_buf = io.BytesIO(); mask_img.convert("RGB").save(mask_buf, "PNG"); mask_buf.seek(0)
+            # 6a. Pillow cover (white/solid/simple)
+            if simple:
+                draw = ImageDraw.Draw(result_img)
+                for b in simple:
+                    x1,y1,x2,y2 = b['_px']
+                    role = b.get("font_role","body")
+                    bw,bh = x2-x1, y2-y1
+                    px = max(12,int(bw*0.20)) if role=="title" else max(8,int(bw*0.15))
+                    py = max(12,int(bh*0.70)) if role=="title" else max(6,int(bh*0.45))
+                    rx1,ry1 = max(0,x1-px), max(0,y1-py)
+                    rx2,ry2 = min(W,x2+px), min(H,y2+py)
+                    bg = b.get('_edge_color') or _sample_bg(img_pil, rx1,ry1,rx2,ry2)
+                    draw.rectangle([rx1,ry1,rx2,ry2], fill=bg)
+                    _fit_and_draw(draw, b.get("translated_text",""), rx1,ry1,rx2,ry2, role, b['_text_color'])
+                    stats['pillow']+=1
+                    print(f"    Pillow [{role}]: '{b.get('text','')}' → '{b.get('translated_text','')}' | {color_label}")
 
-                stab = req_lib.post(
-                    "https://api.stability.ai/v2beta/stable-image/edit/erase",
-                    headers={"Authorization": f"Bearer {STABILITY_KEY}", "Accept": "image/*"},
-                    files={"image": ("img.png", img_buf.getvalue(), "image/png"),
-                           "mask": ("mask.png", mask_buf.getvalue(), "image/png")},
-                    data={"output_format": "png"},
-                    timeout=60
-                )
-                if stab.status_code != 200:
-                    print(f"  [Stability] error {stab.status_code}: {stab.text[:100]}")
-                    # Fallback：complex blocks 轉為 pillow+pad
-                    for b in complex_blocks:
-                        b["method"] = "pillow_fallback"; b["pad"] = 6
-                    simple_blocks.extend(complex_blocks)
-                    complex_blocks = []
-                    result_img = img_pil.copy()
-                    print(f"  [Stability] fallback → Pillow for all blocks")
-                else:
-                    result_img = Image.open(io.BytesIO(stab.content)).convert("RGB")
-                    print(f"  [Stability] OK ({len(complex_blocks)} complex blocks erased)")
-            else:
-                if complex_blocks:
-                    # 無 key：complex 也走 pillow fallback
-                    for b in complex_blocks:
-                        b["method"] = "pillow_fallback"; b["pad"] = 6
-                    simple_blocks.extend(complex_blocks)
-                    complex_blocks = []
-                result_img = img_pil.copy()
-                print(f"  [Stability] skipped (all {len(simple_blocks)} blocks use Pillow)")
+            # 6b. 無 STABILITY_KEY：complex 也走 Pillow fallback
+            if complex_ and not STABILITY_KEY:
+                draw_fb = ImageDraw.Draw(result_img)
+                for b in complex_:
+                    x1,y1,x2,y2 = b['_px']
+                    role = b.get("font_role","body")
+                    bw,bh = x2-x1,y2-y1
+                    px = max(12,int(bw*0.20)) if role=="title" else max(8,int(bw*0.15))
+                    py = max(12,int(bh*0.70)) if role=="title" else max(6,int(bh*0.45))
+                    rx1,ry1 = max(0,x1-px),max(0,y1-py)
+                    rx2,ry2 = min(W,x2+px),min(H,y2+py)
+                    bg = b.get('_edge_color') or _sample_bg(img_pil,rx1,ry1,rx2,ry2)
+                    draw_fb.rectangle([rx1,ry1,rx2,ry2],fill=bg)
+                    _fit_and_draw(draw_fb, b.get("translated_text",""), rx1,ry1,rx2,ry2, role, b['_text_color'])
+                    stats['pillow']+=1
+                complex_ = []
+                print(f"  [Stability] skipped (no key) — fell back to Pillow for all blocks")
 
-            # 5. 疊字
-            draw = ImageDraw.Draw(result_img)
+            # 6c. Stability inpaint (complex photo backgrounds only)
+            if complex_:
+                from PIL import ImageDraw as _ID2
+                mask = Image.new("L",(W,H),0)
+                dm = _ID2.Draw(mask)
+                for b in complex_:
+                    x1,y1,x2,y2 = b['_px']
+                    role = b.get("font_role","body")
+                    bw,bh = x2-x1,y2-y1
+                    px = max(12,int(bw*0.20)) if role=="title" else max(8,int(bw*0.15))
+                    py = max(12,int(bh*0.70)) if role=="title" else max(6,int(bh*0.45))
+                    dm.rectangle([max(0,x1-px),max(0,y1-py),min(W,x2+px),min(H,y2+py)],fill=255)
 
-            # Simple blocks：rectangle 覆蓋原文 + 貼翻譯字
-            for b in simple_blocks:
-                pad = b.get("pad", 2)
-                draw.rectangle([max(0, b["x1"] - pad), max(0, b["y1"] - pad),
-                                 min(W, b["x2"] + pad), min(H, b["y2"] + pad)],
-                                fill=b["edge_color"])
-                _fit_and_draw(draw, (b["x1"] + 2, b["y1"] + 1), b.get("t", ""), font, b["text_color"])
+                ib = io.BytesIO(); result_img.save(ib,"PNG"); ib.seek(0)
+                mb = io.BytesIO(); mask.convert("RGB").save(mb,"PNG"); mb.seek(0)
+                inpaint_ok = False
+                try:
+                    sr = _req.post(
+                        "https://api.stability.ai/v2beta/stable-image/edit/erase",
+                        headers={"Authorization":f"Bearer {STABILITY_KEY}","Accept":"image/*"},
+                        files={"image":("i.png",ib.getvalue(),"image/png"),
+                               "mask":("m.png",mb.getvalue(),"image/png")},
+                        data={"output_format":"png"}, timeout=60
+                    )
+                    if sr.status_code == 200:
+                        result_img = Image.open(io.BytesIO(sr.content)).convert("RGB")
+                        stats['stab']+=len(complex_)
+                        inpaint_ok = True
+                        print(f"    Stability: {len(complex_)} 區塊")
+                    else:
+                        print(f"    Stability {sr.status_code} → Pillow fallback")
+                        stats['stab_fail']+=len(complex_)
+                except Exception as se:
+                    print(f"    Stability error: {se} → Pillow fallback")
+                    stats['stab_fail']+=len(complex_)
 
-            # Complex blocks：Stability 已清除原文，直接貼字
-            for b in complex_blocks:
-                _fit_and_draw(draw, (b["x1"] + 2, b["y1"] + 1), b.get("t", ""), font, b["text_color"])
+                if not inpaint_ok:
+                    draw_fb = ImageDraw.Draw(result_img)
+                    for b in complex_:
+                        x1,y1,x2,y2 = b['_px']
+                        bg = b.get('_edge_color') or _sample_bg(img_pil,x1,y1,x2,y2)
+                        draw_fb.rectangle([x1,y1,x2,y2],fill=bg)
+                    stats['pillow']+=len(complex_)
 
-            # 6. Upload result
-            out_buf = io.BytesIO()
-            result_img.save(out_buf, "JPEG", quality=92)
-            fname = f"translated_{job_id}_{idx+1}.jpg"
-            turl, _ = upload_image_to_supabase(fname, out_buf.getvalue(), "image/jpeg")
+                # Overlay text for complex
+                draw_c = ImageDraw.Draw(result_img)
+                for b in complex_:
+                    x1,y1,x2,y2 = b['_px']
+                    role = b.get("font_role","body")
+                    bw,bh = x2-x1,y2-y1
+                    px = max(12,int(bw*0.20)) if role=="title" else max(8,int(bw*0.15))
+                    py = max(12,int(bh*0.70)) if role=="title" else max(6,int(bh*0.45))
+                    _fit_and_draw(draw_c, b.get("translated_text",""),
+                                  max(0,x1-px),max(0,y1-py),min(W,x2+px),min(H,y2+py), role,
+                                  b.get('_text_color', (15,15,15)))
+
+            # 7. Debug stats
+            print(f"  [stats] OCR:{stats['total']} 翻:{stats['translated']} 跳日:{stats['skip_ja']} 跳英:{stats['skip_en']} 跳數:{stats['skip_num']} 跳繁:{stats['skip_tw']} Pillow:{stats['pillow']} Stab:{stats['stab']} Stab失敗:{stats['stab_fail']}")
+
+            # 8. Upload
+            out = io.BytesIO()
+            result_img.save(out,"JPEG",quality=93)
+            fname = f"translated_{job_id}_{img_idx+1}.jpg"
+            turl,_ = upload_image_to_supabase(fname, out.getvalue(), "image/jpeg")
             if not turl:
-                turl, _ = upload_image_to_github(fname, out_buf.getvalue())
+                turl,_ = upload_image_to_github(fname, out.getvalue())
             translated_urls.append(turl or url)
-            print(f"  [translate] done: {turl or url}")
+            print(f"  [done] {(turl or url)[:70]}")
 
         except Exception as e:
-            print(f"  [translate ERROR] {e}")
+            print(f"  [ERROR] {e}")
+            traceback.print_exc()
             translated_urls.append(url)
 
     _pj_update(job_id,
                translated_images=json.dumps(translated_urls, ensure_ascii=False),
                translate_status="done")
-    print(f"[translate] finished {len(translated_urls)} images for job {job_id}")
-
+    print(f"[translate] 完成 {len(translated_urls)}/{len(img_urls)} 張，stats={stats}")
 
 @app.route("/api/products/<int:job_id>/translate-images", methods=["POST"])
 def api_translate_images(job_id):
