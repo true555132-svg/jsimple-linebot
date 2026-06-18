@@ -1398,6 +1398,12 @@ body{font-family:-apple-system,sans-serif;background:#f5f5f5;color:#333}
 .sel-btn-green:hover{background:#c8e6c9}
 .sel-btn-white{background:#f3e5f5;color:#6a1b9a}
 .sel-btn-white:hover{background:#e1bee7}
+.upload-tr-sec{background:#fff;border-radius:12px;padding:14px 16px;margin-top:10px;border:1.5px dashed #b39ddb}
+.upload-tr-sec .slabel{font-size:12px;font-weight:700;color:#6a1b9a;margin-bottom:10px}
+.btn-upload-lbl{display:inline-block;background:#ede7f6;color:#4527a0;border-radius:8px;padding:6px 14px;font-size:13px;font-weight:600;cursor:pointer;border:1.5px solid #b39ddb}
+.btn-upload-lbl:hover{background:#d1c4e9}
+.tr-type-sec{margin-top:10px;padding:10px 0 4px;border-top:1px solid #f0f0f0}
+.tr-type-label{font-size:12px;font-weight:700;color:#555;margin-bottom:6px}
 .translated-sec{background:#f0fdf4;border:1px solid #86efac;border-radius:10px;padding:12px;margin-top:10px}
 .translated-sec .slabel{color:#16a34a}
 .btn-sm{background:#333;color:#fff;border:none;border-radius:8px;padding:6px 14px;font-size:13px;cursor:pointer;font-family:-apple-system,sans-serif;margin-top:6px}
@@ -1670,6 +1676,30 @@ function renderModal(j, editMode=false){
       +`<button class="sel-btn" style="margin-top:8px" onclick="useTranslated(${j.id})">✓ 以翻譯圖作為輸出</button>`
       +`</div>`;
   }
+  // 翻譯後圖片（手動上傳）
+  const piTr = j.product_images || {};
+  const trTypeMap = {main:'主圖', detail:'詳情圖', sku:'SKU圖'};
+  ['main','detail','sku'].forEach(t => {
+    const tImgs = piTr['tr_'+t+'_images'] || [];
+    if (!tImgs.length) return;
+    h += `<div class="tr-type-sec"><div class="tr-type-label">翻譯圖（${trTypeMap[t]}，${tImgs.length} 張）</div><div class="img-grid">${tImgs.map((src,i)=>`<div class="img-thumb"><img src="${esc(src)}" loading="lazy" onerror="this.style.display='none'"><div class="thumb-actions"><a href="${esc(src)}" target="_blank" class="thumb-act">⬇</a><button class="thumb-act" onclick="event.stopPropagation();cp(this,'${esc(src)}')">📋</button></div></div>`).join("")}</div></div>`;
+  });
+  // 上傳已翻譯圖片
+  h += `<div class="upload-tr-sec">
+    <div class="slabel">上傳已翻譯圖片（客優雲翻譯後）</div>
+    <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+      <select id="upType_${j.id}" style="border:1.5px solid #b39ddb;border-radius:8px;padding:6px 10px;font-size:13px;color:#4527a0">
+        <option value="main">主圖</option>
+        <option value="detail">詳情圖</option>
+        <option value="sku">SKU圖</option>
+      </select>
+      <label class="btn-upload-lbl" for="upFiles_${j.id}">選擇圖片</label>
+      <input type="file" id="upFiles_${j.id}" multiple accept="image/*" style="display:none" onchange="prevUpload(${j.id})">
+      <span id="upCount_${j.id}" style="font-size:12px;color:#666"></span>
+      <button class="btn-primary" id="upBtn_${j.id}" onclick="doUpload(${j.id})" disabled style="padding:6px 16px;font-size:13px">上傳</button>
+    </div>
+    <div id="upPreview_${j.id}" class="img-grid" style="margin-top:8px;max-height:180px;overflow-y:auto"></div>
+  </div>`;
   h+=`<div class="sel-action-bar"><span class="sel-count" id="selCount">已選 ${_selImgs.size} 張</span><button class="btn-translate" id="btnTr_${j.id}" onclick="translateSelected(${j.id})">文A 翻譯選取</button><button class="btn-zip" onclick="downloadZipSelected(${j.id})">⬇ ZIP 下載</button><button class="btn-confirm" onclick="confirmSelect(${j.id})">確認選圖</button></div>`;
   h+=`<br><button class="raw-toggle" onclick="toggleRaw(this)">顯示原始資料 ▾</button>`;
   h+=`<div id="rawSec" class="hidden" style="margin-top:12px">`;
@@ -1828,11 +1858,23 @@ async function confirmSelect(id){
   else toast("儲存失敗："+r.error);
 }
 async function downloadZipSelected(id){
-  const urls=[..._selImgs];
-  if(!urls.length){toast("請先勾選圖片");return;}
+  const items=[];
+  const cc={};
+  ['main','sku','detail','review'].forEach(catId=>{
+    const el=document.getElementById('cat_'+catId);
+    if(!el) return;
+    el.querySelectorAll('.img-thumb input[type=checkbox]:checked').forEach(cb=>{
+      cc[catId]=(cc[catId]||0)+1;
+      items.push({url:cb.dataset.url,cat:catId,idx:cc[catId]});
+    });
+  });
+  // fallback: _selImgs not in any category
+  const seen=new Set(items.map(i=>i.url)); let ex=0;
+  [..._selImgs].forEach(url=>{ if(!seen.has(url)){ex++;items.push({url,cat:'img',idx:ex});} });
+  if(!items.length){toast("請先勾選圖片");return;}
   toast("打包中，請稍候...");
   try{
-    const res=await fetch(`/api/products/${id}/images/zip-selected?key=${KEY}`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({urls})});
+    const res=await fetch(`/api/products/${id}/images/zip-selected?key=${KEY}`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({items})});
     if(!res.ok){toast("下載失敗");return;}
     const blob=await res.blob();
     const a=document.createElement("a");
@@ -1844,6 +1886,43 @@ async function downloadZipSelected(id){
   }catch(e){toast("下載失敗");}
 }
 
+function prevUpload(id){
+  const inp=document.getElementById('upFiles_'+id);
+  const preview=document.getElementById('upPreview_'+id);
+  const count=document.getElementById('upCount_'+id);
+  const btn=document.getElementById('upBtn_'+id);
+  const files=[...inp.files];
+  count.textContent=files.length+' 張已選';
+  btn.disabled=files.length===0;
+  preview.innerHTML=files.map(f=>{
+    const url=URL.createObjectURL(f);
+    return `<div class="img-thumb"><img src="${url}" style="object-fit:cover;width:80px;height:80px"></div>`;
+  }).join('');
+}
+async function doUpload(id){
+  const inp=document.getElementById('upFiles_'+id);
+  const type=document.getElementById('upType_'+id).value;
+  const btn=document.getElementById('upBtn_'+id);
+  const files=[...inp.files];
+  if(!files.length){toast('請選擇圖片');return;}
+  btn.disabled=true; btn.textContent='上傳中...';
+  const fd=new FormData();
+  fd.append('type',type);
+  files.forEach(f=>fd.append('files',f));
+  try{
+    const res=await fetch(`/api/products/${id}/upload-translated?key=${KEY}`,{method:'POST',body:fd});
+    const j2=await res.json();
+    if(j2.ok){
+      toast(`上傳完成，${j2.added} 張`);
+      inp.value='';
+      document.getElementById('upCount_'+id).textContent='';
+      document.getElementById('upPreview_'+id).innerHTML='';
+      btn.disabled=true;
+      if(openId===id) openJob(id);
+    } else { toast('上傳失敗：'+(j2.error||'')); }
+  }catch(e){ toast('錯誤：'+e.message); }
+  finally{ btn.disabled=false; btn.textContent='上傳'; }
+}
 function toggleRaw(btn){
   const el=document.getElementById("rawSec");
   if(el.classList.contains("hidden")){el.classList.remove("hidden");btn.textContent="隱藏原始資料 ▴";}
@@ -2141,31 +2220,38 @@ def api_products_images_zip_selected(job_id):
     if not job:
         return jsonify({"error": "not found"}), 404
     data = request.get_json(force=True)
-    imgs = data.get("urls", [])
-    if not imgs:
+    items = data.get("items")
+    if not items:
+        old_urls = data.get("urls", [])
+        items = [{"url": u, "cat": "img", "idx": i+1} for i, u in enumerate(old_urls)]
+    if not items:
         return jsonify({"error": "沒有選取圖片"}), 400
-    import io, zipfile, re as _re
+    import io, zipfile
     buf = io.BytesIO()
     downloaded = 0
+    cat_counter = {}
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
-        for i, img_url in enumerate(imgs):
+        for item in items:
+            img_url = item.get("url", "")
+            cat     = item.get("cat", "img")
+            if not img_url: continue
+            cat_counter[cat] = cat_counter.get(cat, 0) + 1
+            idx = cat_counter[cat]
             try:
                 req = urllib.request.Request(img_url, headers={"User-Agent": "Mozilla/5.0", "Referer": "https://www.1688.com/"})
                 with urllib.request.urlopen(req, timeout=15) as r:
                     img_data = r.read()
                 ext = img_url.split(".")[-1].split("?")[0].lower()
-                if ext not in ("jpg", "jpeg", "png", "webp"):
-                    ext = "jpg"
-                zf.writestr(f"img_{i+1:02d}.{ext}", img_data)
+                if ext not in ("jpg", "jpeg", "png", "webp"): ext = "jpg"
+                zf.writestr(f"{cat}_{idx:02d}.{ext}", img_data)
                 downloaded += 1
             except Exception:
                 pass
     if downloaded == 0:
         return jsonify({"error": "圖片下載失敗"}), 500
     buf.seek(0)
-    safe = _re.sub(r'[^\w]', '_', (job.get('ai_name') or 'product')[:20])
     return Response(buf.getvalue(), mimetype="application/zip",
-        headers={"Content-Disposition": f'attachment; filename="{safe}_images.zip"'})
+        headers={"Content-Disposition": f'attachment; filename="product_{job_id}_images.zip"'})
 
 
 
@@ -2544,6 +2630,40 @@ def api_translate_images(job_id):
     import threading
     threading.Thread(target=_translate_images_job, args=(job_id, urls), daemon=True).start()
     return jsonify({"ok": True, "count": len(urls)})
+
+
+@products_bp.route("/api/products/<int:job_id>/upload-translated", methods=["POST"])
+def api_upload_translated(job_id):
+    ok, _ = auth_required()
+    if not ok:
+        return jsonify({"error": "unauthorized"}), 403
+    job = _pj_get(job_id)
+    if not job:
+        return jsonify({"error": "not found"}), 404
+    img_type = request.form.get("type", "main")
+    if img_type not in ("main", "detail", "sku"):
+        img_type = "main"
+    files = request.files.getlist("files")
+    if not files:
+        return jsonify({"error": "沒有上傳圖片"}), 400
+    uploaded_urls = []
+    for i, f in enumerate(files[:20]):
+        img_bytes = f.read()
+        if not img_bytes: continue
+        fname_orig = f.filename or f"img_{i+1}.jpg"
+        ext = fname_orig.rsplit(".", 1)[-1].lower() if "." in fname_orig else "jpg"
+        if ext not in ("jpg", "jpeg", "png", "webp"): ext = "jpg"
+        filename = f"products/{job_id}_tr_{img_type}_{int(time.time())}_{i+1}.{ext}"
+        pub_url, _ = upload_image_to_supabase(filename, img_bytes, f.content_type or "image/jpeg")
+        if pub_url:
+            uploaded_urls.append(pub_url)
+    if not uploaded_urls:
+        return jsonify({"error": "上傳失敗，請檢查 Supabase 設定"}), 500
+    pi = job.get("product_images") or {}
+    tr_key = f"tr_{img_type}_images"
+    pi[tr_key] = (pi.get(tr_key) or []) + uploaded_urls
+    _pj_update(job_id, product_images=json.dumps(pi, ensure_ascii=False))
+    return jsonify({"ok": True, "added": len(uploaded_urls), "urls": uploaded_urls, "type": img_type})
 
 
 def _whitebg_selected_job(job_id, img_urls):
