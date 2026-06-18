@@ -1396,6 +1396,8 @@ body{font-family:-apple-system,sans-serif;background:#f5f5f5;color:#333}
 .lb-close:hover{color:#ddd}
 .sel-btn-green{background:#e8f5e9;color:#2e7d32}
 .sel-btn-green:hover{background:#c8e6c9}
+.sel-btn-white{background:#f3e5f5;color:#6a1b9a}
+.sel-btn-white:hover{background:#e1bee7}
 .translated-sec{background:#f0fdf4;border:1px solid #86efac;border-radius:10px;padding:12px;margin-top:10px}
 .translated-sec .slabel{color:#16a34a}
 .btn-sm{background:#333;color:#fff;border:none;border-radius:8px;padding:6px 14px;font-size:13px;cursor:pointer;font-family:-apple-system,sans-serif;margin-top:6px}
@@ -1708,7 +1710,7 @@ function imgCatHtml(catId, label, srcs, labels){
       +`<button class="thumb-act" onclick="event.stopPropagation();openLightbox('${esc(src)}')" title="放大檢視">⛶</button>`
       +`</div></div>`;
   }).join("");
-  return `<div class="section" id="cat_${catId}"><div class="img-zone-hd"><div class="slabel">${label}（${srcs.length} 張）</div><button class="sel-btn" onclick="toggleAllInCat('${catId}',true)">全選</button><button class="sel-btn" onclick="toggleAllInCat('${catId}',false)">取消</button><button class="sel-btn sel-btn-green" onclick="translateCat('${catId}')">文A 翻譯此區</button></div><div class="img-grid">${thumbs}</div></div>`;
+  return `<div class="section" id="cat_${catId}"><div class="img-zone-hd"><div class="slabel">${label}（${srcs.length} 張）</div><button class="sel-btn" onclick="toggleAllInCat('${catId}',true)">全選</button><button class="sel-btn" onclick="toggleAllInCat('${catId}',false)">取消</button><button class="sel-btn sel-btn-green" onclick="translateCat('${catId}')">文A 翻譯此區</button><button class="sel-btn sel-btn-white" onclick="whitebgCat('${catId}',openId)">⬜ 生成白底圖</button></div><div class="img-grid">${thumbs}</div></div>`;
 }
 function imgSizeLoad(img){
   const w=img.naturalWidth, h=img.naturalHeight;
@@ -1801,6 +1803,23 @@ async function _doTranslate(id,urls){
     toast('翻譯失敗：'+(r.error||''));
     if(btn){btn.disabled=false;btn.textContent='文A 翻譯選取';}
   }
+}
+async function whitebgCat(catId, id){
+  if(!id){toast('請先開啟商品');return;}
+  const el=document.getElementById('cat_'+catId);
+  if(!el) return;
+  const checked=[...el.querySelectorAll('.img-thumb input[type=checkbox]:checked')].map(cb=>cb.dataset.url).filter(Boolean);
+  const all=[...el.querySelectorAll('.img-thumb input[type=checkbox]')].map(cb=>cb.dataset.url).filter(Boolean);
+  const urls=checked.length?checked:all;
+  if(!urls.length){toast('此區沒有圖片');return;}
+  toast('送出 '+urls.length+' 張，處理中...');
+  try{
+    const r=await api('/api/products/'+id+'/whitebg-selected',{method:'POST',body:JSON.stringify({urls}),headers:{'Content-Type':'application/json'}});
+    if(r.ok){
+      toast('白底圖處理中，稍後重新整理查看結果');
+      setTimeout(()=>{if(openId===id) openJob(id);},8000);
+    } else { toast('失敗：'+(r.error||'')); }
+  }catch(e){ toast('錯誤：'+e.message); }
 }
 async function confirmSelect(id){
   const urls=[..._selImgs];
@@ -2524,6 +2543,43 @@ def api_translate_images(job_id):
     _pj_update(job_id, translate_status="processing")
     import threading
     threading.Thread(target=_translate_images_job, args=(job_id, urls), daemon=True).start()
+    return jsonify({"ok": True, "count": len(urls)})
+
+
+def _whitebg_selected_job(job_id, img_urls):
+    job = _pj_get(job_id)
+    if not job: return
+    existing = job.get("processed_images", [])
+    existing_set = set(existing)
+    new_processed = list(existing)
+    for i, url in enumerate(img_urls[:20]):
+        img_bytes = _download_image(url)
+        if not img_bytes: continue
+        result = _process_to_white_bg(img_bytes)
+        if not result: continue
+        filename = f"products/{job_id}_sel_{int(time.time())}_{i}.jpg"
+        pub_url, _ = upload_image_to_supabase(filename, result, "image/jpeg")
+        if pub_url and pub_url not in existing_set:
+            new_processed.append(pub_url)
+            existing_set.add(pub_url)
+    _pj_update(job_id,
+               processed_images=json.dumps(new_processed, ensure_ascii=False),
+               img_status="done" if new_processed else "failed")
+
+@products_bp.route("/api/products/<int:job_id>/whitebg-selected", methods=["POST"])
+def api_whitebg_selected(job_id):
+    ok, _ = auth_required()
+    if not ok:
+        return jsonify({"error": "unauthorized"}), 403
+    job = _pj_get(job_id)
+    if not job:
+        return jsonify({"error": "not found"}), 404
+    data = request.get_json(force=True)
+    urls = [u.strip() for u in (data.get("urls") or []) if u.strip()]
+    if not urls:
+        return jsonify({"error": "請選取圖片"}), 400
+    import threading
+    threading.Thread(target=_whitebg_selected_job, args=(job_id, urls), daemon=True).start()
     return jsonify({"ok": True, "count": len(urls)})
 
 
