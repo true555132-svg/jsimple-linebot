@@ -2255,9 +2255,16 @@ def api_products_images_zip_selected(job_id):
                 req = urllib.request.Request(img_url, headers={"User-Agent": "Mozilla/5.0", "Referer": "https://www.1688.com/"})
                 with urllib.request.urlopen(req, timeout=15) as r:
                     img_data = r.read()
-                ext = img_url.split(".")[-1].split("?")[0].lower()
-                if ext not in ("jpg", "jpeg", "png", "webp"): ext = "jpg"
-                zf.writestr(f"{cat}_{idx:02d}.{ext}", img_data)
+                # 統一轉 JPG（處理 WEBP / PNG / 任何格式）
+                try:
+                    from PIL import Image as _PILImg
+                    _img = _PILImg.open(io.BytesIO(img_data)).convert("RGB")
+                    _out = io.BytesIO()
+                    _img.save(_out, format="JPEG", quality=88, optimize=True)
+                    img_data = _out.getvalue()
+                except Exception:
+                    pass  # PIL 失敗就保留原始 bytes
+                zf.writestr(f"{cat}_{idx:02d}.jpg", img_data)
                 downloaded += 1
             except Exception:
                 pass
