@@ -1893,6 +1893,93 @@ def admin_store_scan():
         return render_template_string(LOGIN_HTML, next="/admin/products/store-scan", error=None)
     return render_template_string(STORE_SCAN_HTML, key=key)
 
+BRAND_SETTINGS_HTML = """<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>品牌設定</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:-apple-system,sans-serif;background:#f5f5f5;color:#333}
+.header{background:#1a1a1a;color:#fff;padding:14px 20px;display:flex;align-items:center;gap:14px}
+.header a{color:#888;text-decoration:none;font-size:14px}
+.header a:hover{color:#fff}
+.header-title{font-size:17px;font-weight:700;flex:1}
+.wrap{max-width:760px;margin:0 auto;padding:24px 16px}
+.card{background:#fff;border-radius:14px;padding:20px;margin-bottom:16px;box-shadow:0 1px 4px rgba(0,0,0,.08)}
+.card-head{display:flex;align-items:center;gap:10px;margin-bottom:16px}
+.brand-key{font-size:12px;font-weight:700;background:#1a1a1a;color:#fff;border-radius:6px;padding:2px 8px;letter-spacing:.5px}
+.brand-name{font-size:16px;font-weight:700}
+label{display:block;font-size:12px;color:#666;font-weight:600;margin-bottom:4px;margin-top:12px}
+input[type=text],textarea{width:100%;border:1.5px solid #ddd;border-radius:8px;padding:9px 12px;font-size:14px;font-family:-apple-system,sans-serif;outline:none;resize:vertical}
+input[type=text]:focus,textarea:focus{border-color:#1a1a1a}
+.btn-save{background:#1a1a1a;color:#fff;border:none;border-radius:8px;padding:9px 22px;font-size:14px;font-weight:700;cursor:pointer;margin-top:14px}
+.btn-save:hover{background:#333}
+.btn-save:disabled{background:#aaa;cursor:default}
+.toast{position:fixed;bottom:28px;left:50%;transform:translateX(-50%);background:#222;color:#fff;padding:10px 22px;border-radius:20px;font-size:14px;opacity:0;transition:opacity .3s;pointer-events:none;z-index:999}
+.toast.show{opacity:1}
+</style>
+</head>
+<body>
+<div class="header">
+  <a href="/admin/products?key={{ key }}">← 商品搬運</a>
+  <div class="header-title">品牌設定</div>
+</div>
+<div class="wrap">
+{% for p in profiles %}
+<div class="card" id="card_{{ p.brand_key }}">
+  <div class="card-head">
+    <span class="brand-key">{{ p.brand_key }}</span>
+    <span class="brand-name">{{ p.name }}</span>
+  </div>
+  <label>品牌名稱</label>
+  <input type="text" id="name_{{ p.brand_key }}" value="{{ p.name }}">
+  <label>商品分類</label>
+  <input type="text" id="category_{{ p.brand_key }}" value="{{ p.category }}">
+  <label>文案風格</label>
+  <textarea id="style_{{ p.brand_key }}" rows="3">{{ p.style }}</textarea>
+  <label>文案語氣</label>
+  <textarea id="tone_{{ p.brand_key }}" rows="2">{{ p.tone }}</textarea>
+  <label>自訂 Prompt（選填）</label>
+  <textarea id="custom_prompt_{{ p.brand_key }}" rows="3">{{ p.custom_prompt }}</textarea>
+  <button class="btn-save" onclick="save('{{ p.brand_key }}', this)">儲存</button>
+</div>
+{% endfor %}
+</div>
+<div class="toast" id="toast"></div>
+<script>
+const KEY = '{{ key }}';
+function toast(msg){
+  const el = document.getElementById('toast');
+  el.textContent = msg; el.classList.add('show');
+  setTimeout(()=>el.classList.remove('show'), 2200);
+}
+async function save(bk, btn){
+  btn.disabled = true;
+  const body = {
+    name:          document.getElementById('name_'+bk).value.trim(),
+    category:      document.getElementById('category_'+bk).value.trim(),
+    style:         document.getElementById('style_'+bk).value.trim(),
+    tone:          document.getElementById('tone_'+bk).value.trim(),
+    custom_prompt: document.getElementById('custom_prompt_'+bk).value.trim(),
+  };
+  try{
+    const r = await fetch('/api/brand-profiles/'+bk+'?key='+KEY, {
+      method:'PUT', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify(body)
+    });
+    const j = await r.json();
+    if(j.ok) toast('✓ '+bk+' 已儲存');
+    else toast('儲存失敗');
+  }catch(e){ toast('錯誤：'+e.message); }
+  finally{ btn.disabled = false; }
+}
+</script>
+</body>
+</html>"""
+
+
 @products_bp.route("/admin/brand-settings")
 def admin_brand_settings():
     ok, key = check_auth()
@@ -2774,4 +2861,978 @@ def api_store_scan_to_queue():
         _ss_mark_added([a["item_id"] for a in added])
     return jsonify({"ok": True, "added": len(added), "jobs": added})
 
+
+# ── Product Rules DB helpers ──────────────────────────────────────
+
+def _pr_init():
+    """建立 product_rules 資料表（若不存在）。"""
+    if not DATABASE_URL:
+        return
+    try:
+        conn = _pg_conn(); cur = conn.cursor()
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS product_rules (
+                id                SERIAL PRIMARY KEY,
+                brand             TEXT NOT NULL DEFAULT '',
+                category          TEXT NOT NULL DEFAULT '',
+                exchange_rate     NUMERIC(10,4) NOT NULL DEFAULT 4.5,
+                margin_rate       NUMERIC(5,4)  NOT NULL DEFAULT 0.4,
+                ad_rate           NUMERIC(5,4)  NOT NULL DEFAULT 0.1,
+                sea_shipping_rate NUMERIC(5,4)  NOT NULL DEFAULT 0.05,
+                tw_shipping_cost  NUMERIC(10,2) NOT NULL DEFAULT 0,
+                package_cost      NUMERIC(10,2) NOT NULL DEFAULT 0,
+                round_rule        TEXT NOT NULL DEFAULT 'round_10',
+                created_at        FLOAT DEFAULT 0,
+                updated_at        FLOAT DEFAULT 0
+            )
+        """)
+        conn.commit(); cur.close(); conn.close()
+    except Exception as e:
+        import sys; print(f"[PR Init] {e}", file=sys.stderr)
+
+def _pr_all():
+    if not DATABASE_URL:
+        return []
+    try:
+        conn = _pg_conn(); cur = conn.cursor()
+        cur.execute(
+            "SELECT id,brand,category,exchange_rate,margin_rate,ad_rate,"
+            "sea_shipping_rate,tw_shipping_cost,package_cost,round_rule,"
+            "created_at,updated_at FROM product_rules ORDER BY id DESC"
+        )
+        rows = cur.fetchall(); cur.close(); conn.close()
+        return [{"id":r[0],"brand":r[1],"category":r[2],
+                 "exchange_rate":float(r[3]),"margin_rate":float(r[4]),
+                 "ad_rate":float(r[5]),"sea_shipping_rate":float(r[6]),
+                 "tw_shipping_cost":float(r[7]),"package_cost":float(r[8]),
+                 "round_rule":r[9],"created_at":r[10],"updated_at":r[11]} for r in rows]
+    except Exception as e:
+        import sys; print(f"[PR All] {e}", file=sys.stderr)
+        return []
+
+def _pr_insert(data):
+    if not DATABASE_URL:
+        return None
+    try:
+        now = time.time()
+        conn = _pg_conn(); cur = conn.cursor()
+        cur.execute(
+            "INSERT INTO product_rules"
+            "(brand,category,exchange_rate,margin_rate,ad_rate,"
+            "sea_shipping_rate,tw_shipping_cost,package_cost,round_rule,created_at,updated_at)"
+            " VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id",
+            (data.get("brand",""), data.get("category",""),
+             data.get("exchange_rate", 4.5), data.get("margin_rate", 0.4),
+             data.get("ad_rate", 0.1), data.get("sea_shipping_rate", 0.05),
+             data.get("tw_shipping_cost", 0), data.get("package_cost", 0),
+             data.get("round_rule", "round_10"), now, now)
+        )
+        row_id = cur.fetchone()[0]
+        conn.commit(); cur.close(); conn.close()
+        return row_id
+    except Exception as e:
+        import sys; print(f"[PR Insert] {e}", file=sys.stderr)
+        return None
+
+def _pr_update(rule_id, data):
+    if not DATABASE_URL:
+        return False
+    try:
+        now = time.time()
+        conn = _pg_conn(); cur = conn.cursor()
+        cur.execute(
+            "UPDATE product_rules SET brand=%s,category=%s,exchange_rate=%s,"
+            "margin_rate=%s,ad_rate=%s,sea_shipping_rate=%s,tw_shipping_cost=%s,"
+            "package_cost=%s,round_rule=%s,updated_at=%s WHERE id=%s",
+            (data.get("brand",""), data.get("category",""),
+             data.get("exchange_rate", 4.5), data.get("margin_rate", 0.4),
+             data.get("ad_rate", 0.1), data.get("sea_shipping_rate", 0.05),
+             data.get("tw_shipping_cost", 0), data.get("package_cost", 0),
+             data.get("round_rule", "round_10"), now, rule_id)
+        )
+        conn.commit(); cur.close(); conn.close()
+        return True
+    except Exception as e:
+        import sys; print(f"[PR Update] {e}", file=sys.stderr)
+        return False
+
+def _pr_delete(rule_id):
+    if not DATABASE_URL:
+        return
+    try:
+        conn = _pg_conn(); cur = conn.cursor()
+        cur.execute("DELETE FROM product_rules WHERE id=%s", (rule_id,))
+        conn.commit(); cur.close(); conn.close()
+    except Exception as e:
+        import sys; print(f"[PR Delete] {e}", file=sys.stderr)
+
+_pr_init()
+
+
+# ── Product Rules Admin HTML ──────────────────────────────────────
+
+PRODUCT_RULES_HTML = """<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>商品定價規則中心</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:-apple-system,sans-serif;background:#f5f5f5;color:#333}
+.header{background:#1a1a1a;color:#fff;padding:14px 20px;display:flex;align-items:center;gap:14px}
+.header a{color:#888;text-decoration:none;font-size:14px}
+.header a:hover{color:#fff}
+.header-title{font-size:17px;font-weight:700;flex:1}
+.wrap{max-width:1100px;margin:0 auto;padding:20px 16px}
+.card{background:#fff;border-radius:14px;padding:20px;margin-bottom:16px;box-shadow:0 1px 4px rgba(0,0,0,.08)}
+.top-row{display:flex;align-items:center;justify-content:space-between;margin-bottom:16px}
+.top-row h3{font-size:15px;font-weight:700}
+.btn-new{background:#1a1a1a;color:#fff;border:none;border-radius:10px;padding:9px 20px;font-size:13px;font-weight:700;cursor:pointer;font-family:inherit}
+.btn-new:hover{background:#333}
+.btn-edit{background:#e3f2fd;color:#1565c0;border:none;border-radius:8px;padding:5px 12px;font-size:12px;font-weight:600;cursor:pointer;font-family:inherit}
+.btn-edit:hover{background:#bbdefb}
+.btn-del{background:#fce4ec;color:#c62828;border:none;border-radius:8px;padding:5px 12px;font-size:12px;font-weight:600;cursor:pointer;font-family:inherit}
+.btn-del:hover{background:#f8bbd9}
+table{width:100%;border-collapse:collapse;font-size:13px}
+th{text-align:left;padding:9px 10px;background:#f8f8f8;font-weight:700;color:#666;border-bottom:2px solid #eee;white-space:nowrap}
+td{padding:8px 10px;border-bottom:1px solid #f0f0f0;vertical-align:middle}
+tr:hover td{background:#fafafa}
+.rb{display:inline-block;padding:2px 8px;border-radius:12px;font-size:11px;font-weight:700}
+.rb-round_10{background:#e8f5e9;color:#2e7d32}
+.rb-round_50{background:#e3f2fd;color:#1565c0}
+.rb-round_100{background:#fce4ec;color:#c62828}
+.rb-charm_9{background:#fff3e0;color:#e65100}
+.empty{text-align:center;padding:50px;color:#bbb;font-size:14px}
+.hint-card{background:#fffbf0;border:1px solid #ffe082;border-radius:12px;padding:14px 18px;margin-bottom:16px;font-size:12px;color:#795548;line-height:2}
+/* Modal */
+.overlay{display:none;position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:999;align-items:center;justify-content:center}
+.overlay.open{display:flex}
+.modal{background:#fff;border-radius:16px;padding:24px;width:520px;max-width:95vw;max-height:90vh;overflow-y:auto;box-shadow:0 8px 32px rgba(0,0,0,.18)}
+.modal h3{font-size:15px;font-weight:700;margin-bottom:18px}
+.form-grid{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+.full{grid-column:1/-1}
+.frow{display:flex;flex-direction:column;gap:4px}
+.frow label{font-size:11px;font-weight:700;color:#555}
+.frow input,.frow select{border:1.5px solid #ddd;border-radius:8px;padding:8px 10px;font-size:13px;outline:none;font-family:inherit;background:#fff}
+.frow input:focus,.frow select:focus{border-color:#1a1a1a}
+.fhint{font-size:10px;color:#bbb;margin-top:1px}
+.modal-footer{display:flex;gap:8px;justify-content:flex-end;margin-top:18px;padding-top:14px;border-top:1px solid #eee}
+.btn-save{background:#1a1a1a;color:#fff;border:none;border-radius:8px;padding:9px 22px;font-size:13px;font-weight:700;cursor:pointer;font-family:inherit}
+.btn-cancel{background:#f0f0f0;color:#555;border:none;border-radius:8px;padding:9px 18px;font-size:13px;cursor:pointer;font-family:inherit}
+.toast{position:fixed;bottom:24px;left:50%;transform:translateX(-50%);background:#333;color:#fff;padding:9px 20px;border-radius:20px;font-size:13px;z-index:9999;opacity:0;transition:opacity .3s;pointer-events:none}
+.toast.show{opacity:1}
+</style>
+</head>
+<body>
+
+<div class="header">
+  <a href="/admin/products?key={{ key }}">&#8592; 商品搬運</a>
+  <div class="header-title">商品定價規則中心</div>
+  <button class="btn-new" onclick="openModal()">&#xff0b; 新增品牌規則</button>
+</div>
+
+<div class="wrap">
+
+  <div class="hint-card">
+    <strong>進位規則：</strong>
+    <span class="rb rb-round_10">round_10</span> 進到10位（179&#8594;190）&nbsp;&nbsp;
+    <span class="rb rb-round_50">round_50</span> 進到50（179&#8594;200）&nbsp;&nbsp;
+    <span class="rb rb-round_100">round_100</span> 進到百位（179&#8594;200）&nbsp;&nbsp;
+    <span class="rb rb-charm_9">charm_9</span> 尾數9（178&#8594;179）
+  </div>
+
+  <div class="card">
+    <div class="top-row">
+      <h3>品牌定價規則</h3>
+      <span id="ruleCount" style="font-size:12px;color:#aaa"></span>
+    </div>
+    <div id="tableWrap"><div class="empty">載入中...</div></div>
+  </div>
+
+</div>
+
+<!-- Modal -->
+<div class="overlay" id="overlay">
+  <div class="modal">
+    <h3 id="modalTitle">新增品牌規則</h3>
+    <input type="hidden" id="editId" value="">
+    <div class="form-grid">
+      <div class="frow full">
+        <label>品牌名稱 *</label>
+        <input type="text" id="fBrand" placeholder="例：JSIMPLE、朗德燈具">
+      </div>
+      <div class="frow full">
+        <label>分類</label>
+        <input type="text" id="fCategory" placeholder="例：高架床、燈具">
+      </div>
+      <div class="frow">
+        <label>匯率（RMB &#8594; TWD）</label>
+        <input type="number" id="fExchange" step="0.01" min="0" value="4.5">
+        <span class="fhint">1 RMB = ? TWD，例：4.5</span>
+      </div>
+      <div class="frow">
+        <label>毛利率 (%)</label>
+        <input type="number" id="fMargin" step="0.1" min="0" max="100" value="40">
+        <span class="fhint">例：40 代表毛利 40%</span>
+      </div>
+      <div class="frow">
+        <label>廣告成本率 (%)</label>
+        <input type="number" id="fAd" step="0.1" min="0" max="100" value="10">
+        <span class="fhint">例：10 代表廣告佔售價 10%</span>
+      </div>
+      <div class="frow">
+        <label>海運成本率 (%)</label>
+        <input type="number" id="fSea" step="0.1" min="0" max="100" value="5">
+        <span class="fhint">例：5 代表海運佔成本 5%</span>
+      </div>
+      <div class="frow">
+        <label>台灣物流成本（TWD/件）</label>
+        <input type="number" id="fTwShipping" step="1" min="0" value="80">
+        <span class="fhint">固定金額，例：80 元</span>
+      </div>
+      <div class="frow">
+        <label>包材成本（TWD/件）</label>
+        <input type="number" id="fPackage" step="1" min="0" value="30">
+        <span class="fhint">固定金額，例：30 元</span>
+      </div>
+      <div class="frow full">
+        <label>進位規則</label>
+        <select id="fRound">
+          <option value="round_10">round_10 — 進到個位數10（179 &#8594; 190）</option>
+          <option value="round_50">round_50 — 進到50（179 &#8594; 200）</option>
+          <option value="round_100">round_100 — 進到百位（179 &#8594; 200）</option>
+          <option value="charm_9">charm_9 — 尾數9（178 &#8594; 179）</option>
+        </select>
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn-cancel" onclick="closeModal()">取消</button>
+      <button class="btn-save" onclick="saveRule()">儲存</button>
+    </div>
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+const KEY = '{{ key }}';
+let rules = [];
+
+async function api(path, opts){
+  const sep = path.includes('?') ? '&' : '?';
+  const r = await fetch(path + sep + 'key=' + KEY, opts);
+  if(!r.ok) throw new Error(await r.text());
+  return r.json();
+}
+
+function toast(msg){
+  const t = document.getElementById('toast');
+  t.textContent = msg; t.classList.add('show');
+  setTimeout(()=>t.classList.remove('show'), 2500);
+}
+
+function esc(s){ return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+
+function pct(v){ const n = parseFloat(v)*100; return (Number.isInteger(n)?n:n.toFixed(1))+'%'; }
+
+const RBL = {round_10:'進10', round_50:'進50', round_100:'進100', charm_9:'尾數9'};
+
+function renderTable(){
+  document.getElementById('ruleCount').textContent = rules.length + ' 條規則';
+  const wrap = document.getElementById('tableWrap');
+  if(!rules.length){
+    wrap.innerHTML = '<div class="empty">尚無規則。點右上角「新增品牌規則」開始</div>';
+    return;
+  }
+  const rows = rules.map(r => `<tr>
+    <td><strong>${esc(r.brand||'—')}</strong></td>
+    <td>${esc(r.category||'—')}</td>
+    <td>${parseFloat(r.exchange_rate).toFixed(2)}</td>
+    <td>${pct(r.margin_rate)}</td>
+    <td>${pct(r.ad_rate)}</td>
+    <td>${pct(r.sea_shipping_rate)}</td>
+    <td>$${Math.round(r.tw_shipping_cost)}</td>
+    <td>$${Math.round(r.package_cost)}</td>
+    <td><span class="rb rb-${esc(r.round_rule)}">${esc(RBL[r.round_rule]||r.round_rule)}</span></td>
+    <td style="white-space:nowrap">
+      <button class="btn-edit" onclick="openEdit(${r.id})">編輯</button>
+      <button class="btn-del" onclick="delRule(${r.id})">刪除</button>
+    </td>
+  </tr>`).join('');
+  wrap.innerHTML = `<table>
+    <thead><tr>
+      <th>品牌</th><th>分類</th><th>匯率</th><th>毛利率</th><th>廣告</th><th>海運</th><th>物流</th><th>包材</th><th>進位</th><th></th>
+    </tr></thead>
+    <tbody>${rows}</tbody>
+  </table>`;
+}
+
+async function loadRules(){
+  try{
+    const d = await api('/api/product-rules');
+    rules = d.rules || [];
+    renderTable();
+  }catch(e){
+    document.getElementById('tableWrap').innerHTML = '<div class="empty">載入失敗：'+e.message+'</div>';
+  }
+}
+
+function resetForm(){
+  document.getElementById('editId').value = '';
+  document.getElementById('fBrand').value = '';
+  document.getElementById('fCategory').value = '';
+  document.getElementById('fExchange').value = '4.5';
+  document.getElementById('fMargin').value = '40';
+  document.getElementById('fAd').value = '10';
+  document.getElementById('fSea').value = '5';
+  document.getElementById('fTwShipping').value = '80';
+  document.getElementById('fPackage').value = '30';
+  document.getElementById('fRound').value = 'round_10';
+}
+
+function openModal(){
+  document.getElementById('modalTitle').textContent = '新增品牌規則';
+  resetForm();
+  document.getElementById('overlay').classList.add('open');
+  document.getElementById('fBrand').focus();
+}
+
+function openEdit(id){
+  const r = rules.find(x=>x.id===id);
+  if(!r) return;
+  document.getElementById('modalTitle').textContent = '編輯品牌規則';
+  document.getElementById('editId').value = id;
+  document.getElementById('fBrand').value = r.brand || '';
+  document.getElementById('fCategory').value = r.category || '';
+  document.getElementById('fExchange').value = parseFloat(r.exchange_rate).toFixed(2);
+  document.getElementById('fMargin').value = (parseFloat(r.margin_rate)*100).toFixed(1).replace(/\\.0$/,'');
+  document.getElementById('fAd').value = (parseFloat(r.ad_rate)*100).toFixed(1).replace(/\\.0$/,'');
+  document.getElementById('fSea').value = (parseFloat(r.sea_shipping_rate)*100).toFixed(1).replace(/\\.0$/,'');
+  document.getElementById('fTwShipping').value = Math.round(r.tw_shipping_cost);
+  document.getElementById('fPackage').value = Math.round(r.package_cost);
+  document.getElementById('fRound').value = r.round_rule || 'round_10';
+  document.getElementById('overlay').classList.add('open');
+  document.getElementById('fBrand').focus();
+}
+
+function closeModal(){
+  document.getElementById('overlay').classList.remove('open');
+}
+
+function getFormData(){
+  const brand = document.getElementById('fBrand').value.trim();
+  if(!brand){ alert('請輸入品牌名稱'); return null; }
+  return {
+    brand,
+    category:         document.getElementById('fCategory').value.trim(),
+    exchange_rate:    parseFloat(document.getElementById('fExchange').value) || 4.5,
+    margin_rate:      (parseFloat(document.getElementById('fMargin').value) || 40) / 100,
+    ad_rate:          (parseFloat(document.getElementById('fAd').value) || 10) / 100,
+    sea_shipping_rate:(parseFloat(document.getElementById('fSea').value) || 5) / 100,
+    tw_shipping_cost: parseFloat(document.getElementById('fTwShipping').value) || 0,
+    package_cost:     parseFloat(document.getElementById('fPackage').value) || 0,
+    round_rule:       document.getElementById('fRound').value,
+  };
+}
+
+async function saveRule(){
+  const data = getFormData();
+  if(!data) return;
+  const editId = document.getElementById('editId').value;
+  try{
+    if(editId){
+      await api('/api/product-rules/'+editId, {method:'PUT', body:JSON.stringify(data), headers:{'Content-Type':'application/json'}});
+      toast('已更新');
+    }else{
+      await api('/api/product-rules', {method:'POST', body:JSON.stringify(data), headers:{'Content-Type':'application/json'}});
+      toast('已新增');
+    }
+    closeModal();
+    await loadRules();
+  }catch(e){
+    alert('儲存失敗：'+e.message);
+  }
+}
+
+async function delRule(id){
+  const r = rules.find(x=>x.id===id);
+  if(!confirm('確定刪除「'+(r?r.brand:id)+'」的規則？')) return;
+  try{
+    await api('/api/product-rules/'+id, {method:'DELETE'});
+    toast('已刪除');
+    await loadRules();
+  }catch(e){
+    alert('刪除失敗：'+e.message);
+  }
+}
+
+document.getElementById('overlay').addEventListener('click', function(e){
+  if(e.target === this) closeModal();
+});
+
+loadRules();
+</script>
+</body>
+</html>"""
+
+
+# ── Product Rules Routes ──────────────────────────────────────────
+
+@products_bp.route("/admin/product-rules")
+def admin_product_rules():
+    ok, key = check_auth()
+    if not ok:
+        return render_template_string(LOGIN_HTML, next="/admin/product-rules", error="")
+    return render_template_string(PRODUCT_RULES_HTML, key=key)
+
+@products_bp.route("/api/product-rules", methods=["GET"])
+def api_product_rules_list():
+    ok, _ = auth_required()
+    if not ok:
+        return jsonify({"error": "unauthorized"}), 403
+    return jsonify({"rules": _pr_all()})
+
+@products_bp.route("/api/product-rules", methods=["POST"])
+def api_product_rules_create():
+    ok, _ = auth_required()
+    if not ok:
+        return jsonify({"error": "unauthorized"}), 403
+    data = request.get_json(silent=True) or {}
+    if not data.get("brand","").strip():
+        return jsonify({"error": "brand 必填"}), 400
+    row_id = _pr_insert(data)
+    if row_id is None:
+        return jsonify({"error": "資料庫未設定或寫入失敗"}), 500
+    return jsonify({"ok": True, "id": row_id})
+
+@products_bp.route("/api/product-rules/<int:rule_id>", methods=["PUT"])
+def api_product_rules_update(rule_id):
+    ok, _ = auth_required()
+    if not ok:
+        return jsonify({"error": "unauthorized"}), 403
+    data = request.get_json(silent=True) or {}
+    success = _pr_update(rule_id, data)
+    return jsonify({"ok": success})
+
+@products_bp.route("/api/product-rules/<int:rule_id>", methods=["DELETE"])
+def api_product_rules_delete(rule_id):
+    ok, _ = auth_required()
+    if not ok:
+        return jsonify({"error": "unauthorized"}), 403
+    _pr_delete(rule_id)
+    return jsonify({"ok": True})
+
+
+# ── Store Import (Batch) ─────────────────────────────────────────
+
+def _ss_migrate():
+    """Add brand / category columns to store_scan_jobs."""
+    if not DATABASE_URL:
+        return
+    try:
+        conn = _pg_conn(); cur = conn.cursor()
+        for sql in [
+            "ALTER TABLE store_scan_jobs ADD COLUMN IF NOT EXISTS brand    TEXT DEFAULT ''",
+            "ALTER TABLE store_scan_jobs ADD COLUMN IF NOT EXISTS category TEXT DEFAULT ''",
+        ]:
+            try: cur.execute(sql)
+            except Exception: pass
+        conn.commit(); cur.close(); conn.close()
+    except Exception as e:
+        import sys; print(f"[SS Migrate] {e}", file=sys.stderr)
+
+_ss_migrate()
+
+
+def _ss_create(url, platform, brand="", category=""):
+    """Insert store_scan_jobs with brand and category; returns job_id."""
+    if not DATABASE_URL:
+        return None
+    try:
+        with _db_lock:
+            conn = _pg_conn(); cur = conn.cursor()
+            cur.execute(
+                "INSERT INTO store_scan_jobs "
+                "(url,platform,brand,category,status,created_at,updated_at) "
+                "VALUES (%s,%s,%s,%s,'pending',%s,%s) RETURNING id",
+                (url, platform, brand, category, time.time(), time.time())
+            )
+            job_id = cur.fetchone()[0]
+            conn.commit(); cur.close(); conn.close()
+            return job_id
+    except Exception as e:
+        import sys; print(f"[SS Create] {e}", file=sys.stderr)
+        return None
+
+
+def _parse_price_str(price_str):
+    """Extract first number from price string. Returns float or None."""
+    import re as _re2
+    if not price_str:
+        return None
+    m = _re2.search(r'[\d.]+', str(price_str))
+    if m:
+        try: return float(m.group())
+        except Exception: pass
+    return None
+
+
+def _ss_get_with_brand(job_id):
+    """Extended _ss_get: includes brand/category and maps item fields."""
+    if not DATABASE_URL:
+        return None
+    try:
+        conn = _pg_conn(); cur = conn.cursor()
+        cur.execute(
+            "SELECT id,url,platform,status,item_count,error_msg,created_at,"
+            "COALESCE(brand,''),COALESCE(category,'') "
+            "FROM store_scan_jobs WHERE id=%s",
+            (job_id,)
+        )
+        row = cur.fetchone()
+        if not row:
+            cur.close(); conn.close(); return None
+        result = {
+            "id": row[0], "url": row[1], "platform": row[2],
+            "status": row[3], "item_count": row[4],
+            "error_msg": row[5], "created_at": row[6],
+            "brand": row[7], "category": row[8],
+        }
+        cur.execute(
+            "SELECT id,title,url,image,price,shop_name,platform,scraped_at,added_to_queue "
+            "FROM store_scan_items WHERE scan_job_id=%s ORDER BY id ASC",
+            (job_id,)
+        )
+        result["items"] = [
+            {
+                "id": r[0], "title": r[1],
+                "url": r[2], "product_url": r[2],
+                "image": r[3], "main_image": r[3],
+                "price": r[4], "original_price": _parse_price_str(r[4]),
+                "shop_name": r[5], "platform": r[6],
+                "scraped_at": r[7], "added_to_queue": bool(r[8]),
+            }
+            for r in cur.fetchall()
+        ]
+        cur.close(); conn.close()
+        return result
+    except Exception as e:
+        import sys; print(f"[SS GetBrand] {e}", file=sys.stderr)
+        return None
+
+
+def _pj_import(url, platform, brand="", raw_title="", raw_price="", raw_images=None):
+    """Insert product_job pre-filled with scan data (status=pending)."""
+    if not DATABASE_URL:
+        return None
+    try:
+        now = time.time()
+        imgs_json = json.dumps(raw_images or [], ensure_ascii=False)
+        with _db_lock:
+            conn = _pg_conn(); cur = conn.cursor()
+            cur.execute(
+                "INSERT INTO product_jobs "
+                "(url,platform,brand,status,raw_title,raw_price,raw_images,created_at,updated_at) "
+                "VALUES (%s,%s,%s,'pending',%s,%s,%s,%s,%s) RETURNING id",
+                (url, platform, brand, raw_title, raw_price, imgs_json, now, now)
+            )
+            job_id = cur.fetchone()[0]
+            conn.commit(); cur.close(); conn.close()
+            return job_id
+    except Exception as e:
+        import sys; print(f"[PJ Import] {e}", file=sys.stderr)
+        return None
+
+
+# ── Store Import API Routes ───────────────────────────────────────
+
+@products_bp.route("/api/store-scan/create", methods=["POST"])
+def api_store_scan_create_v2():
+    """建立店鋪掃描任務（含品牌/分類）。"""
+    ok, _ = auth_required()
+    if not ok:
+        return jsonify({"error": "unauthorized"}), 403
+    data = request.get_json(silent=True) or {}
+    url = (data.get("url") or "").strip()
+    if not url:
+        return jsonify({"error": "url 必填"}), 400
+    platform = data.get("platform", "")
+    if not platform:
+        platform = "1688" if "1688.com" in url else "taobao" if "taobao.com" in url else "unknown"
+    brand    = (data.get("brand") or "").strip()
+    category = (data.get("category") or "").strip()
+    job_id = _ss_create(url, platform, brand, category)
+    if job_id is None:
+        return jsonify({"error": "資料庫未設定或寫入失敗"}), 500
+    return jsonify({"ok": True, "id": job_id})
+
+
+@products_bp.route("/api/store-scan/<int:job_id>/items", methods=["GET"])
+def api_store_scan_items_v2(job_id):
+    """取得掃描商品清單（含 brand/category，item 欄位映射新格式）。"""
+    ok, _ = auth_required()
+    if not ok:
+        return jsonify({"error": "unauthorized"}), 403
+    job = _ss_get_with_brand(job_id)
+    if not job:
+        return jsonify({"error": "not found"}), 404
+    return jsonify(job)
+
+
+@products_bp.route("/api/store-scan/import-selected", methods=["POST"])
+def api_store_scan_import_selected():
+    """將勾選商品建立成 product_jobs（含預填 title/price/image）。"""
+    ok, _ = auth_required()
+    if not ok:
+        return jsonify({"error": "unauthorized"}), 403
+    data = request.get_json(silent=True) or {}
+    item_ids = data.get("item_ids", [])
+    brand    = (data.get("brand") or "").strip()
+    if not item_ids:
+        return jsonify({"error": "請勾選商品"}), 400
+    if not DATABASE_URL:
+        return jsonify({"error": "資料庫未設定"}), 500
+    try:
+        conn = _pg_conn(); cur = conn.cursor()
+        cur.execute(
+            "SELECT ssi.id, ssi.url, ssi.platform, ssi.title, ssi.price, ssi.image, "
+            "COALESCE(ssj.brand,'') "
+            "FROM store_scan_items ssi "
+            "JOIN store_scan_jobs ssj ON ssj.id = ssi.scan_job_id "
+            "WHERE ssi.id=ANY(%s) AND ssi.added_to_queue=FALSE",
+            (item_ids,)
+        )
+        rows = cur.fetchall(); cur.close(); conn.close()
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+    added = []
+    for r in rows:
+        item_id, url, platform, title, price, image, job_brand = r
+        eff_brand = brand or job_brand
+        raw_images = [image] if image else []
+        job_id = _pj_import(url, platform, eff_brand, title or "", price or "", raw_images)
+        if job_id:
+            added.append({"item_id": item_id, "job_id": job_id})
+    if added:
+        _ss_mark_added([a["item_id"] for a in added])
+    return jsonify({"ok": True, "added": len(added), "jobs": added})
+
+
+# ── Store Import Admin Page ───────────────────────────────────────
+
+STORE_IMPORT_HTML = """<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>店鋪批次搬運</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:-apple-system,sans-serif;background:#f5f5f5;color:#333;height:100vh;display:flex;flex-direction:column;overflow:hidden}
+.header{background:#1a1a1a;color:#fff;padding:13px 20px;display:flex;align-items:center;gap:14px;flex-shrink:0}
+.header a{color:#888;text-decoration:none;font-size:14px}
+.header a:hover{color:#fff}
+.header-title{font-size:17px;font-weight:700;flex:1}
+.layout{display:flex;flex:1;min-height:0}
+.panel-l{width:300px;min-width:300px;background:#fff;border-right:1px solid #eee;display:flex;flex-direction:column;overflow:hidden}
+.sec{padding:14px 16px;border-bottom:1px solid #f0f0f0;flex-shrink:0}
+.sec h4{font-size:11px;font-weight:700;color:#888;margin-bottom:10px;text-transform:uppercase;letter-spacing:.5px}
+.frow{margin-bottom:8px}
+.frow label{display:block;font-size:11px;font-weight:700;color:#666;margin-bottom:3px}
+.frow input,.frow select{width:100%;border:1.5px solid #e0e0e0;border-radius:8px;padding:7px 10px;font-size:13px;outline:none;font-family:inherit;background:#fff}
+.frow input:focus,.frow select:focus{border-color:#1a1a1a}
+.btn-scan{width:100%;background:#1a1a1a;color:#fff;border:none;border-radius:9px;padding:10px;font-size:13px;font-weight:700;cursor:pointer;font-family:inherit;margin-top:2px}
+.btn-scan:hover{background:#333}
+.btn-scan:disabled{background:#bbb;cursor:default}
+.sbar{margin-top:8px;min-height:16px;font-size:11px;color:#888}
+.spinner{display:inline-block;width:9px;height:9px;border:2px solid #ddd;border-top-color:#888;border-radius:50%;animation:spin .8s linear infinite;vertical-align:middle;margin-right:3px}
+@keyframes spin{to{transform:rotate(360deg)}}
+.task-scroller{flex:1;overflow-y:auto}
+.task-item{padding:10px 16px;border-bottom:1px solid #f8f8f8;cursor:pointer;transition:background .1s}
+.task-item:hover{background:#f8f8f8}
+.task-item.active{background:#e8f4fd;border-left:3px solid #1a1a1a;padding-left:13px}
+.ti-url{font-size:11px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-bottom:3px}
+.ti-meta{display:flex;gap:5px;align-items:center;flex-wrap:wrap}
+.pf{font-size:10px;font-weight:700;padding:1px 5px;border-radius:4px}
+.pf-1688{background:#fff0f0;color:#c62828}
+.pf-taobao{background:#fff4e5;color:#e65100}
+.ts{font-size:10px;font-weight:700;padding:1px 6px;border-radius:10px}
+.ts-pending,.ts-scanning{background:#fef3cd;color:#856404}
+.ts-done{background:#d1fae5;color:#065f46}
+.ts-error,.ts-failed{background:#fee2e2;color:#991b1b}
+.panel-r{flex:1;display:flex;flex-direction:column;min-width:0}
+.ph{padding:12px 18px;background:#fff;border-bottom:1px solid #eee;display:flex;align-items:center;gap:10px;flex-shrink:0}
+.ph h3{font-size:14px;font-weight:700;flex:1}
+.ph-meta{font-size:12px;color:#aaa}
+.pb{flex:1;overflow-y:auto;padding:16px}
+.empty-r{display:flex;flex-direction:column;align-items:center;justify-content:center;height:100%;color:#ccc;font-size:13px;gap:8px}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(155px,1fr));gap:10px}
+.ic{background:#fff;border-radius:12px;border:2px solid transparent;overflow:hidden;cursor:pointer;transition:border-color .12s;position:relative;display:flex;flex-direction:column}
+.ic:hover{border-color:#ddd}
+.ic.sel{border-color:#1a1a1a}
+.ic.done{opacity:.6}
+.ic input[type=checkbox]{position:absolute;top:8px;left:8px;width:15px;height:15px;z-index:2;accent-color:#1a1a1a;cursor:pointer}
+.ic img{width:100%;aspect-ratio:1;object-fit:cover;background:#f5f5f5}
+.ic-body{padding:7px 9px 9px;flex:1;display:flex;flex-direction:column;gap:3px}
+.ic-title{font-size:11px;line-height:1.4;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+.ic-price{font-size:12px;font-weight:700;color:#c62828}
+.ic-added{font-size:10px;font-weight:700;padding:1px 5px;border-radius:5px;background:#d1fae5;color:#065f46;align-self:flex-start}
+.abar{background:#fff;border-top:1px solid #eee;padding:10px 18px;display:none;align-items:center;gap:10px;flex-shrink:0}
+.abar.show{display:flex}
+.sel-info{font-size:13px;color:#555;flex:1}
+.sb-row{display:flex;gap:6px}
+.sbtn{background:#f5f5f5;border:1.5px solid #e0e0e0;border-radius:8px;padding:6px 12px;font-size:12px;cursor:pointer;font-family:inherit}
+.sbtn:hover{background:#eee}
+.brand-pick{border:1.5px solid #e0e0e0;border-radius:8px;padding:7px 10px;font-size:12px;font-family:inherit;outline:none;background:#fff}
+.btn-imp{background:#2e7d32;color:#fff;border:none;border-radius:9px;padding:9px 20px;font-size:13px;font-weight:700;cursor:pointer;font-family:inherit;white-space:nowrap}
+.btn-imp:hover{background:#1b5e20}
+.btn-imp:disabled{background:#bbb;cursor:default}
+.toast{position:fixed;bottom:60px;left:50%;transform:translateX(-50%);background:#222;color:#fff;padding:8px 18px;border-radius:18px;font-size:13px;z-index:9999;opacity:0;transition:opacity .3s;pointer-events:none}
+.toast.show{opacity:1}
+</style>
+</head>
+<body>
+
+<div class="header">
+  <a href="/admin/products?key={{ key }}">&#8592; 商品搬運</a>
+  <div class="header-title">店鋪批次搬運</div>
+</div>
+
+<div class="layout">
+
+  <div class="panel-l">
+    <div class="sec">
+      <h4>新增掃描任務</h4>
+      <div class="frow">
+        <label>店鋪 / 分類頁網址</label>
+        <input type="text" id="urlIn" placeholder="https://shop.1688.com/...">
+      </div>
+      <div class="frow">
+        <label>平台</label>
+        <select id="pfSel">
+          <option value="1688">1688</option>
+          <option value="taobao">淘寶</option>
+        </select>
+      </div>
+      <div class="frow">
+        <label>品牌</label>
+        <select id="brandSel">
+          <option value="">不指定</option>
+          <option value="jsimple">JS家具</option>
+          <option value="lander">朗德LIGHT+</option>
+          <option value="filterbreath">濾呼吸</option>
+          <option value="lander_curtain">澄光窗簾</option>
+        </select>
+      </div>
+      <div class="frow">
+        <label>分類</label>
+        <input type="text" id="catIn" placeholder="例：高架床、窗簾">
+      </div>
+      <button class="btn-scan" id="scanBtn" onclick="startScan()">開始掃描</button>
+      <div class="sbar" id="sbar"></div>
+    </div>
+    <div class="sec" style="padding-bottom:6px">
+      <h4>掃描歷史</h4>
+    </div>
+    <div class="task-scroller" id="taskList">
+      <div style="padding:14px 16px;font-size:12px;color:#ccc">載入中...</div>
+    </div>
+  </div>
+
+  <div class="panel-r">
+    <div class="ph" id="ph" style="display:none">
+      <h3 id="phTitle">商品清單</h3>
+      <span class="ph-meta" id="phMeta"></span>
+    </div>
+    <div class="pb" id="pb">
+      <div class="empty-r">
+        <div style="font-size:36px">&#128722;</div>
+        <div>從左側選擇掃描任務，查看商品清單</div>
+      </div>
+    </div>
+    <div class="abar" id="abar">
+      <div class="sb-row">
+        <button class="sbtn" onclick="selAll(true)">全選</button>
+        <button class="sbtn" onclick="selAll(false)">取消</button>
+      </div>
+      <span class="sel-info" id="selInfo">已選 0 筆</span>
+      <select class="brand-pick" id="impBrand">
+        <option value="">不指定品牌</option>
+        <option value="jsimple">JS家具</option>
+        <option value="lander">朗德LIGHT+</option>
+        <option value="filterbreath">濾呼吸</option>
+        <option value="lander_curtain">澄光窗簾</option>
+      </select>
+      <button class="btn-imp" id="impBtn" onclick="doImport()">加入商品搬運</button>
+    </div>
+  </div>
+
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+const KEY = '{{ key }}';
+let currentJobId = null;
+let pollTimer = null;
+
+async function api(path, opts){
+  const sep = path.includes('?') ? '&' : '?';
+  const r = await fetch(path + sep + 'key=' + KEY, opts);
+  if(!r.ok) throw new Error(await r.text());
+  return r.json();
+}
+function toast(msg){
+  const t = document.getElementById('toast');
+  t.textContent = msg; t.classList.add('show');
+  setTimeout(()=>t.classList.remove('show'), 2800);
+}
+function esc(s){ return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+
+async function loadHistory(){
+  try{
+    const d = await api('/api/store-scan');
+    const jobs = d.jobs||[];
+    const tl = document.getElementById('taskList');
+    if(!jobs.length){
+      tl.innerHTML = '<div style="padding:14px 16px;font-size:11px;color:#ccc">尚無記錄</div>';
+      return;
+    }
+    tl.innerHTML = jobs.slice(0,30).map(j=>`
+      <div class="task-item${j.id===currentJobId?' active':''}" onclick="loadTask(${j.id})" data-jid="${j.id}">
+        <div class="ti-url">${esc((j.url||'').replace(/https?:\\/\\//,'').slice(0,42))}</div>
+        <div class="ti-meta">
+          <span class="pf pf-${esc(j.platform)}">${esc(j.platform)}</span>
+          <span class="ts ts-${esc(j.status)}">${esc(j.status)}</span>
+          <span style="font-size:10px;color:#aaa">${j.item_count||0}筆</span>
+        </div>
+      </div>
+    `).join('');
+  }catch(e){}
+}
+
+async function loadTask(jobId){
+  clearTimeout(pollTimer);
+  currentJobId = jobId;
+  document.querySelectorAll('.task-item').forEach(el=>el.classList.toggle('active', +el.dataset.jid===jobId));
+  const ph = document.getElementById('ph');
+  ph.style.display = 'flex';
+  document.getElementById('phTitle').textContent = '商品清單';
+  document.getElementById('phMeta').textContent = '載入中...';
+  document.getElementById('pb').innerHTML = '<div style="text-align:center;padding:50px;color:#bbb;font-size:13px">載入中...</div>';
+  document.getElementById('abar').classList.remove('show');
+  pollTask(jobId);
+}
+
+async function pollTask(jobId){
+  try{
+    const job = await api('/api/store-scan/'+jobId+'/items');
+    if(job.status==='pending'||job.status==='scanning'){
+      document.getElementById('phMeta').textContent = '掃描中，請稍候...';
+      document.getElementById('pb').innerHTML = '<div style="text-align:center;padding:50px;color:#aaa;font-size:13px"><span class="spinner"></span> 等待 local_worker 掃描中...</div>';
+      pollTimer = setTimeout(()=>pollTask(jobId), 2500);
+      return;
+    }
+    await loadHistory();
+    renderItems(job);
+  }catch(e){
+    document.getElementById('phMeta').textContent = '載入失敗';
+    pollTimer = setTimeout(()=>pollTask(jobId), 3500);
+  }
+}
+
+function renderItems(job){
+  const items = job.items||[];
+  document.getElementById('phMeta').textContent = items.length + ' 筆';
+  if(job.status==='error'||job.status==='failed'){
+    document.getElementById('pb').innerHTML = '<div style="text-align:center;padding:40px;color:#c62828;font-size:13px">掃描失敗：'+esc(job.error_msg||'')+'</div>';
+    document.getElementById('abar').classList.remove('show');
+    return;
+  }
+  if(!items.length){
+    document.getElementById('pb').innerHTML = '<div style="text-align:center;padding:50px;color:#bbb;font-size:13px">未抓到商品<br><br>請確認 local_worker 正在執行，<br>或此頁面格式已變更。</div>';
+    document.getElementById('abar').classList.remove('show');
+    return;
+  }
+  document.getElementById('pb').innerHTML = '<div class="grid">'+items.map(it=>`
+    <label class="ic${it.added_to_queue?' done':''}" onclick="updCount()">
+      <input type="checkbox" class="icb" value="${it.id}"${it.added_to_queue?' disabled checked':''}>
+      <img src="${esc(it.image||it.main_image||'')}" onerror="this.style.background='#eee'" alt="">
+      <div class="ic-body">
+        <div class="ic-title">${esc(it.title)}</div>
+        ${it.price?'<div class="ic-price">&#165;'+esc(it.price)+'</div>':''}
+        ${it.added_to_queue?'<span class="ic-added">&#10003; 已加入</span>':''}
+      </div>
+    </label>
+  `).join('')+'</div>';
+  document.getElementById('abar').classList.add('show');
+  if(job.brand) document.getElementById('impBrand').value = job.brand;
+  updCount();
+}
+
+function updCount(){
+  const n = document.querySelectorAll('.icb:not(:disabled):checked').length;
+  document.getElementById('selInfo').textContent = '已選 ' + n + ' 筆';
+}
+function selAll(v){
+  document.querySelectorAll('.icb:not(:disabled)').forEach(el=>{ el.checked=v; });
+  document.querySelectorAll('.ic').forEach(el=>{ const cb=el.querySelector('.icb'); if(cb&&!cb.disabled) el.classList.toggle('sel',v); });
+  updCount();
+}
+
+async function startScan(){
+  const url = document.getElementById('urlIn').value.trim();
+  if(!url){ alert('請輸入店鋪網址'); return; }
+  const platform = document.getElementById('pfSel').value;
+  const brand    = document.getElementById('brandSel').value;
+  const category = document.getElementById('catIn').value.trim();
+  document.getElementById('scanBtn').disabled = true;
+  document.getElementById('sbar').innerHTML = '<span class="spinner"></span>建立掃描任務...';
+  try{
+    const r = await api('/api/store-scan/create',{
+      method:'POST', body:JSON.stringify({url,platform,brand,category}),
+      headers:{'Content-Type':'application/json'}
+    });
+    document.getElementById('sbar').textContent = '任務 #'+r.id+' 已建立，等待 worker...';
+    await loadHistory();
+    await loadTask(r.id);
+  }catch(e){
+    document.getElementById('sbar').textContent = '錯誤：'+e.message;
+  }finally{
+    document.getElementById('scanBtn').disabled = false;
+  }
+}
+
+async function doImport(){
+  const ids = [...document.querySelectorAll('.icb:not(:disabled):checked')].map(el=>parseInt(el.value));
+  if(!ids.length){ alert('請勾選商品'); return; }
+  const brand = document.getElementById('impBrand').value;
+  document.getElementById('impBtn').disabled = true;
+  try{
+    const r = await api('/api/store-scan/import-selected',{
+      method:'POST', body:JSON.stringify({item_ids:ids,brand}),
+      headers:{'Content-Type':'application/json'}
+    });
+    toast('已加入 '+r.added+' 筆商品搬運任務');
+    if(currentJobId) await loadTask(currentJobId);
+  }catch(e){
+    alert('加入失敗：'+e.message);
+  }finally{
+    document.getElementById('impBtn').disabled = false;
+  }
+}
+
+loadHistory();
+</script>
+</body>
+</html>"""
+
+
+@products_bp.route("/admin/store-import")
+def admin_store_import():
+    ok, key = check_auth()
+    if not ok:
+        return render_template_string(LOGIN_HTML, next="/admin/store-import", error="")
+    return render_template_string(STORE_IMPORT_HTML, key=key)
 

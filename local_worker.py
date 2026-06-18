@@ -707,7 +707,7 @@ def scrape_taobao(page, url):
             "for(var j=0;j<els.length;j++){"
             "add(els[j].getAttribute('src')||els[j].getAttribute('data-src')||'');}}"
             "if(imgs.length<3){"
-            "var re=/https?:\/\/img\.alicdn\.com\/bao\/[^"'\s]+\.(jpg|png|webp)/gi;"
+            "var re=/https?:\\/\\/img\\.alicdn\\.com\\/bao\\/[^\"'\\s]+\\.(jpg|png|webp)/gi;"
             "var ss=document.querySelectorAll('script');"
             "for(var k=0;k<ss.length;k++){var t=ss[k].textContent||'';var m;"
             "while((m=re.exec(t))!==null){add(m[0]);}if(imgs.length>=30)break;}}"
@@ -808,7 +808,7 @@ _SCAN_TAOBAO_JS = """() => {
 }"""
 
 
-def scan_store_page(page, url, limit=50):
+def scan_store_page(page, url, limit=30):
     """Phase 1：掃描店鋪/分類頁，只抓當前頁面商品卡片，不翻頁。"""
     from datetime import datetime
     platform = '1688' if '1688.com' in url else 'taobao' if 'taobao.com' in url else 'unknown'
@@ -834,18 +834,32 @@ def scan_store_page(page, url, limit=50):
         print(f"    [Scan] JS 失敗: {e}")
         return {"platform": platform, "items": [], "error": str(e)}
 
+    seen_urls = set()
     items = []
     for it in (raw or [])[:limit]:
+        product_url = it.get("url", "")
+        if not product_url or product_url in seen_urls:
+            continue
+        seen_urls.add(product_url)
         img = it.get("image", "")
         if img.startswith("//"): img = "https:" + img
+        price_str = it.get("price", "")[:50]
+        orig_price = None
+        m = re.search(r'[\d.]+', price_str)
+        if m:
+            try: orig_price = float(m.group())
+            except Exception: pass
         items.append({
-            "title":      it.get("title", "")[:200],
-            "url":        it.get("url", ""),
-            "image":      img,
-            "price":      it.get("price", "")[:50],
-            "shop_name":  it.get("shop_name", "")[:100],
-            "platform":   platform,
-            "scraped_at": scraped_at,
+            "title":          it.get("title", "")[:200],
+            "url":            product_url,
+            "product_url":    product_url,
+            "image":          img,
+            "main_image":     img,
+            "price":          price_str,
+            "original_price": orig_price,
+            "shop_name":      it.get("shop_name", "")[:100],
+            "platform":       platform,
+            "scraped_at":     scraped_at,
         })
 
     print(f"    [Scan] 抓到 {len(items)} 筆")
@@ -920,7 +934,7 @@ def run(pw):
                     print(f"[掃描 #{sj_id}] {sj_platform.upper()} {sj_url[:65]}...")
                     page = context.new_page()
                     try:
-                        result = scan_store_page(page, sj_url, limit=50)
+                        result = scan_store_page(page, sj_url, limit=30)
                         r = post_scan_result(sj_id, result)
                         if r.get("ok"):
                             print(f"  ✓ 掃描完成（{r.get('count', 0)} 筆）")
