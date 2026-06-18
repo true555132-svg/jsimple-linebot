@@ -587,22 +587,55 @@ def _download_image(url):
     except Exception:
         return None
 
-def _process_to_white_bg(img_bytes, size=800):
+def _removebg_api(img_bytes):
+    """Call remove.bg API; returns PNG bytes with transparent bg, or None on failure."""
+    import sys
+    api_key = os.getenv("REMOVEBG_API_KEY", "")
+    if not api_key:
+        return None
+    try:
+        import requests as _req
+        r = _req.post(
+            "https://api.remove.bg/v1.0/removebg",
+            files={"image_file": ("image.jpg", img_bytes, "image/jpeg")},
+            data={"size": "auto"},
+            headers={"X-Api-Key": api_key},
+            timeout=30,
+        )
+        if r.status_code == 200:
+            return r.content  # PNG with transparent background
+        print(f"[RemoveBG] API error {r.status_code}: {r.text[:200]}", file=sys.stderr)
+        return None
+    except Exception as e:
+        print(f"[RemoveBG] exception: {e}", file=sys.stderr)
+        return None
+
+
+def _paste_on_white(img_bytes, size=800):
+    """Paste image (supports transparency) onto white canvas, output JPEG bytes."""
     try:
         from PIL import Image
         img = Image.open(io.BytesIO(img_bytes)).convert("RGBA")
-        bg = Image.new("RGBA", img.size, (255, 255, 255, 255))
-        bg.paste(img, mask=img.split()[3] if img.mode == "RGBA" else None)
-        bg = bg.convert("RGB")
-        bg.thumbnail((size, size), Image.LANCZOS)
         canvas = Image.new("RGB", (size, size), (255, 255, 255))
-        offset = ((size - bg.width) // 2, (size - bg.height) // 2)
-        canvas.paste(bg, offset)
+        img.thumbnail((size, size), Image.LANCZOS)
+        offset = ((size - img.width) // 2, (size - img.height) // 2)
+        canvas.paste(img, offset, mask=img.split()[3])
         out = io.BytesIO()
-        canvas.save(out, format="JPEG", quality=85, optimize=True)
+        canvas.save(out, format="JPEG", quality=88, optimize=True)
         return out.getvalue()
     except Exception:
         return None
+
+
+def _process_to_white_bg(img_bytes, size=800):
+    """Try remove.bg API first; fall back to simple white canvas paste."""
+    removed = _removebg_api(img_bytes)
+    if removed:
+        result = _paste_on_white(removed, size)
+        if result:
+            return result
+    # fallback: no bg removal, just center on white
+    return _paste_on_white(img_bytes, size)
 
 def _process_images_for_job(job_id):
     job = _pj_get(job_id)
