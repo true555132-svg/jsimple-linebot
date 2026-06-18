@@ -1846,10 +1846,24 @@ async function whitebgCat(catId, id){
   try{
     const r=await api('/api/products/'+id+'/whitebg-selected',{method:'POST',body:JSON.stringify({urls}),headers:{'Content-Type':'application/json'}});
     if(r.ok){
-      toast('白底圖處理中，稍後重新整理查看結果');
-      setTimeout(()=>{if(openId===id) openJob(id);},8000);
+      toast('白底圖處理中（'+r.count+' 張）...');
+      pollWhitebg(id, 0);
     } else { toast('失敗：'+(r.error||'')); }
   }catch(e){ toast('錯誤：'+e.message); }
+}
+async function pollWhitebg(id, tries){
+  if(tries>20){toast('白底圖處理超時，請至 Render log 查看錯誤');return;}
+  try{
+    const j=await api('/api/products/'+id);
+    if(j.img_status==='done'){
+      toast('白底圖完成！');
+      if(openId===id) openJob(id);
+    } else if(j.img_status==='failed'){
+      toast('白底圖處理失敗，請查 Render log');
+    } else {
+      setTimeout(()=>pollWhitebg(id,tries+1),4000);
+    }
+  }catch(e){ setTimeout(()=>pollWhitebg(id,tries+1),4000); }
 }
 async function confirmSelect(id){
   const urls=[..._selImgs];
@@ -2666,22 +2680,72 @@ def api_upload_translated(job_id):
     return jsonify({"ok": True, "added": len(uploaded_urls), "urls": uploaded_urls, "type": img_type})
 
 
+def _download_image_robust(url):
+    """Download image with multiple strategies for CDN hotlink protection."""
+    import sys
+    if not url:
+        return None
+    if url.startswith("//"):
+        url = "https:" + url
+    headers_list = [
+        {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+         "Referer": "https://www.1688.com/", "Accept": "image/webp,image/apng,image/*,*/*"},
+        {"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
+         "Referer": "https://detail.tmall.com/", "Accept": "image/*,*/*"},
+        {"User-Agent": "Mozilla/5.0", "Accept": "*/*"},
+    ]
+    try:
+        import requests as _req
+        for hdrs in headers_list:
+            try:
+                r = _req.get(url, headers=hdrs, timeout=20, stream=True)
+                if r.status_code == 200:
+                    return r.content
+            except Exception as e:
+                print(f"[WhiteBG] download attempt failed: {e}", file=sys.stderr)
+    except ImportError:
+        pass
+    # fallback urllib
+    try:
+        req = urllib.request.Request(url, headers=headers_list[0])
+        with urllib.request.urlopen(req, timeout=20) as r:
+            return r.read()
+    except Exception as e:
+        print(f"[WhiteBG] urllib fallback failed: {e}", file=sys.stderr)
+    return None
+
+
 def _whitebg_selected_job(job_id, img_urls):
+    import sys
+    print(f"[WhiteBG] job={job_id} urls={len(img_urls)}", file=sys.stderr)
     job = _pj_get(job_id)
-    if not job: return
+    if not job:
+        print(f"[WhiteBG] job {job_id} not found", file=sys.stderr)
+        return
     existing = job.get("processed_images", [])
     existing_set = set(existing)
     new_processed = list(existing)
     for i, url in enumerate(img_urls[:20]):
-        img_bytes = _download_image(url)
-        if not img_bytes: continue
+        print(f"[WhiteBG] [{i+1}/{len(img_urls)}] downloading {url[:80]}", file=sys.stderr)
+        img_bytes = _download_image_robust(url)
+        if not img_bytes:
+            print(f"[WhiteBG] download failed for img {i+1}", file=sys.stderr)
+            continue
+        print(f"[WhiteBG] downloaded {len(img_bytes)} bytes, processing...", file=sys.stderr)
         result = _process_to_white_bg(img_bytes)
-        if not result: continue
+        if not result:
+            print(f"[WhiteBG] PIL processing failed for img {i+1}", file=sys.stderr)
+            continue
         filename = f"products/{job_id}_sel_{int(time.time())}_{i}.jpg"
-        pub_url, _ = upload_image_to_supabase(filename, result, "image/jpeg")
+        pub_url, err = upload_image_to_supabase(filename, result, "image/jpeg")
+        if err:
+            print(f"[WhiteBG] Supabase upload failed: {err}", file=sys.stderr)
         if pub_url and pub_url not in existing_set:
             new_processed.append(pub_url)
             existing_set.add(pub_url)
+            print(f"[WhiteBG] uploaded: {pub_url[:60]}", file=sys.stderr)
+    added = len(new_processed) - len(existing)
+    print(f"[WhiteBG] done, added {added} new images", file=sys.stderr)
     _pj_update(job_id,
                processed_images=json.dumps(new_processed, ensure_ascii=False),
                img_status="done" if new_processed else "failed")
