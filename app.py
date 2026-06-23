@@ -563,7 +563,7 @@ cooldowns = {"line": {}, "fb": {}, "fb_comment": {}}
 
 # 人工接手：儲存 "platform:user_id"，接手中的用戶不觸發自動回覆
 manual_takeover = set()
-ALL_TAGS = ["高架床","雙層床","客製需求","詢價中","高意願","已報價","待回訪","已成交","小坪數","樓梯款","爬梯款","書桌需求","收納需求"]
+ALL_TAGS = ["高架床","雙層床","客製需求","詢價中","高意願","已報價","待回訪","已成交","小坪數","樓梯款","爬梯款","書桌需求","收納需求","辦公家具","設計傢俱"]
 STATUS_OPTIONS = ["bot","human","waiting","followup","closed","sold"]
 
 # 啟動時從 Supabase 同步 human 狀態到 manual_takeover
@@ -1566,7 +1566,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
 <script>
 const KEY = new URLSearchParams(location.search).get('key') || '';
 document.getElementById('homeBtn').href = '/admin?key=' + KEY;
-const ALL_TAGS = ['有興趣','已報價','猶豫中','要比較','問尺寸','問材質','問交期','問安裝','詢問保固','重要客戶','需要跟進','已下訂','垃圾訊息'];
+const ALL_TAGS = ['有興趣','已報價','猶豫中','要比較','問尺寸','問材質','問交期','問安裝','詢問保固','重要客戶','需要跟進','已下訂','垃圾訊息','辦公家具','設計傢俱'];
 const STATUS_COLORS = {bot:'#6c757d',human:'#0d6efd',waiting:'#fd7e14',followup:'#6f42c1',closed:'#dc3545',sold:'#198754'};
 const TPL_DATA = {
   '打招呼':['你好，我是JSIMPLE高架床專員，請問有什麼可以幫您？','感謝您的詢問，請問您的需求是？'],
