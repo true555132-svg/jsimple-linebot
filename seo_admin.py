@@ -277,6 +277,46 @@ button{width:100%;background:#0d6efd;color:#fff;border:none;border-radius:8px;pa
 </div>
 </body></html>"""
 
+# ── 共用導覽列 ─────────────────────────────────────────────────
+
+NAV_CSS = """
+.topnav{background:#1a1a1a;padding:12px 20px;display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px}
+.nav-home{color:#fff;font-weight:700;font-size:14px;text-decoration:none;white-space:nowrap}
+.nav-pills{display:flex;gap:6px;flex-wrap:wrap}
+.nav-pill{font-size:12px;font-weight:600;color:#ccc;background:rgba(255,255,255,.08);padding:6px 12px;border-radius:20px;text-decoration:none;white-space:nowrap;transition:.15s}
+.nav-pill:hover{background:rgba(255,255,255,.18);color:#fff}
+.nav-pill.active{background:#0d6efd;color:#fff}
+.breadcrumb{background:#fff;padding:9px 20px;font-size:12px;color:#999;border-bottom:1px solid #e8eaed}
+.breadcrumb a{color:#0d6efd;text-decoration:none}
+.breadcrumb a:hover{text-decoration:underline}
+.breadcrumb b{color:#333;font-weight:700}
+"""
+
+NAV_ITEMS = [
+    ("seo",            "📝 文章管理",      "/admin/seo"),
+    ("seo-dashboard",  "📊 數據儀表板",    "/admin/seo-dashboard"),
+    ("seo-generator",  "✨ AI 生成文章",   "/admin/seo-generator"),
+]
+
+def _nav_bar(key, active, crumbs):
+    """crumbs: list of (label, path_or_None). 最後一項視為當前頁面，不可點擊。"""
+    pills = "".join(
+        f'<a class="nav-pill{" active" if slug == active else ""}" href="{path}?key={key}">{label}</a>'
+        for slug, label, path in NAV_ITEMS
+    )
+    parts = []
+    for i, (label, path) in enumerate(crumbs):
+        if path and i < len(crumbs) - 1:
+            parts.append(f'<a href="{path}?key={key}">{label}</a>')
+        else:
+            parts.append(f'<b>{label}</b>')
+    crumb_html = ' <span style="color:#ccc">›</span> '.join(parts)
+    return (
+        f'<div class="topnav"><a class="nav-home" href="/admin?key={key}">⚡ 後台首頁</a>'
+        f'<div class="nav-pills">{pills}</div></div>'
+        f'<div class="breadcrumb">{crumb_html}</div>'
+    )
+
 # ── 列表頁 ─────────────────────────────────────────────────────
 
 LIST_HTML = """<!DOCTYPE html>
@@ -286,8 +326,7 @@ LIST_HTML = """<!DOCTYPE html>
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
 body{font-family:-apple-system,sans-serif;background:#f5f5f5;color:#333}
-.header{background:#1a1a1a;color:#fff;padding:14px 20px;font-size:17px;font-weight:700;display:flex;justify-content:space-between;align-items:center}
-.header a{color:#aaa;text-decoration:none;font-size:13px}
+""" + NAV_CSS + """
 .container{max-width:1000px;margin:24px auto;padding:0 16px}
 .section{background:#fff;border-radius:14px;padding:20px;margin-bottom:20px;box-shadow:0 1px 4px rgba(0,0,0,.08)}
 .section h3{font-size:15px;margin-bottom:12px}
@@ -309,7 +348,7 @@ input[type=text],select,textarea{width:100%;border:1px solid #ddd;border-radius:
 .link{color:#0d6efd;text-decoration:none;font-weight:600}
 form.inline{display:inline}
 </style></head><body>
-<div class="header">📝 SEO 內容管理後台<span><a href="/admin/seo-dashboard?key={{ key }}" style="margin-right:14px">📊 數據儀表板</a><a href="/admin/seo-generator?key={{ key }}" style="margin-right:14px">✨ AI 生成文章</a><a href="/admin?key={{ key }}">← 回總覽</a></span></div>
+{{ nav|safe }}
 <div class="container">
 
   <div class="section">
@@ -378,8 +417,7 @@ ARTICLE_HTML = """<!DOCTYPE html>
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
 body{font-family:-apple-system,sans-serif;background:#f5f5f5;color:#333}
-.header{background:#1a1a1a;color:#fff;padding:14px 20px;font-size:17px;font-weight:700;display:flex;justify-content:space-between;align-items:center}
-.header a{color:#aaa;text-decoration:none;font-size:13px}
+""" + NAV_CSS + """
 .container{max-width:780px;margin:24px auto;padding:0 16px 80px}
 .section{background:#fff;border-radius:14px;padding:20px;margin-bottom:16px;box-shadow:0 1px 4px rgba(0,0,0,.08)}
 label{font-size:12px;color:#888;font-weight:700;display:block;margin-bottom:5px;margin-top:14px}
@@ -388,7 +426,7 @@ input[type=text],select,textarea{width:100%;border:1px solid #ddd;border-radius:
 textarea{resize:vertical;line-height:1.7}
 .btn{padding:10px 22px;background:#0d6efd;color:#fff;border:none;border-radius:8px;font-size:14px;font-weight:600;cursor:pointer}
 </style></head><body>
-<div class="header">📝 編輯文章<a href="/admin/seo?key={{ key }}">← 回列表</a></div>
+{{ nav|safe }}
 <div class="container">
 <form method="POST" action="/admin/seo/article/save?key={{ key }}">
   <input type="hidden" name="id" value="{{ a[0] if a else '' }}">
@@ -428,8 +466,7 @@ TRACKING_HTML = """<!DOCTYPE html>
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
 body{font-family:-apple-system,sans-serif;background:#f5f5f5;color:#333}
-.header{background:#1a1a1a;color:#fff;padding:14px 20px;font-size:17px;font-weight:700;display:flex;justify-content:space-between;align-items:center}
-.header a{color:#aaa;text-decoration:none;font-size:13px}
+""" + NAV_CSS + """
 .container{max-width:900px;margin:24px auto;padding:0 16px}
 .section{background:#fff;border-radius:14px;padding:20px;margin-bottom:16px;box-shadow:0 1px 4px rgba(0,0,0,.08)}
 table{width:100%;border-collapse:collapse;font-size:13px}
@@ -440,7 +477,7 @@ th{color:#888;font-weight:600;font-size:11px;text-transform:uppercase}
 .btn{padding:7px 14px;background:#0d6efd;color:#fff;border:none;border-radius:6px;font-size:12px;font-weight:600;cursor:pointer}
 .yes{color:#2e7d32;font-weight:700}.no{color:#bbb}
 </style></head><body>
-<div class="header">📊 成效記錄 — {{ article_title }}<a href="/admin/seo?key={{ key }}">← 回列表</a></div>
+{{ nav|safe }}
 <div class="container">
   <div class="section">
     <table>
@@ -479,8 +516,7 @@ GENERATOR_HTML = """<!DOCTYPE html>
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
 body{font-family:-apple-system,sans-serif;background:#f5f5f5;color:#333}
-.header{background:#1a1a1a;color:#fff;padding:14px 20px;font-size:17px;font-weight:700;display:flex;justify-content:space-between;align-items:center}
-.header a{color:#aaa;text-decoration:none;font-size:13px}
+""" + NAV_CSS + """
 .container{max-width:780px;margin:24px auto;padding:0 16px 80px}
 .section{background:#fff;border-radius:14px;padding:20px;margin-bottom:16px;box-shadow:0 1px 4px rgba(0,0,0,.08)}
 label{font-size:12px;color:#888;font-weight:700;display:block;margin-bottom:5px;margin-top:14px}
@@ -497,7 +533,7 @@ pre{white-space:pre-wrap;font-family:inherit;font-size:13px;line-height:1.7;back
 .err{color:#c62828;font-size:13px;margin-top:8px}
 .banner{background:#fdecea;color:#c62828;border-radius:10px;padding:12px 16px;margin-bottom:16px;font-size:13px;font-weight:600}
 </style></head><body>
-<div class="header">✨ AI 生成 SEO 文章<a href="/admin/seo?key={{ key }}">← 回列表</a></div>
+{{ nav|safe }}
 <div class="container">
 
   {% if not ai_key_set %}
@@ -631,7 +667,8 @@ def seo_dashboard():
     titles = _q("SELECT id,topic,title,status,slug FROM seo_titles ORDER BY id DESC", fetch="all") or []
     articles = _q("SELECT id,title,status,slug,updated_at FROM seo_articles ORDER BY id DESC", fetch="all") or []
     articles = [(a[0], a[1], a[2], a[3], time.strftime("%Y-%m-%d %H:%M", time.localtime(a[4])) if a[4] else "") for a in articles]
-    return render_template_string(LIST_HTML, key=key, titles=titles, articles=articles, title_status=TITLE_STATUS)
+    nav = _nav_bar(key, "seo", [("文章管理", None)])
+    return render_template_string(LIST_HTML, key=key, nav=nav, titles=titles, articles=articles, title_status=TITLE_STATUS)
 
 @seo_bp.route("/admin/seo/title/add", methods=["POST"])
 def seo_title_add():
@@ -669,7 +706,8 @@ def seo_article_new():
         row = _q("SELECT title FROM seo_titles WHERE id=%s", (title_id,), fetch="one")
         if row:
             default_title = row[0]
-    return render_template_string(ARTICLE_HTML, key=key, a=None, default_title=default_title, article_status=ARTICLE_STATUS)
+    nav = _nav_bar(key, "seo", [("文章管理", "/admin/seo"), ("新增文章", None)])
+    return render_template_string(ARTICLE_HTML, key=key, nav=nav, a=None, default_title=default_title, article_status=ARTICLE_STATUS)
 
 @seo_bp.route("/admin/seo/article/<int:aid>")
 def seo_article_edit(aid):
@@ -680,7 +718,8 @@ def seo_article_edit(aid):
               FROM seo_articles WHERE id=%s""", (aid,), fetch="one")
     if not a:
         abort(404)
-    return render_template_string(ARTICLE_HTML, key=key, a=a, default_title="", article_status=ARTICLE_STATUS)
+    nav = _nav_bar(key, "seo", [("文章管理", "/admin/seo"), ("編輯文章", None)])
+    return render_template_string(ARTICLE_HTML, key=key, nav=nav, a=a, default_title="", article_status=ARTICLE_STATUS)
 
 @seo_bp.route("/admin/seo/article/save", methods=["POST"])
 def seo_article_save():
@@ -728,7 +767,8 @@ def seo_tracking_view(aid):
     records = _q("""SELECT id,article_id,record_date,ranking,clicks,impressions,
                      ai_overview_cited,chatgpt_cited,notes,line_inquiries,orders,revenue
                      FROM seo_tracking WHERE article_id=%s ORDER BY record_date DESC""", (aid,), fetch="all") or []
-    return render_template_string(TRACKING_HTML, key=key, article_id=aid, article_title=art[0], records=records)
+    nav = _nav_bar(key, "seo", [("文章管理", "/admin/seo"), (f"成效記錄 — {art[0]}", None)])
+    return render_template_string(TRACKING_HTML, key=key, nav=nav, article_id=aid, article_title=art[0], records=records)
 
 @seo_bp.route("/admin/seo/article/<int:aid>/tracking/add", methods=["POST"])
 def seo_tracking_add(aid):
@@ -754,7 +794,8 @@ def seo_generator_page():
     if not ok:
         return render_template_string(LOGIN_HTML, error=None)
     brands = _list_brands()
-    return render_template_string(GENERATOR_HTML, key=key, brands=brands, ai_key_set=bool(ANTHROPIC_API_KEY))
+    nav = _nav_bar(key, "seo-generator", [("AI 生成文章", None)])
+    return render_template_string(GENERATOR_HTML, key=key, nav=nav, brands=brands, ai_key_set=bool(ANTHROPIC_API_KEY))
 
 @seo_bp.route("/admin/seo-generator/analyze", methods=["POST"])
 def seo_generator_analyze():
@@ -941,8 +982,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
 body{font-family:-apple-system,sans-serif;background:#f5f5f5;color:#333}
-.header{background:#1a1a1a;color:#fff;padding:14px 20px;font-size:17px;font-weight:700;display:flex;justify-content:space-between;align-items:center}
-.header a{color:#aaa;text-decoration:none;font-size:13px;margin-left:14px}
+""" + NAV_CSS + """
 .container{max-width:1100px;margin:24px auto;padding:0 16px}
 .section{background:#fff;border-radius:14px;padding:20px;margin-bottom:20px;box-shadow:0 1px 4px rgba(0,0,0,.08)}
 .section h3{font-size:15px;margin-bottom:12px}
@@ -961,7 +1001,7 @@ th{color:#888;font-weight:600;font-size:11px;text-transform:uppercase}
 .btn{padding:6px 14px;background:#0d6efd;color:#fff;border:none;border-radius:6px;font-size:12px;font-weight:600;cursor:pointer}
 .scroll-x{overflow-x:auto}
 </style></head><body>
-<div class="header">📊 SEO 數據儀表板<span><a href="/admin/seo?key={{ key }}">文章管理</a><a href="/admin?key={{ key }}">← 回總覽</a></span></div>
+{{ nav|safe }}
 <div class="container">
 
   <div class="section">
@@ -1021,7 +1061,8 @@ def seo_dashboard_page():
         import sys; print(f"[SEO Dashboard] 讀取文章數據失敗：{e}", file=sys.stderr)
         items = []
     suggestion, gen_at = _get_ai_suggestion()
-    return render_template_string(DASHBOARD_HTML, key=key, items=items,
+    nav = _nav_bar(key, "seo-dashboard", [("數據儀表板", None)])
+    return render_template_string(DASHBOARD_HTML, key=key, nav=nav, items=items,
         top_clicks=_top_n(items, "clicks"), top_ctr=_top_n(items, "ctr"),
         top_inquiries=_top_n(items, "line_inquiries"), top_orders=_top_n(items, "orders"),
         suggestion=suggestion,
