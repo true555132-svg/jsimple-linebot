@@ -3989,6 +3989,10 @@ def api_delete_quick_image():
 from products_api import products_bp
 app.register_blueprint(products_bp)
 
+# ═══ SEO 內容管理後台 Blueprint ═══════════════════════════════════
+from seo_admin import seo_bp
+app.register_blueprint(seo_bp)
+
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port)
