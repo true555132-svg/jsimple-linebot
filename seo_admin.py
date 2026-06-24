@@ -93,6 +93,16 @@ def init_seo_db():
                     generated_at FLOAT DEFAULT 0
                 )
             """)
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS seo_generate_jobs (
+                    id           SERIAL PRIMARY KEY,
+                    status       TEXT DEFAULT 'pending',
+                    article_id   INTEGER DEFAULT NULL,
+                    error_msg    TEXT DEFAULT '',
+                    created_at   FLOAT DEFAULT 0,
+                    updated_at   FLOAT DEFAULT 0
+                )
+            """)
             conn.commit()
             cur.close()
             conn.close()
@@ -547,7 +557,7 @@ async function doAnalyze(){
       method: 'POST', headers: {'Content-Type':'application/json'},
       body: JSON.stringify({brand, category, topic})
     });
-    const data = await res.json();
+    const data = await safeJson(res);
     if (data.error) { document.getElementById('err-analyze').textContent = data.error; }
     else {
       document.getElementById('analysis-text').textContent = data.analysis;
@@ -558,6 +568,12 @@ async function doAnalyze(){
   } catch(e) { document.getElementById('err-analyze').textContent = String(e); }
   document.getElementById('btn-analyze').disabled = false;
   document.getElementById('loading-analyze').style.display = 'none';
+}
+
+async function safeJson(res){
+  const text = await res.text();
+  try { return JSON.parse(text); }
+  catch(e) { throw new Error('伺服器回應異常（可能是逾時或部署中），請稍後再試。HTTP ' + res.status); }
 }
 
 async function doGenerate(){
@@ -572,14 +588,33 @@ async function doGenerate(){
         topic: window._lastTopic, analysis: window._lastAnalysis
       })
     });
-    const data = await res.json();
-    if (data.error) { document.getElementById('err-generate').textContent = data.error; }
-    else {
-      document.getElementById('done-title').textContent = data.title;
-      document.getElementById('link-edit').href = '/admin/seo/article/' + data.id + '?key=' + encodeURIComponent(KEY);
-      document.getElementById('step-done').classList.add('active');
+    const data = await safeJson(res);
+    if (data.error) { document.getElementById('err-generate').textContent = data.error; document.getElementById('btn-generate').disabled = false; document.getElementById('loading-generate').style.display = 'none'; return; }
+    await pollGenerateJob(data.job_id);
+  } catch(e) {
+    document.getElementById('err-generate').textContent = String(e.message || e);
+    document.getElementById('btn-generate').disabled = false;
+    document.getElementById('loading-generate').style.display = 'none';
+  }
+}
+
+async function pollGenerateJob(jobId){
+  while (true) {
+    await new Promise(r => setTimeout(r, 3000));
+    const res = await fetch('/admin/seo-generator/generate/status/' + jobId + '?key=' + encodeURIComponent(KEY));
+    const data = await safeJson(res);
+    if (data.status === 'pending' || data.status === 'running') continue;
+    if (data.status === 'error') {
+      document.getElementById('err-generate').textContent = data.error || '生成失敗';
+      break;
     }
-  } catch(e) { document.getElementById('err-generate').textContent = String(e); }
+    if (data.status === 'done') {
+      document.getElementById('done-title').textContent = data.title;
+      document.getElementById('link-edit').href = '/admin/seo/article/' + data.article_id + '?key=' + encodeURIComponent(KEY);
+      document.getElementById('step-done').classList.add('active');
+      break;
+    }
+  }
   document.getElementById('btn-generate').disabled = false;
   document.getElementById('loading-generate').style.display = 'none';
 }
@@ -741,6 +776,34 @@ def seo_generator_analyze():
         return jsonify({"error": f"AI分析失敗：{err}"}), 200
     return jsonify({"analysis": text})
 
+def _run_generate_job(job_id, brand_key, category, topic, analysis):
+    try:
+        _q("UPDATE seo_generate_jobs SET status='running', updated_at=%s WHERE id=%s", (time.time(), job_id))
+        brand = _get_brand(brand_key)
+        prompt = _generate_article_prompt(brand, category, topic, analysis)
+        result, err = _ai_call_json(prompt, model="claude-sonnet-4-6", max_tokens=8000)
+        if err:
+            _q("UPDATE seo_generate_jobs SET status='error', error_msg=%s, updated_at=%s WHERE id=%s",
+               (f"AI生成失敗：{err}", time.time(), job_id))
+            return
+        now = time.time()
+        new_id = _q("""INSERT INTO seo_articles
+               (title,slug,meta_title,meta_description,content,ai_summary,status,
+                brand_key,category,created_at,updated_at,published_at)
+               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id""",
+           (result.get("title",""), result.get("slug",""), result.get("meta_title",""),
+            result.get("meta_description",""), result.get("content",""), result.get("ai_summary",""),
+            "draft", brand_key, category, now, now, 0), fetch="id")
+        _q("""UPDATE seo_generate_jobs SET status='done', article_id=%s, updated_at=%s WHERE id=%s""",
+           (new_id, time.time(), job_id))
+    except Exception as e:
+        import sys; print(f"[SEO Generate Job Error] {e}", file=sys.stderr)
+        try:
+            _q("UPDATE seo_generate_jobs SET status='error', error_msg=%s, updated_at=%s WHERE id=%s",
+               (str(e), time.time(), job_id))
+        except Exception:
+            pass
+
 @seo_bp.route("/admin/seo-generator/generate", methods=["POST"])
 def seo_generator_generate():
     ok, _ = auth_required()
@@ -755,20 +818,29 @@ def seo_generator_generate():
         return jsonify({"error": "請輸入主題"}), 400
     if not ANTHROPIC_API_KEY:
         return jsonify({"error": "尚未設定 ANTHROPIC_API_KEY，請在 Render → Environment 加上這個環境變數才能使用AI功能"}), 200
-    brand = _get_brand(brand_key)
-    prompt = _generate_article_prompt(brand, category, topic, analysis)
-    result, err = _ai_call_json(prompt, model="claude-sonnet-4-6", max_tokens=8000)
-    if err:
-        return jsonify({"error": f"AI生成失敗：{err}"}), 200
     now = time.time()
-    new_id = _q("""INSERT INTO seo_articles
-           (title,slug,meta_title,meta_description,content,ai_summary,status,
-            brand_key,category,created_at,updated_at,published_at)
-           VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id""",
-       (result.get("title",""), result.get("slug",""), result.get("meta_title",""),
-        result.get("meta_description",""), result.get("content",""), result.get("ai_summary",""),
-        "draft", brand_key, category, now, now, 0), fetch="id")
-    return jsonify({"id": new_id, "title": result.get("title","")})
+    job_id = _q("INSERT INTO seo_generate_jobs (status,created_at,updated_at) VALUES (%s,%s,%s) RETURNING id",
+                ("pending", now, now), fetch="id")
+    threading.Thread(target=_run_generate_job, args=(job_id, brand_key, category, topic, analysis), daemon=True).start()
+    return jsonify({"job_id": job_id})
+
+@seo_bp.route("/admin/seo-generator/generate/status/<int:job_id>")
+def seo_generator_generate_status(job_id):
+    ok, _ = auth_required()
+    if not ok:
+        return jsonify({"error": "unauthorized"}), 403
+    row = _q("SELECT status,article_id,error_msg FROM seo_generate_jobs WHERE id=%s", (job_id,), fetch="one")
+    if not row:
+        return jsonify({"status": "error", "error": "找不到這個生成任務"})
+    status, article_id, error_msg = row
+    out = {"status": status}
+    if status == "error":
+        out["error"] = error_msg
+    elif status == "done":
+        title_row = _q("SELECT title FROM seo_articles WHERE id=%s", (article_id,), fetch="one")
+        out["article_id"] = article_id
+        out["title"] = title_row[0] if title_row else ""
+    return jsonify(out)
 
 @seo_bp.route("/api/seo/articles", methods=["GET"])
 def api_seo_articles():
