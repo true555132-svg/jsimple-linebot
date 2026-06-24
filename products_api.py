@@ -156,42 +156,44 @@ BRAND_PROFILES = {
 # ── Brand profile DB helpers ──────────────────────────────────────
 def _bp_all():
     if not DATABASE_URL:
-        return [{"brand_key": k, **v, "custom_prompt": ""} for k, v in BRAND_PROFILES.items()]
+        return [{"brand_key": k, **v, "custom_prompt": "", "image_style": "", "seo_direction": "", "enabled": True} for k, v in BRAND_PROFILES.items()]
     try:
         conn = _pg_conn(); cur = conn.cursor()
-        cur.execute("SELECT brand_key,name,category,style,tone,custom_prompt FROM brand_profiles ORDER BY brand_key")
+        cur.execute("SELECT brand_key,name,category,style,tone,custom_prompt,COALESCE(image_style,''),COALESCE(seo_direction,''),COALESCE(enabled,TRUE) FROM brand_profiles ORDER BY brand_key")
         rows = cur.fetchall(); cur.close(); conn.close()
         return [{"brand_key": r[0], "name": r[1], "category": r[2],
-                 "style": r[3], "tone": r[4], "custom_prompt": r[5] or ""} for r in rows]
+                 "style": r[3], "tone": r[4], "custom_prompt": r[5] or "",
+                 "image_style": r[6] or "", "seo_direction": r[7] or "", "enabled": bool(r[8])} for r in rows]
     except Exception:
-        return [{"brand_key": k, **v, "custom_prompt": ""} for k, v in BRAND_PROFILES.items()]
+        return [{"brand_key": k, **v, "custom_prompt": "", "image_style": "", "seo_direction": "", "enabled": True} for k, v in BRAND_PROFILES.items()]
 
 def _bp_get(brand_key):
     if not DATABASE_URL:
         return BRAND_PROFILES.get(brand_key, {})
     try:
         conn = _pg_conn(); cur = conn.cursor()
-        cur.execute("SELECT name,category,style,tone,custom_prompt FROM brand_profiles WHERE brand_key=%s", (brand_key,))
+        cur.execute("SELECT name,category,style,tone,custom_prompt,COALESCE(image_style,''),COALESCE(seo_direction,''),COALESCE(enabled,TRUE) FROM brand_profiles WHERE brand_key=%s", (brand_key,))
         row = cur.fetchone(); cur.close(); conn.close()
         if row:
             return {"name": row[0], "category": row[1], "style": row[2],
-                    "tone": row[3], "custom_prompt": row[4] or ""}
+                    "tone": row[3], "custom_prompt": row[4] or "",
+                    "image_style": row[5] or "", "seo_direction": row[6] or "", "enabled": bool(row[7])}
     except Exception:
         pass
     return BRAND_PROFILES.get(brand_key, {})
 
-def _bp_save(brand_key, name, category, style, tone, custom_prompt=""):
+def _bp_save(brand_key, name, category, style, tone, custom_prompt="", image_style="", seo_direction="", enabled=True):
     if not DATABASE_URL:
         return False
     try:
         conn = _pg_conn(); cur = conn.cursor()
         cur.execute("""
-            INSERT INTO brand_profiles(brand_key,name,category,style,tone,custom_prompt,updated_at)
-            VALUES(%s,%s,%s,%s,%s,%s,%s)
+            INSERT INTO brand_profiles(brand_key,name,category,style,tone,custom_prompt,image_style,seo_direction,enabled,updated_at)
+            VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
             ON CONFLICT(brand_key) DO UPDATE
-            SET name=%s,category=%s,style=%s,tone=%s,custom_prompt=%s,updated_at=%s
-        """, (brand_key, name, category, style, tone, custom_prompt, time.time(),
-              name, category, style, tone, custom_prompt, time.time()))
+            SET name=%s,category=%s,style=%s,tone=%s,custom_prompt=%s,image_style=%s,seo_direction=%s,enabled=%s,updated_at=%s
+        """, (brand_key, name, category, style, tone, custom_prompt, image_style, seo_direction, enabled, time.time(),
+              name, category, style, tone, custom_prompt, image_style, seo_direction, enabled, time.time()))
         conn.commit(); cur.close(); conn.close()
         return True
     except Exception as e:
@@ -235,11 +237,11 @@ def _pj_list(limit=50):
     try:
         conn = _pg_conn(); cur = conn.cursor()
         cur.execute(
-            "SELECT id,url,platform,status,raw_title,ai_name,ai_desc,ai_keywords,error_msg,created_at,brand FROM product_jobs ORDER BY created_at DESC LIMIT %s",
+            "SELECT id,url,platform,status,raw_title,ai_name,ai_desc,ai_keywords,error_msg,created_at,brand,COALESCE(category,''),COALESCE(listing_status,'草稿') FROM product_jobs ORDER BY created_at DESC LIMIT %s",
             (limit,)
         )
         rows = cur.fetchall(); cur.close(); conn.close()
-        return [{"id":r[0],"url":r[1],"platform":r[2],"status":r[3],"raw_title":r[4],"ai_name":r[5],"ai_desc":r[6],"ai_keywords":r[7],"error_msg":r[8],"created_at":r[9],"brand":r[10] or ""} for r in rows]
+        return [{"id":r[0],"url":r[1],"platform":r[2],"status":r[3],"raw_title":r[4],"ai_name":r[5],"ai_desc":r[6],"ai_keywords":r[7],"error_msg":r[8],"created_at":r[9],"brand":r[10] or "","category":r[11] or "","listing_status":r[12] or "草稿"} for r in rows]
     except Exception:
         return []
 
@@ -249,13 +251,16 @@ def _pj_get(job_id):
     try:
         conn = _pg_conn(); cur = conn.cursor()
         cur.execute(
-            "SELECT id,url,platform,status,raw_title,raw_desc,raw_images,raw_price,ai_name,ai_desc,ai_keywords,error_msg,created_at,processed_images,img_status,raw_extra,brand,COALESCE(translated_images,'[]'),COALESCE(translate_status,'') FROM product_jobs WHERE id=%s",
+            "SELECT id,url,platform,status,raw_title,raw_desc,raw_images,raw_price,ai_name,ai_desc,ai_keywords,error_msg,created_at,processed_images,img_status,raw_extra,brand,COALESCE(translated_images,'[]'),COALESCE(translate_status,''),"
+            "COALESCE(category,''),COALESCE(price_min,''),COALESCE(price_max,''),COALESCE(shopee_title,''),COALESCE(website_name,''),COALESCE(features,''),COALESCE(seo_desc,''),COALESCE(faq,'[]'),COALESCE(main_image,''),COALESCE(listing_status,'草稿') "
+            "FROM product_jobs WHERE id=%s",
             (job_id,)
         )
         row = cur.fetchone()
         if not row:
             cur.close(); conn.close(); return None
-        result = {"id":row[0],"url":row[1],"platform":row[2],"status":row[3],"raw_title":row[4],"raw_desc":row[5],"raw_images":json.loads(row[6] or "[]"),"raw_price":row[7],"ai_name":row[8],"ai_desc":row[9],"ai_keywords":row[10],"error_msg":row[11],"created_at":row[12],"processed_images":json.loads(row[13] or "[]"),"img_status":row[14] or "","raw_extra":json.loads(row[15] or "{}"),"brand":row[16] or "","translated_images":json.loads(row[17] or "[]"),"translate_status":row[18] or ""}
+        result = {"id":row[0],"url":row[1],"platform":row[2],"status":row[3],"raw_title":row[4],"raw_desc":row[5],"raw_images":json.loads(row[6] or "[]"),"raw_price":row[7],"ai_name":row[8],"ai_desc":row[9],"ai_keywords":row[10],"error_msg":row[11],"created_at":row[12],"processed_images":json.loads(row[13] or "[]"),"img_status":row[14] or "","raw_extra":json.loads(row[15] or "{}"),"brand":row[16] or "","translated_images":json.loads(row[17] or "[]"),"translate_status":row[18] or "",
+                  "category":row[19] or "","price_min":row[20] or "","price_max":row[21] or "","shopee_title":row[22] or "","website_name":row[23] or "","features":row[24] or "","seo_desc":row[25] or "","faq":json.loads(row[26] or "[]"),"main_image":row[27] or "","listing_status":row[28] or "草稿"}
         try:
             cur.execute("SELECT product_images FROM product_jobs WHERE id=%s", (job_id,))
             pi_row = cur.fetchone()
@@ -505,7 +510,14 @@ def _ai_rewrite(raw_title, raw_desc, price="", brand=""):
 {{
   "name": "商品名稱（簡潔、專業、官網感，30字以內，繁體中文，不要堆砌關鍵字）",
   "desc": "商品描述（200-400字，條列式，繁體中文，口語但不隨便，用具體數字，不要感嘆號堆疊，不要：喔、恩、那個、就是說、其實、基本上、保證、一定、絕對）",
-  "keywords": "關鍵字1,關鍵字2,關鍵字3,關鍵字4,關鍵字5"
+  "keywords": "關鍵字1,關鍵字2,關鍵字3,關鍵字4,關鍵字5",
+  "shopee_title": "蝦皮標題（含關鍵字堆疊風格，40字以內）",
+  "website_name": "官網商品名稱（簡潔版，與商品名稱可不同，20字以內）",
+  "features": "商品特色（條列3-5點，每點一行，用「・」開頭）",
+  "price_min": "建議售價下限（純數字字串，台幣，無千分位逗號）",
+  "price_max": "建議售價上限（純數字字串，台幣，無千分位逗號）",
+  "seo_desc": "SEO 描述（80字以內，給搜尋引擎用，含品牌與主要關鍵字）",
+  "faq": [{{"q":"常見問題1","a":"回答1"}},{{"q":"常見問題2","a":"回答2"}},{{"q":"常見問題3","a":"回答3"}}]
 }}"""
     try:
         req_data = json.dumps({
@@ -529,7 +541,13 @@ def _ai_rewrite(raw_title, raw_desc, price="", brand=""):
         m = re.search(r'\{[\s\S]*\}', text)
         if m:
             result = json.loads(m.group())
-            return {"name": result.get("name",""), "desc": result.get("desc",""), "keywords": result.get("keywords","")}
+            return {
+                "name": result.get("name",""), "desc": result.get("desc",""), "keywords": result.get("keywords",""),
+                "shopee_title": result.get("shopee_title",""), "website_name": result.get("website_name",""),
+                "features": result.get("features",""), "price_min": str(result.get("price_min","") or ""),
+                "price_max": str(result.get("price_max","") or ""), "seo_desc": result.get("seo_desc",""),
+                "faq": result.get("faq", []) if isinstance(result.get("faq"), list) else [],
+            }
         return {"error": f"AI 回傳格式錯誤: {text[:200]}"}
     except Exception as e:
         return {"error": str(e)}
@@ -554,7 +572,10 @@ def _process_product_job(job_id, url, platform):
     if "error" in ai:
         _pj_update(job_id, status="error", error_msg=f"AI 改寫失敗：{ai['error']}")
         return
-    _pj_update(job_id, status="done", ai_name=ai.get("name",""), ai_desc=ai.get("desc",""), ai_keywords=ai.get("keywords",""))
+    _pj_update(job_id, status="done", ai_name=ai.get("name",""), ai_desc=ai.get("desc",""), ai_keywords=ai.get("keywords",""),
+               shopee_title=ai.get("shopee_title",""), website_name=ai.get("website_name",""), features=ai.get("features",""),
+               price_min=ai.get("price_min",""), price_max=ai.get("price_max",""), seo_desc=ai.get("seo_desc",""),
+               faq=json.dumps(ai.get("faq",[]), ensure_ascii=False))
 
 def _run_ai_rewrite_for_job(job_id):
     job = _pj_get(job_id)
@@ -572,7 +593,10 @@ def _run_ai_rewrite_for_job(job_id):
         _pj_update(job_id, status="error", error_msg=f"AI 改寫失敗：{ai['error']}")
         return
     _pj_update(job_id, status="done",
-               ai_name=ai.get("name",""), ai_desc=ai.get("desc",""), ai_keywords=ai.get("keywords",""))
+               ai_name=ai.get("name",""), ai_desc=ai.get("desc",""), ai_keywords=ai.get("keywords",""),
+               shopee_title=ai.get("shopee_title",""), website_name=ai.get("website_name",""), features=ai.get("features",""),
+               price_min=ai.get("price_min",""), price_max=ai.get("price_max",""), seo_desc=ai.get("seo_desc",""),
+               faq=json.dumps(ai.get("faq",[]), ensure_ascii=False))
 
 # ── 圖片處理（Phase 2A）──────────────────────────────────────────
 def _download_image(url):
@@ -1466,6 +1490,41 @@ body{font-family:-apple-system,sans-serif;background:#f5f5f5;color:#333}
 .batch-hint{font-size:12px;color:#aaa;margin-top:6px}
 .progress-bar-wrap{background:#f0f0f0;border-radius:10px;height:6px;margin-top:10px;overflow:hidden;display:none}
 .progress-bar{background:#1a1a1a;height:100%;border-radius:10px;transition:width .3s}
+/* Tabs */
+.tab-nav{display:flex;gap:2px;padding:0 20px;border-bottom:1px solid #f0f0f0;overflow-x:auto;background:#fff;position:sticky;top:57px;z-index:1}
+.tab-btn{background:none;border:none;padding:12px 14px;font-size:13px;font-weight:600;color:#999;cursor:pointer;white-space:nowrap;border-bottom:2px solid transparent;font-family:-apple-system,sans-serif}
+.tab-btn:hover{color:#333}
+.tab-btn.active{color:#1a1a1a;border-bottom-color:#1a1a1a}
+.tab-panel{display:none}
+.tab-panel.active{display:block}
+/* 左右對照 */
+.compare-grid{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+@media (max-width:560px){.compare-grid{grid-template-columns:1fr}}
+.compare-col-hd{font-size:12px;font-weight:700;color:#999;letter-spacing:.4px;text-transform:uppercase;margin-bottom:10px;padding-bottom:8px;border-bottom:1px solid #f0f0f0}
+.compare-field{margin-bottom:14px}
+.compare-field label{display:block;font-size:11px;color:#aaa;margin-bottom:4px}
+.compare-field .static-val{background:#f8f8f8;border-radius:8px;padding:8px 10px;font-size:13px;line-height:1.5;word-break:break-all;min-height:18px}
+.compare-field input[type=text],.compare-field select{width:100%;border:1.5px solid #ddd;border-radius:8px;padding:7px 10px;font-size:13px;font-family:-apple-system,sans-serif;outline:none}
+.compare-field input:focus,.compare-field select:focus{border-color:#1a1a1a}
+.status-pill{display:inline-block;font-size:11px;font-weight:700;padding:3px 10px;border-radius:10px;background:#fff8e1;color:#f57f17}
+/* 文案欄位 */
+.copy-field{margin-bottom:18px}
+.copy-field-hd{display:flex;align-items:center;justify-content:space-between;margin-bottom:6px}
+.copy-field-hd .slabel{margin-bottom:0}
+.copy-field textarea,.copy-field input[type=text]{width:100%;border:1.5px solid #ddd;border-radius:10px;padding:9px 12px;font-size:13px;line-height:1.6;font-family:-apple-system,sans-serif;outline:none;resize:vertical}
+.copy-field textarea:focus,.copy-field input:focus{border-color:#1a1a1a}
+.btn-regen{background:#fff3e0;color:#e65100;border:none;border-radius:9px;padding:8px 16px;font-size:13px;font-weight:600;cursor:pointer;font-family:-apple-system,sans-serif}
+.btn-regen:hover{background:#ffe0b2}
+.btn-regen:disabled{background:#f5f5f5;color:#bbb;cursor:default}
+/* FAQ */
+.faq-item{background:#f8f8f8;border-radius:10px;padding:12px;margin-bottom:10px;position:relative}
+.faq-item input[type=text]{width:100%;border:1.5px solid #ddd;border-radius:8px;padding:7px 10px;font-size:13px;margin-bottom:6px;font-family:-apple-system,sans-serif;outline:none;background:#fff}
+.faq-item textarea{width:100%;border:1.5px solid #ddd;border-radius:8px;padding:7px 10px;font-size:13px;font-family:-apple-system,sans-serif;outline:none;background:#fff;resize:vertical;height:50px}
+.faq-del{position:absolute;top:8px;right:8px;background:none;border:none;color:#bbb;font-size:16px;cursor:pointer;line-height:1}
+.faq-del:hover{color:#e53935}
+.btn-add-faq{background:#f0f0f0;color:#555;border:none;border-radius:9px;padding:7px 14px;font-size:13px;cursor:pointer;font-family:-apple-system,sans-serif}
+.btn-add-faq:hover{background:#e0e0e0}
+.main-badge{position:absolute;bottom:4px;left:4px;background:#1a1a1a;color:#fff;font-size:9px;font-weight:700;padding:1px 6px;border-radius:5px;z-index:2}
 </style>
 </head>
 <body>
@@ -1492,6 +1551,7 @@ body{font-family:-apple-system,sans-serif;background:#f5f5f5;color:#333}
         <option value="jsimple">JSIMPLE — 高架床 / 家具</option>
         <option value="lander">朗德燈具 — 燈具 / 照明</option>
         <option value="filterbreath">濾呼吸 — 空氣濾網</option>
+        <option value="chengguang">澄光窗簾 — 窗簾 / 遮光簾</option>
       </select>
     </div>
     <div class="batch-hint" id="batchHint"></div>
@@ -1528,7 +1588,7 @@ body{font-family:-apple-system,sans-serif;background:#f5f5f5;color:#333}
 
 <script>
 const KEY = "{{ key }}";
-let jobs = [], filter = "all", pollTimer = null, openId = null, _selImgs = new Set(), _lbImgs = [], _lbIdx = 0, _curJobId = 0;
+let jobs = [], filter = "all", pollTimer = null, openId = null, _selImgs = new Set(), _lbImgs = [], _lbIdx = 0, _curJobId = 0, _curMainImage = "", _curTab = "tab1";
 
 const api = (url, opts={}) => fetch(url+(url.includes("?")?"&":"?")+"key="+KEY, {headers:{"Content-Type":"application/json"},...opts}).then(r=>r.json());
 
@@ -1566,7 +1626,7 @@ function jobCard(j){
   const stLabel = {pending:"等待 Worker",scraping:"爬取中",rewriting:"改寫中",done:"完成",error:"失敗"}[j.status]||j.status;
   const isActive = ["pending","scraping","rewriting"].includes(j.status);
   const spin = isActive ? '<span class="spinner"></span>' : "";
-  const brandLabel = {jsimple:"JSIMPLE",lander:"朗德",filterbreath:"濾呼吸"}[j.brand]||"";
+  const brandLabel = {jsimple:"JSIMPLE",lander:"朗德",filterbreath:"濾呼吸",chengguang:"澄光"}[j.brand]||"";
   const brandBadge = brandLabel ? `<span class="brand-badge">${brandLabel}</span>` : "";
   const title = esc(j.ai_name||j.raw_title||j.url);
   const urlShort = j.url.length>65 ? j.url.slice(0,65)+"…" : j.url;
@@ -1633,48 +1693,96 @@ async function openJob(id){
   }catch(e){document.getElementById("modalBody").innerHTML='<div class="err-box">載入失敗</div>';}
 }
 
-function renderModal(j, editMode=false){
+const BRAND_LABELS = {jsimple:"JSIMPLE",lander:"朗德燈具",filterbreath:"濾呼吸",chengguang:"澄光窗簾"};
+let _curJob = null;
+
+function renderModal(j){
   document.getElementById("modalTitle").textContent = j.ai_name||j.raw_title||"商品詳情";
-  let h="";
   if(j.status==="error"){
-    h+=`<div class="err-box">${esc(j.error_msg||"未知錯誤")}</div>`;
+    let h=`<div class="err-box">${esc(j.error_msg||"未知錯誤")}</div>`;
     if(j.raw_title) h+=`<div class="section"><div class="slabel">原始標題</div><div class="rbox">${esc(j.raw_title)}</div></div>`;
     document.getElementById("modalBody").innerHTML=h; return;
   }
   if(["pending","scraping","rewriting"].includes(j.status)){
     const msg={pending:"等待爬取...",scraping:"正在爬取商品資料...",rewriting:"AI 正在改寫文案，請稍候..."};
-    h+=`<div style="text-align:center;padding:30px;color:#888"><span class="spinner" style="width:16px;height:16px;border-top-color:#555"></span> ${msg[j.status]}</div>`;
-    document.getElementById("modalBody").innerHTML=h;
+    document.getElementById("modalBody").innerHTML=`<div style="text-align:center;padding:30px;color:#888"><span class="spinner" style="width:16px;height:16px;border-top-color:#555"></span> ${msg[j.status]}</div>`;
     if(openId===j.id) setTimeout(()=>{if(openId===j.id)openJob(j.id);},2000);
     return;
   }
-  // done — 編輯模式 / 檢視模式
-  if(editMode){
-    h+=`<div class="section"><div class="slabel">商品名稱</div><textarea class="edit-ta name" id="edit_name">${esc(j.ai_name||"")}</textarea></div>`;
-    h+=`<div class="section"><div class="slabel">SEO 關鍵字（逗號分隔）</div><textarea class="edit-ta kw" id="edit_kw">${esc(j.ai_keywords||"")}</textarea></div>`;
-    h+=`<div class="section"><div class="slabel">商品描述</div><textarea class="edit-ta desc" id="edit_desc">${esc(j.ai_desc||"")}</textarea></div>`;
-    h+=`<div class="edit-bar"><button class="btn-save" onclick="saveEdit(${j.id})">儲存</button><button class="btn-cancel" onclick="openJob(${j.id})">取消</button></div>`;
-  } else {
-    const editBtn=`<button class="btn-edit" onclick="enterEdit(${j.id})">編輯文案</button>`;
-    if(j.ai_name) h+=`<div class="section"><div class="slabel" style="display:flex;align-items:center">商品名稱 ${editBtn}</div><div class="rbox">${esc(j.ai_name)}<button class="copy-btn" onclick='cp(this,${JSON.stringify(j.ai_name)})'>複製</button></div></div>`;
-    if(j.ai_keywords){
-      const kws=j.ai_keywords.split(",").map(s=>s.trim()).filter(Boolean);
-      h+=`<div class="section"><div class="slabel">SEO 關鍵字</div><div class="kw-row">${kws.map(k=>`<span class="kw">${esc(k)}</span>`).join("")}</div><div style="margin-top:8px"><button class="btn-sm" onclick='cp(this,${JSON.stringify(j.ai_keywords)})'>複製全部</button></div></div>`;
-    }
-    if(j.ai_desc) h+=`<div class="section"><div class="slabel">商品描述</div><div class="rbox" style="max-height:320px;overflow-y:auto">${esc(j.ai_desc)}<button class="copy-btn" onclick='cp(this,${JSON.stringify(j.ai_desc)})'>複製</button></div></div>`;
-  }
-  // 圖片選取 UI（分區勾選）
+  _curJob = j;
+  _curJobId = j.id;
+  _curMainImage = j.main_image || "";
+  const tabNav = `<div class="tab-nav">
+    <button class="tab-btn" data-tab="tab1" onclick="switchModalTab('tab1')">商品資訊</button>
+    <button class="tab-btn" data-tab="tab2" onclick="switchModalTab('tab2')">圖片中心</button>
+    <button class="tab-btn" data-tab="tab3" onclick="switchModalTab('tab3')">AI 文案</button>
+    <button class="tab-btn" data-tab="tab4" onclick="switchModalTab('tab4')">SEO / FAQ</button>
+    <button class="tab-btn" data-tab="tab5" onclick="switchModalTab('tab5')">上架資料</button>
+  </div>`;
+  const body = `<div class="modal-body">
+    <div class="tab-panel" id="panel_tab1">${tab1Html(j)}</div>
+    <div class="tab-panel" id="panel_tab2">${tab2Html(j)}</div>
+    <div class="tab-panel" id="panel_tab3">${tab3Html(j)}</div>
+    <div class="tab-panel" id="panel_tab4">${tab4Html(j)}</div>
+    <div class="tab-panel" id="panel_tab5">${tab5Html(j)}</div>
+  </div>`;
+  document.getElementById("modalBody").outerHTML = `<div id="modalBody">${tabNav}${body}</div>`;
+  switchModalTab(_curTab);
+}
+
+function switchModalTab(name){
+  _curTab = name;
+  document.querySelectorAll(".tab-btn").forEach(b=>b.classList.toggle("active", b.dataset.tab===name));
+  document.querySelectorAll(".tab-panel").forEach(p=>p.classList.toggle("active", p.id==="panel_"+name));
+}
+
+function tab1Html(j){
+  const specs = (j.raw_extra && j.raw_extra.specs) ? j.raw_extra.specs : null;
+  const specsHtml = specs ? (Array.isArray(specs) ? specs.map(s=>esc(typeof s==='object'?(s.name||s.k||'')+'：'+(s.value||s.v||''):String(s))).join('<br>') : Object.entries(specs).map(([k,v])=>`${esc(k)}：${esc(String(v))}`).join('<br>')) : '（無規格資料）';
+  const brandOpts = Object.entries(BRAND_LABELS).map(([k,v])=>`<option value="${k}"${j.brand===k?" selected":""}>${v}</option>`).join("");
+  return `<div class="compare-grid">
+    <div>
+      <div class="compare-col-hd">來源商品</div>
+      <div class="compare-field"><label>原始標題</label><div class="static-val">${esc(j.raw_title||"（無）")}</div></div>
+      <div class="compare-field"><label>原始價格</label><div class="static-val">${esc(j.raw_price||"（無）")}</div></div>
+      <div class="compare-field"><label>原始規格</label><div class="static-val">${specsHtml}</div></div>
+      <div class="compare-field"><label>來源網址</label><div class="static-val" style="word-break:break-all"><a href="${esc(j.url)}" target="_blank" style="color:#1a73e8">${esc(j.url)}</a></div></div>
+    </div>
+    <div>
+      <div class="compare-col-hd">台灣版商品</div>
+      <div class="compare-field"><label>商品名稱</label><input type="text" id="t1_name" value="${esc(j.ai_name||"")}"></div>
+      <div class="compare-field"><label>品牌</label><select id="t1_brand">${brandOpts}</select></div>
+      <div class="compare-field"><label>建議售價</label><div style="display:flex;gap:8px"><input type="text" id="t1_price_min" placeholder="下限" value="${esc(j.price_min||"")}"><input type="text" id="t1_price_max" placeholder="上限" value="${esc(j.price_max||"")}"></div></div>
+      <div class="compare-field"><label>商品分類</label><input type="text" id="t1_category" value="${esc(j.category||"")}"></div>
+      <div class="compare-field"><label>狀態</label><select id="t1_status">${["草稿","待審核","上架中","已下架"].map(s=>`<option${j.listing_status===s?" selected":""}>${s}</option>`).join("")}</select></div>
+      <button class="btn-save" onclick="saveTab1(${j.id})">儲存</button>
+    </div>
+  </div>`;
+}
+
+async function saveTab1(id){
+  const body = {
+    ai_name: document.getElementById("t1_name").value.trim(),
+    brand: document.getElementById("t1_brand").value,
+    price_min: document.getElementById("t1_price_min").value.trim(),
+    price_max: document.getElementById("t1_price_max").value.trim(),
+    category: document.getElementById("t1_category").value.trim(),
+    listing_status: document.getElementById("t1_status").value,
+  };
+  const r = await api("/api/products/"+id,{method:"PUT",body:JSON.stringify(body)});
+  if(r.ok){toast("已儲存");openJob(id);} else toast("儲存失敗");
+}
+
+function tab2Html(j){
+  let h="";
   const pi = j.product_images || {};
   const mainImgs   = pi.main_images   || [];
   const detailImgs = pi.detail_images || [];
   const skuImgs    = pi.sku_images    || [];
   const videoUrls  = pi.video_urls    || [];
   _selImgs = new Set(j.raw_images || []);
-  _curJobId = j.id;
   _lbImgs = [];
   const _addLb = (srcs, labels, cat) => srcs.forEach((s,i) => _lbImgs.push({src:s, label:labels&&labels[i]?labels[i]:cat, cat}));
-  const imgStatusMap={"pending_images":"等待處理...","processing":"處理中...","done":"白底完成","failed":"處理失敗","no_images":"無圖片"};
-  const imgStatusLabel=imgStatusMap[j.img_status]||"";
   const mainSrcs = mainImgs.length ? mainImgs.map(i=>typeof i==='object'?i.src:i) : (j.raw_images||[]);
   if(mainSrcs.length){_addLb(mainSrcs,[],"主圖");h+=imgCatHtml("main","主圖",mainSrcs,[]);}
   if(videoUrls.length){
@@ -1709,7 +1817,6 @@ function renderModal(j, editMode=false){
       +`<button class="sel-btn" style="margin-top:8px" onclick="useTranslated(${j.id})">✓ 以翻譯圖作為輸出</button>`
       +`</div>`;
   }
-  // 翻譯後圖片（手動上傳）
   const piTr = j.product_images || {};
   const trTypeMap = {main:'主圖', detail:'詳情圖', sku:'SKU圖'};
   ['main','detail','sku'].forEach(t => {
@@ -1717,7 +1824,6 @@ function renderModal(j, editMode=false){
     if (!tImgs.length) return;
     h += `<div class="tr-type-sec"><div class="tr-type-label">翻譯圖（${trTypeMap[t]}，${tImgs.length} 張）</div><div class="img-grid">${tImgs.map((src,i)=>`<div class="img-thumb"><img src="${esc(src)}" loading="lazy" onerror="this.style.display='none'"><div class="thumb-actions"><a href="${esc(src)}" target="_blank" class="thumb-act">⬇</a><button class="thumb-act" onclick="event.stopPropagation();cp(this,'${esc(src)}')">📋</button></div></div>`).join("")}</div></div>`;
   });
-  // 上傳已翻譯圖片
   h += `<div class="upload-tr-sec">
     <div class="slabel">上傳已翻譯圖片（客優雲翻譯後）</div>
     <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
@@ -1733,28 +1839,135 @@ function renderModal(j, editMode=false){
     </div>
     <div id="upPreview_${j.id}" class="img-grid" style="margin-top:8px;max-height:180px;overflow-y:auto"></div>
   </div>`;
-  h+=`<div class="sel-action-bar"><span class="sel-count" id="selCount">已選 ${_selImgs.size} 張</span><button class="btn-translate" id="btnTr_${j.id}" onclick="translateSelected(${j.id})">文A 翻譯選取</button><button class="btn-zip" onclick="downloadZipSelected(${j.id})">⬇ ZIP 下載</button><button class="btn-confirm" onclick="confirmSelect(${j.id})">確認選圖</button></div>`;
-  h+=`<br><button class="raw-toggle" onclick="toggleRaw(this)">顯示原始資料 ▾</button>`;
-  h+=`<div id="rawSec" class="hidden" style="margin-top:12px">`;
+  h+=`<div class="sel-action-bar">
+    <span class="sel-count" id="selCount">已選 ${_selImgs.size} 張</span>
+    <button class="btn-translate" id="btnTr_${j.id}" onclick="translateSelected(${j.id})">文A 翻譯選取</button>
+    <button class="sel-btn sel-btn-white" onclick="whitebgSelected(${j.id})">⬜ 生成白底圖</button>
+    <button class="sel-btn" style="background:#ede7f6;color:#4527a0" onclick="genSceneStub()">🖼 生成情境圖</button>
+    <button class="btn-zip" onclick="downloadZipSelected(${j.id})">⬇ ZIP 下載</button>
+    <button class="btn-confirm" onclick="confirmSelect(${j.id})">確認選圖</button>
+  </div>`;
+  return h;
+}
+
+function genSceneStub(){
+  toast("生成情境圖功能即將上線（UI 預覽）");
+}
+
+async function whitebgSelected(id){
+  const urls=[..._selImgs];
+  if(!urls.length){toast('請先勾選圖片');return;}
+  toast('送出 '+urls.length+' 張，處理中...');
+  try{
+    const r=await api('/api/products/'+id+'/whitebg-selected',{method:'POST',body:JSON.stringify({urls}),headers:{'Content-Type':'application/json'}});
+    if(r.ok){toast('白底圖處理中（'+r.count+' 張）...');pollWhitebg(id,0);}
+    else{toast('失敗：'+(r.error||''));}
+  }catch(e){toast('錯誤：'+e.message);}
+}
+
+function tab3Html(j){
+  const field = (label, id, val, multiline) => `<div class="copy-field">
+    <div class="copy-field-hd"><div class="slabel">${label}</div><button class="copy-btn" style="position:static" onclick='cp(this,document.getElementById("${id}").value)'>複製</button></div>
+    ${multiline?`<textarea id="${id}" style="height:${multiline}px">${esc(val||"")}</textarea>`:`<input type="text" id="${id}" value="${esc(val||"")}">`}
+  </div>`;
+  let h = field("商品名稱","t3_name",j.ai_name);
+  h += field("蝦皮標題","t3_shopee",j.shopee_title);
+  h += field("官網商品名稱","t3_website",j.website_name);
+  h += field("商品描述","t3_desc",j.ai_desc,180);
+  h += field("商品特色","t3_features",j.features,100);
+  h += `<div class="copy-field">
+    <div class="copy-field-hd"><div class="slabel">建議售價區間</div></div>
+    <div style="display:flex;gap:8px"><input type="text" id="t3_price_min" placeholder="下限" value="${esc(j.price_min||"")}"><input type="text" id="t3_price_max" placeholder="上限" value="${esc(j.price_max||"")}"></div>
+  </div>`;
+  h += `<div class="edit-bar">
+    <button class="btn-regen" id="regenBtn" onclick="regenerateCopy(${j.id})">↻ 重新生成文案</button>
+    <button class="btn-save" onclick="saveTab3(${j.id})">儲存文案</button>
+  </div>`;
+  return h;
+}
+
+async function saveTab3(id){
+  const body = {
+    ai_name: document.getElementById("t3_name").value.trim(),
+    shopee_title: document.getElementById("t3_shopee").value.trim(),
+    website_name: document.getElementById("t3_website").value.trim(),
+    ai_desc: document.getElementById("t3_desc").value.trim(),
+    features: document.getElementById("t3_features").value.trim(),
+    price_min: document.getElementById("t3_price_min").value.trim(),
+    price_max: document.getElementById("t3_price_max").value.trim(),
+  };
+  const r = await api("/api/products/"+id,{method:"PUT",body:JSON.stringify(body)});
+  if(r.ok){toast("已儲存");openJob(id);} else toast("儲存失敗");
+}
+
+async function regenerateCopy(id){
+  const btn=document.getElementById("regenBtn");
+  if(btn){btn.disabled=true;btn.textContent="生成中...";}
+  const r=await api("/api/products/"+id+"/regenerate-copy",{method:"POST"});
+  if(!r.ok){toast("失敗："+(r.error||""));if(btn){btn.disabled=false;btn.textContent="↻ 重新生成文案";}return;}
+  toast("AI 正在重新生成文案...");
+  pollRegenerate(id,0);
+}
+async function pollRegenerate(id,tries){
+  if(tries>20){toast("生成超時，請重試");const btn=document.getElementById("regenBtn");if(btn){btn.disabled=false;btn.textContent="↻ 重新生成文案";}return;}
+  const j=await api("/api/products/"+id);
+  if(j.status==="done"){toast("文案已更新");if(openId===id)openJob(id);}
+  else if(j.status==="error"){toast("生成失敗："+(j.error_msg||""));}
+  else setTimeout(()=>pollRegenerate(id,tries+1),3000);
+}
+
+function tab4Html(j){
+  const faq = (j.faq && j.faq.length) ? j.faq.slice() : [];
+  while(faq.length<3) faq.push({q:"",a:""});
+  const faqRows = faq.map((f,i)=>`<div class="faq-item" id="faqRow_${i}">
+    <button class="faq-del" onclick="removeFaqRow(${i})">×</button>
+    <input type="text" placeholder="問題" class="faq-q" value="${esc(f.q||"")}">
+    <textarea placeholder="回答" class="faq-a">${esc(f.a||"")}</textarea>
+  </div>`).join("");
+  return `<div class="copy-field">
+    <div class="copy-field-hd"><div class="slabel">SEO 關鍵字（逗號分隔）</div><button class="copy-btn" style="position:static" onclick='cp(this,document.getElementById("t4_kw").value)'>複製</button></div>
+    <input type="text" id="t4_kw" value="${esc(j.ai_keywords||"")}">
+  </div>
+  <div class="copy-field">
+    <div class="copy-field-hd"><div class="slabel">SEO 描述</div><button class="copy-btn" style="position:static" onclick='cp(this,document.getElementById("t4_seodesc").value)'>複製</button></div>
+    <textarea id="t4_seodesc" style="height:70px">${esc(j.seo_desc||"")}</textarea>
+  </div>
+  <div class="slabel" style="margin-top:10px">FAQ</div>
+  <div id="faqList">${faqRows}</div>
+  <button class="btn-add-faq" onclick="addFaqRow()">+ 新增 FAQ</button>
+  <div class="edit-bar"><button class="btn-save" onclick="saveTab4(${j.id})">儲存</button></div>`;
+}
+
+function addFaqRow(){
+  const list=document.getElementById("faqList");
+  const i=list.children.length;
+  const div=document.createElement("div");
+  div.className="faq-item"; div.id="faqRow_"+i;
+  div.innerHTML=`<button class="faq-del" onclick="removeFaqRow(${i})">×</button><input type="text" placeholder="問題" class="faq-q"><textarea placeholder="回答" class="faq-a"></textarea>`;
+  list.appendChild(div);
+}
+function removeFaqRow(i){
+  const el=document.getElementById("faqRow_"+i);
+  if(el) el.remove();
+}
+async function saveTab4(id){
+  const kw=document.getElementById("t4_kw").value.trim();
+  const seoDesc=document.getElementById("t4_seodesc").value.trim();
+  const faq=[...document.querySelectorAll("#faqList .faq-item")].map(row=>({
+    q: row.querySelector(".faq-q").value.trim(),
+    a: row.querySelector(".faq-a").value.trim(),
+  })).filter(f=>f.q||f.a);
+  const r=await api("/api/products/"+id,{method:"PUT",body:JSON.stringify({ai_keywords:kw,seo_desc:seoDesc,faq})});
+  if(r.ok){toast("已儲存");openJob(id);} else toast("儲存失敗");
+}
+
+function tab5Html(j){
+  let h = `<div class="section"><div class="slabel">上架狀態</div><span class="status-pill">${esc(j.listing_status||"草稿")}</span></div>`;
+  h += `<div class="section"><div class="slabel">平台 / 來源網址</div><div class="rbox">${esc(j.platform)} — <a href="${esc(j.url)}" target="_blank" style="color:#1a73e8;word-break:break-all">${esc(j.url)}</a></div></div>`;
   if(j.raw_title) h+=`<div class="section"><div class="slabel">原始標題</div><div class="rbox">${esc(j.raw_title)}</div></div>`;
   if(j.raw_price) h+=`<div class="section"><div class="slabel">原始價格</div><div class="rbox">${esc(j.raw_price)}</div></div>`;
-  if(j.raw_desc)  h+=`<div class="section"><div class="slabel">原始描述</div><div class="rbox" style="max-height:180px;overflow-y:auto">${esc(j.raw_desc.slice(0,1200))}${j.raw_desc.length>1200?"…":""}</div></div>`;
-  h+=`</div>`;
-  document.getElementById("modalBody").innerHTML=h;
-}
-
-async function enterEdit(id){
-  const j=await api("/api/products/"+id);
-  renderModal(j, true);
-}
-
-async function saveEdit(id){
-  const name=document.getElementById("edit_name").value.trim();
-  const kw=document.getElementById("edit_kw").value.trim();
-  const desc=document.getElementById("edit_desc").value.trim();
-  const r=await api("/api/products/"+id,{method:"PUT",body:JSON.stringify({ai_name:name,ai_keywords:kw,ai_desc:desc})});
-  if(r.ok){toast("已儲存");openJob(id);}
-  else toast("儲存失敗："+r.error);
+  if(j.raw_desc)  h+=`<div class="section"><div class="slabel">原始描述</div><div class="rbox" style="max-height:220px;overflow-y:auto">${esc(j.raw_desc.slice(0,1500))}${j.raw_desc.length>1500?"…":""}</div></div>`;
+  return h;
 }
 
 function imgCatHtml(catId, label, srcs, labels){
@@ -1762,18 +1975,26 @@ function imgCatHtml(catId, label, srcs, labels){
   const thumbs=srcs.map((src,idx)=>{
     const checked=_selImgs.has(src);
     const lbl=labels[idx]||'';
+    const isMain=_curMainImage&&src===_curMainImage;
     return `<div class="img-thumb${catCls}${checked?" checked":""}" onclick="imgThumbClick(event,this,'${catId}_${idx}')">`
       +`<input type="checkbox" id="ck_${catId}_${idx}" data-url="${esc(src)}"${checked?" checked":""}>`
       +`<img src="${esc(src)}" loading="lazy" onerror="this.style.display='none'" onload="imgSizeLoad(this)" title="${esc(src)}">`
       +`<div class="img-size"></div>`
       +(lbl?`<div class="img-label">${esc(lbl)}</div>`:'')
+      +(isMain?`<div class="main-badge">主圖</div>`:'')
       +`<div class="thumb-actions">`
       +`<a href="${esc(src)}" target="_blank" class="thumb-act" onclick="event.stopPropagation()" title="開新分頁">⬇</a>`
       +`<button class="thumb-act" onclick="event.stopPropagation();cp(this,'${esc(src)}')" title="複製URL">📋</button>`
       +`<button class="thumb-act" onclick="event.stopPropagation();openLightbox('${esc(src)}')" title="放大檢視">⛶</button>`
+      +`<button class="thumb-act" onclick="event.stopPropagation();setAsMain('${esc(src)}')" title="設為主圖">★</button>`
       +`</div></div>`;
   }).join("");
   return `<div class="section" id="cat_${catId}"><div class="img-zone-hd"><div class="slabel">${label}（${srcs.length} 張）</div><button class="sel-btn" onclick="toggleAllInCat('${catId}',true)">全選</button><button class="sel-btn" onclick="toggleAllInCat('${catId}',false)">取消</button><button class="sel-btn sel-btn-green" onclick="translateCat('${catId}')">文A 翻譯此區</button><button class="sel-btn sel-btn-white" onclick="whitebgCat('${catId}',openId)">⬜ 生成白底圖</button></div><div class="img-grid">${thumbs}</div></div>`;
+}
+async function setAsMain(url){
+  const r=await api(`/api/products/${_curJobId}/set-main-image`,{method:"POST",body:JSON.stringify({url})});
+  if(r.ok){_curMainImage=url;toast("已設為主圖");openJob(_curJobId);}
+  else toast("設定失敗");
 }
 function imgSizeLoad(img){
   const w=img.naturalWidth, h=img.naturalHeight;
@@ -1970,12 +2191,6 @@ async function doUpload(id){
   }catch(e){ toast('錯誤：'+e.message); }
   finally{ btn.disabled=false; btn.textContent='上傳'; }
 }
-function toggleRaw(btn){
-  const el=document.getElementById("rawSec");
-  if(el.classList.contains("hidden")){el.classList.remove("hidden");btn.textContent="隱藏原始資料 ▴";}
-  else{el.classList.add("hidden");btn.textContent="顯示原始資料 ▾";}
-}
-
 function bgClose(e){if(e.target===document.getElementById("modal"))closeModal();}
 function closeModal(){document.getElementById("modal").classList.add("hidden");openId=null;}
 
@@ -2051,13 +2266,22 @@ body{font-family:-apple-system,sans-serif;background:#f5f5f5;color:#333}
 .header a{color:#888;text-decoration:none;font-size:14px}
 .header a:hover{color:#fff}
 .header-title{font-size:17px;font-weight:700;flex:1}
-.wrap{max-width:760px;margin:0 auto;padding:24px 16px}
-.card{background:#fff;border-radius:14px;padding:20px;margin-bottom:16px;box-shadow:0 1px 4px rgba(0,0,0,.08)}
+.wrap{max-width:1100px;margin:0 auto;padding:24px 16px}
+.brand-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(320px,1fr));gap:18px}
+.card{background:#fff;border-radius:16px;padding:20px;box-shadow:0 1px 4px rgba(0,0,0,.08);transition:box-shadow .15s}
+.card.disabled{opacity:.55}
 .card-head{display:flex;align-items:center;gap:10px;margin-bottom:16px}
-.brand-key{font-size:12px;font-weight:700;background:#1a1a1a;color:#fff;border-radius:6px;padding:2px 8px;letter-spacing:.5px}
-.brand-name{font-size:16px;font-weight:700}
+.brand-key{font-size:11px;font-weight:700;background:#f0f0f0;color:#888;border-radius:6px;padding:2px 8px;letter-spacing:.5px}
+.brand-name{font-size:16px;font-weight:700;flex:1}
+.toggle-wrap{display:flex;align-items:center;gap:6px;font-size:11px;color:#999;font-weight:600}
+.switch{position:relative;display:inline-block;width:36px;height:20px}
+.switch input{opacity:0;width:0;height:0}
+.slider{position:absolute;cursor:pointer;inset:0;background:#ddd;border-radius:20px;transition:.2s}
+.slider:before{position:absolute;content:"";height:16px;width:16px;left:2px;bottom:2px;background:#fff;border-radius:50%;transition:.2s}
+input:checked+.slider{background:#1a1a1a}
+input:checked+.slider:before{transform:translateX(16px)}
 label{display:block;font-size:12px;color:#666;font-weight:600;margin-bottom:4px;margin-top:12px}
-input[type=text],textarea{width:100%;border:1.5px solid #ddd;border-radius:8px;padding:9px 12px;font-size:14px;font-family:-apple-system,sans-serif;outline:none;resize:vertical}
+input[type=text],textarea{width:100%;border:1.5px solid #ddd;border-radius:8px;padding:9px 12px;font-size:13px;font-family:-apple-system,sans-serif;outline:none;resize:vertical}
 input[type=text]:focus,textarea:focus{border-color:#1a1a1a}
 .btn-save{background:#1a1a1a;color:#fff;border:none;border-radius:8px;padding:9px 22px;font-size:14px;font-weight:700;cursor:pointer;margin-top:14px}
 .btn-save:hover{background:#333}
@@ -2072,25 +2296,37 @@ input[type=text]:focus,textarea:focus{border-color:#1a1a1a}
   <div class="header-title">品牌設定</div>
 </div>
 <div class="wrap">
+<div class="brand-grid">
 {% for p in profiles %}
-<div class="card" id="card_{{ p.brand_key }}">
+<div class="card{{ '' if p.enabled else ' disabled' }}" id="card_{{ p.brand_key }}">
   <div class="card-head">
     <span class="brand-key">{{ p.brand_key }}</span>
     <span class="brand-name">{{ p.name }}</span>
+    <div class="toggle-wrap">
+      啟用
+      <label class="switch">
+        <input type="checkbox" id="enabled_{{ p.brand_key }}" {{ 'checked' if p.enabled else '' }} onchange="toggleEnabled('{{ p.brand_key }}')">
+        <span class="slider"></span>
+      </label>
+    </div>
   </div>
-  <label>品牌名稱</label>
-  <input type="text" id="name_{{ p.brand_key }}" value="{{ p.name }}">
-  <label>商品分類</label>
+  <label>品牌定位 / 商品分類</label>
   <input type="text" id="category_{{ p.brand_key }}" value="{{ p.category }}">
-  <label>文案風格</label>
-  <textarea id="style_{{ p.brand_key }}" rows="3">{{ p.style }}</textarea>
   <label>文案語氣</label>
   <textarea id="tone_{{ p.brand_key }}" rows="2">{{ p.tone }}</textarea>
+  <label>文案風格</label>
+  <textarea id="style_{{ p.brand_key }}" rows="3">{{ p.style }}</textarea>
+  <label>SEO 關鍵字方向</label>
+  <textarea id="seo_direction_{{ p.brand_key }}" rows="2">{{ p.seo_direction }}</textarea>
+  <label>圖片風格</label>
+  <textarea id="image_style_{{ p.brand_key }}" rows="2">{{ p.image_style }}</textarea>
   <label>自訂 Prompt（選填）</label>
   <textarea id="custom_prompt_{{ p.brand_key }}" rows="3">{{ p.custom_prompt }}</textarea>
+  <input type="hidden" id="name_{{ p.brand_key }}" value="{{ p.name }}">
   <button class="btn-save" onclick="save('{{ p.brand_key }}', this)">儲存</button>
 </div>
 {% endfor %}
+</div>
 </div>
 <div class="toast" id="toast"></div>
 <script>
@@ -2100,25 +2336,40 @@ function toast(msg){
   el.textContent = msg; el.classList.add('show');
   setTimeout(()=>el.classList.remove('show'), 2200);
 }
-async function save(bk, btn){
-  btn.disabled = true;
-  const body = {
+function fields(bk){
+  return {
     name:          document.getElementById('name_'+bk).value.trim(),
     category:      document.getElementById('category_'+bk).value.trim(),
     style:         document.getElementById('style_'+bk).value.trim(),
     tone:          document.getElementById('tone_'+bk).value.trim(),
     custom_prompt: document.getElementById('custom_prompt_'+bk).value.trim(),
+    image_style:   document.getElementById('image_style_'+bk).value.trim(),
+    seo_direction: document.getElementById('seo_direction_'+bk).value.trim(),
+    enabled:       document.getElementById('enabled_'+bk).checked,
   };
+}
+async function save(bk, btn){
+  btn.disabled = true;
   try{
     const r = await fetch('/api/brand-profiles/'+bk+'?key='+KEY, {
       method:'PUT', headers:{'Content-Type':'application/json'},
-      body: JSON.stringify(body)
+      body: JSON.stringify(fields(bk))
     });
     const j = await r.json();
     if(j.ok) toast('✓ '+bk+' 已儲存');
     else toast('儲存失敗');
   }catch(e){ toast('錯誤：'+e.message); }
   finally{ btn.disabled = false; }
+}
+async function toggleEnabled(bk){
+  document.getElementById('card_'+bk).classList.toggle('disabled', !document.getElementById('enabled_'+bk).checked);
+  try{
+    await fetch('/api/brand-profiles/'+bk+'?key='+KEY, {
+      method:'PUT', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify(fields(bk))
+    });
+    toast(document.getElementById('enabled_'+bk).checked ? '已啟用' : '已停用');
+  }catch(e){ toast('錯誤：'+e.message); }
 }
 </script>
 </body>
@@ -2153,6 +2404,9 @@ def api_brand_profiles_save(brand_key):
         data.get("style", ""),
         data.get("tone", ""),
         data.get("custom_prompt", ""),
+        data.get("image_style", ""),
+        data.get("seo_direction", ""),
+        bool(data.get("enabled", True)),
     )
     return jsonify({"ok": success})
 
@@ -2218,11 +2472,39 @@ def api_products_update(job_id):
     if not ok:
         return jsonify({"error": "unauthorized"}), 403
     data = request.get_json(silent=True) or {}
-    allowed = {"ai_name", "ai_desc", "ai_keywords"}
+    allowed = {"ai_name", "ai_desc", "ai_keywords", "category", "price_min", "price_max",
+               "shopee_title", "website_name", "features", "seo_desc", "listing_status"}
     fields = {k: v for k, v in data.items() if k in allowed}
+    if "faq" in data:
+        fields["faq"] = json.dumps(data["faq"], ensure_ascii=False)
     if not fields:
         return jsonify({"error": "no valid fields"}), 400
     _pj_update(job_id, **fields)
+    return jsonify({"ok": True})
+
+@products_bp.route("/api/products/<int:job_id>/regenerate-copy", methods=["POST"])
+def api_products_regenerate_copy(job_id):
+    ok, _ = auth_required()
+    if not ok:
+        return jsonify({"error": "unauthorized"}), 403
+    job = _pj_get(job_id)
+    if not job:
+        return jsonify({"error": "not found"}), 404
+    if not job.get("raw_title") and not job.get("raw_desc"):
+        return jsonify({"error": "尚無原始商品資料，無法生成文案"}), 400
+    threading.Thread(target=_run_ai_rewrite_for_job, args=(job_id,), daemon=True).start()
+    return jsonify({"ok": True})
+
+@products_bp.route("/api/products/<int:job_id>/set-main-image", methods=["POST"])
+def api_products_set_main_image(job_id):
+    ok, _ = auth_required()
+    if not ok:
+        return jsonify({"error": "unauthorized"}), 403
+    data = request.get_json(silent=True) or {}
+    url = (data.get("url") or "").strip()
+    if not url:
+        return jsonify({"error": "缺少圖片網址"}), 400
+    _pj_update(job_id, main_image=url)
     return jsonify({"ok": True})
 
 @products_bp.route("/api/products/<int:job_id>/process-images", methods=["POST"])
