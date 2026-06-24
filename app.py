@@ -130,6 +130,19 @@ def _init_messages_db():
                 "ALTER TABLE product_jobs ADD COLUMN IF NOT EXISTS product_images TEXT DEFAULT '{}'",
                 "ALTER TABLE product_jobs ADD COLUMN IF NOT EXISTS translated_images TEXT DEFAULT '[]'",
                 "ALTER TABLE product_jobs ADD COLUMN IF NOT EXISTS translate_status TEXT DEFAULT ''",
+                "ALTER TABLE product_jobs ADD COLUMN IF NOT EXISTS category TEXT DEFAULT ''",
+                "ALTER TABLE product_jobs ADD COLUMN IF NOT EXISTS price_min TEXT DEFAULT ''",
+                "ALTER TABLE product_jobs ADD COLUMN IF NOT EXISTS price_max TEXT DEFAULT ''",
+                "ALTER TABLE product_jobs ADD COLUMN IF NOT EXISTS shopee_title TEXT DEFAULT ''",
+                "ALTER TABLE product_jobs ADD COLUMN IF NOT EXISTS website_name TEXT DEFAULT ''",
+                "ALTER TABLE product_jobs ADD COLUMN IF NOT EXISTS features TEXT DEFAULT ''",
+                "ALTER TABLE product_jobs ADD COLUMN IF NOT EXISTS seo_desc TEXT DEFAULT ''",
+                "ALTER TABLE product_jobs ADD COLUMN IF NOT EXISTS faq TEXT DEFAULT '[]'",
+                "ALTER TABLE product_jobs ADD COLUMN IF NOT EXISTS main_image TEXT DEFAULT ''",
+                "ALTER TABLE product_jobs ADD COLUMN IF NOT EXISTS listing_status TEXT DEFAULT '草稿'",
+                "ALTER TABLE brand_profiles ADD COLUMN IF NOT EXISTS image_style TEXT DEFAULT ''",
+                "ALTER TABLE brand_profiles ADD COLUMN IF NOT EXISTS seo_direction TEXT DEFAULT ''",
+                "ALTER TABLE brand_profiles ADD COLUMN IF NOT EXISTS enabled BOOLEAN DEFAULT TRUE",
                 "ALTER TABLE messages ADD COLUMN IF NOT EXISTS quote_token TEXT DEFAULT ''",
                 "ALTER TABLE messages ADD COLUMN IF NOT EXISTS reply_quote_token TEXT DEFAULT ''",
             ]:
@@ -166,6 +179,14 @@ def _init_messages_db():
                         "INSERT INTO brand_profiles(brand_key,name,category,style,tone,custom_prompt,updated_at) VALUES(%s,%s,%s,%s,%s,%s,%s)",
                         (*row, 0)
                     )
+            # 補新品牌「澄光窗簾」（不影響既有品牌資料，已存在則略過）
+            cur.execute(
+                "INSERT INTO brand_profiles(brand_key,name,category,style,tone,custom_prompt,updated_at) "
+                "VALUES(%s,%s,%s,%s,%s,%s,%s) ON CONFLICT(brand_key) DO NOTHING",
+                ("chengguang", "澄光窗簾", "窗簾、遮光簾",
+                 "質感、居家氛圍、隱私與光線控制。強調遮光率、材質、安裝方式。",
+                 "溫和、生活化，像在幫顧客挑選居家風格，不誇大效果。", "", 0)
+            )
             # store_scan_jobs / store_scan_items（Phase 1 店鋪選品）
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS store_scan_jobs (
