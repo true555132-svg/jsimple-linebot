@@ -1739,6 +1739,8 @@ function switchModalTab(name){
 function tab1Html(j){
   const specs = (j.raw_extra && j.raw_extra.specs) ? j.raw_extra.specs : null;
   const specsHtml = specs ? (Array.isArray(specs) ? specs.map(s=>esc(typeof s==='object'?(s.name||s.k||'')+'：'+(s.value||s.v||''):String(s))).join('<br>') : Object.entries(specs).map(([k,v])=>`${esc(k)}：${esc(String(v))}`).join('<br>')) : '（無規格資料）';
+  const skuPrices = (j.raw_extra && j.raw_extra.sku_prices) || [];
+  const skuPricesHtml = skuPrices.length ? skuPrices.map(p=>`${esc(p.label||'')}：¥${esc(String(p.price||''))}`).join('<br>') : '（無多規格價格資料）';
   const brandOpts = Object.entries(BRAND_LABELS).map(([k,v])=>`<option value="${k}"${j.brand===k?" selected":""}>${v}</option>`).join("");
   return `<div class="compare-grid">
     <div>
@@ -1746,6 +1748,7 @@ function tab1Html(j){
       <div class="compare-field"><label>原始標題</label><div class="static-val">${esc(j.raw_title||"（無）")}</div></div>
       <div class="compare-field"><label>原始價格</label><div class="static-val">${esc(j.raw_price||"（無）")}</div></div>
       <div class="compare-field"><label>原始規格</label><div class="static-val">${specsHtml}</div></div>
+      <div class="compare-field"><label>多規格價格</label><div class="static-val">${skuPricesHtml}</div></div>
       <div class="compare-field"><label>來源網址</label><div class="static-val" style="word-break:break-all"><a href="${esc(j.url)}" target="_blank" style="color:#1a73e8">${esc(j.url)}</a></div></div>
     </div>
     <div>

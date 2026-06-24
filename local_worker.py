@@ -404,7 +404,7 @@ def scrape_1688(page, url):
     page.goto(url, wait_until="domcontentloaded", timeout=30000)
     page.wait_for_timeout(PAGE_WAIT)
 
-    # JS 資料：標題 / 價格
+    # JS 資料：標題 / 價格 / 規格 / 多 SKU 價格
     try:
         js_data = page.evaluate("""() => {
             try {
@@ -413,19 +413,19 @@ def scrape_1688(page, url):
                 const o = d.offerDetail || d.detail || d.data?.offerDetail || {};
                 const base = o.baseInfo || o.offerInfo || {};
 
-                // SKU 規格圖 — 多路徑
+                // SKU 規格圖 + 規格名稱對照表（pid/vid -> name） — 多路徑
                 const skuImgs = [];
                 const seen = new Set();
+                const valueNameMap = {};   // vid -> 顯示名稱（含所屬規格名）
                 const addSku = (props) => {
                     (props || []).forEach(prop => {
                         (prop.values || []).forEach(v => {
+                            const label = (prop.name||'') + ':' + (v.name||'');
+                            if (v.vid != null) valueNameMap[v.vid] = label;
                             const img = v.image || v.imageUrl || v.imageRaw || '';
                             if (img && !seen.has(img)) {
                                 seen.add(img);
-                                skuImgs.push({
-                                    src: img.startsWith('//') ? 'https:' + img : img,
-                                    label: (prop.name||'') + ':' + (v.name||'')
-                                });
+                                skuImgs.push({ src: img.startsWith('//') ? 'https:' + img : img, label });
                             }
                         });
                     });
@@ -447,12 +447,33 @@ def scrape_1688(page, url):
                     });
                 }
 
+                // 各 SKU 組合的價格 — 多路徑（skuInfoMap: comboKey "vid1_vid2" -> {price,...}）
+                const skuPrices = [];
+                const infoMap = o.skuModel?.skuInfoMap || o.skuInfoMap || d.skuInfoMap || null;
+                if (infoMap && typeof infoMap === 'object') {
+                    Object.keys(infoMap).forEach(comboKey => {
+                        const info = infoMap[comboKey] || {};
+                        const price = info.price || info.consignPrice || info.promotionPrice || null;
+                        if (!price) return;
+                        const vids = String(comboKey).split(/[_,;:]/).filter(Boolean);
+                        const label = vids.map(vid => valueNameMap[vid] || valueNameMap[Number(vid)] || vid).join(' / ');
+                        skuPrices.push({ label, price: String(price) });
+                    });
+                }
+
+                // 規格屬性（attribute table）— 標準化成 {name, value}
+                const rawAttrs = o.attribute?.attributes || o.attributes || d.attribute?.attributes || [];
+                const specs = (rawAttrs || []).map(a => ({
+                    name: a.name || a.attrName || a.attributeName || '',
+                    value: a.value || a.attrValue || a.attributeValue || ''
+                })).filter(s => s.name || s.value);
+
                 return {
                     title:   base.subject || base.title || o.subject || null,
                     price:   base.priceInfo?.price || null,
-                    sku:     o.skuModel?.skuProps || null,
-                    specs:   o.attribute?.attributes || null,
+                    specs:   specs.length ? specs : null,
                     skuImgs: skuImgs,
+                    skuPrices: skuPrices,
                 };
             } catch(e) { return {err: String(e)}; }
         }""")
@@ -460,9 +481,29 @@ def scrape_1688(page, url):
             result["raw_title"] = js_data["title"].strip()
         if js_data.get("price"):
             result["raw_price"] = str(js_data["price"])
-        result["raw_extra"].update({k: v for k, v in js_data.items() if v and k in ("sku","specs")})
+        specs = js_data.get("specs")
+        if not specs:
+            # DOM fallback：1688 規格表格常見 class
+            try:
+                specs = page.evaluate("""() => {
+                    const rows = [];
+                    document.querySelectorAll('.obj-attribute li, .content-property li, table.obj-attribute-list tr, .attributes-list li').forEach(el => {
+                        const t = (el.textContent || '').trim().replace(/\\s+/g, ' ');
+                        const m = t.match(/^([^：:]{1,20})[：:]\\s*(.+)$/);
+                        if (m) rows.push({ name: m[1].trim(), value: m[2].trim() });
+                    });
+                    return rows;
+                }""")
+            except Exception:
+                specs = []
+        if specs:
+            result["raw_extra"]["specs"] = specs
+        sku_prices = js_data.get("skuPrices") or []
+        if sku_prices:
+            result["raw_extra"]["sku_prices"] = sku_prices
+            print(f"    [JS] 多規格價格 {len(sku_prices)} 組")
         result["_sku_imgs"] = js_data.get("skuImgs", [])
-        print(f"    [JS] title={bool(js_data.get('title'))} skuImgs={len(result['_sku_imgs'])} err={js_data.get('err','')}")
+        print(f"    [JS] title={bool(js_data.get('title'))} specs={len(specs or [])} skuImgs={len(result['_sku_imgs'])} err={js_data.get('err','')}")
     except Exception as e:
         print(f"    [JS ERROR] {e}")
 
@@ -570,6 +611,43 @@ def scrape_taobao(page, url):
             if p and p.strip():
                 result["raw_price"] = p.strip(); break
         except Exception: pass
+
+    # 規格屬性 + 多 SKU 價格
+    try:
+        spec_data = page.evaluate("""() => {
+            const specs = [];
+            document.querySelectorAll('#J_AttrUL li, .attributes-list li, .tb-property-cont li, [class*="Attributes"] li').forEach(el => {
+                const t = (el.textContent || '').trim().replace(/\\s+/g, ' ');
+                const m = t.match(/^([^：:]{1,20})[：:]\\s*(.+)$/);
+                if (m) specs.push({ name: m[1].trim(), value: m[2].trim() });
+            });
+            const skuPrices = [];
+            try {
+                const d = window.__GLOBAL_DATA__ || {};
+                const sku2info = d.skuCore?.sku2info || d.skuModel?.sku2info || {};
+                const valFmt = d.skuCore?.valItemMap || {};
+                const nameOf = (vid) => {
+                    const it = valFmt[vid];
+                    return it ? (it.name || vid) : vid;
+                };
+                Object.keys(sku2info || {}).forEach(comboKey => {
+                    const info = sku2info[comboKey] || {};
+                    const price = info.price || info.promotionPrice;
+                    if (!price) return;
+                    const label = String(comboKey).split(/[_,;:]/).filter(Boolean).map(nameOf).join(' / ');
+                    skuPrices.push({ label, price: String(price) });
+                });
+            } catch(e) {}
+            return { specs, skuPrices };
+        }""")
+        if spec_data.get("specs"):
+            result["raw_extra"]["specs"] = spec_data["specs"]
+        if spec_data.get("skuPrices"):
+            result["raw_extra"]["sku_prices"] = spec_data["skuPrices"]
+            print(f"    [淘寶] 多規格價格 {len(spec_data['skuPrices'])} 組")
+        print(f"    [淘寶] 規格 {len(spec_data.get('specs') or [])} 項")
+    except Exception as e:
+        print(f"    [淘寶規格 err] {e}")
 
     product_images = _extract_images_dom(page, 'taobao')
     # 淘寶主圖 JS fallback（當 DOM selector 抓不到時）
@@ -808,7 +886,7 @@ _SCAN_TAOBAO_JS = """() => {
 }"""
 
 
-def scan_store_page(page, url, limit=30):
+def scan_store_page(page, url, limit=60):
     """Phase 1：掃描店鋪/分類頁，只抓當前頁面商品卡片，不翻頁。"""
     from datetime import datetime
     platform = '1688' if '1688.com' in url else 'taobao' if 'taobao.com' in url else 'unknown'
@@ -934,7 +1012,7 @@ def run(pw):
                     print(f"[掃描 #{sj_id}] {sj_platform.upper()} {sj_url[:65]}...")
                     page = context.new_page()
                     try:
-                        result = scan_store_page(page, sj_url, limit=30)
+                        result = scan_store_page(page, sj_url, limit=60)
                         r = post_scan_result(sj_id, result)
                         if r.get("ok"):
                             print(f"  ✓ 掃描完成（{r.get('count', 0)} 筆）")
