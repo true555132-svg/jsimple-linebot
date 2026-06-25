@@ -487,6 +487,7 @@ def _ai_rewrite(raw_title, raw_desc, price="", brand=""):
     brand_category = bp.get("category", "商品")
     brand_style    = bp.get("style", "簡潔、專業、官網風格。")
     brand_tone     = bp.get("tone", "直接說明功能，不像業務推銷。")
+    brand_seo_dir  = bp.get("seo_direction", "")
     custom_prompt  = bp.get("custom_prompt", "")
     parts = []
     if raw_title: parts.append(f"原始標題：{raw_title}")
@@ -498,9 +499,10 @@ def _ai_rewrite(raw_title, raw_desc, price="", brand=""):
         if "{product}" not in custom_prompt:
             prompt = custom_prompt + "\n\n" + product_block
     else:
+        seo_dir_line = f"\nSEO 關鍵字方向：{brand_seo_dir}" if brand_seo_dir.strip() else ""
         prompt = f"""你是「{brand_name}」品牌的文案編輯，負責{brand_category}類商品。
 品牌文案風格：{brand_style}
-語氣要求：{brand_tone}
+語氣要求：{brand_tone}{seo_dir_line}
 
 請將以下中國電商商品資料改寫成台灣官網風格。
 
