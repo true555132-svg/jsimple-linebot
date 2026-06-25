@@ -415,6 +415,14 @@ def _list_opportunities(brand="", category="", status=""):
         import sys; print(f"[SEO Opportunities] 讀取清單失敗：{e}", file=sys.stderr)
         return []
 
+def _safe_job_error_msg(e):
+    """背景任務發生未預期例外時，回給使用者看的訊息——絕不把原始DB連線字串/系統內部錯誤細節洩漏出去。
+    完整原因一律先用 print() 記到伺服器log，這裡只回一句通用訊息。"""
+    text = str(e)
+    if "psycopg2" in text or "connection to server" in text or "OperationalError" in type(e).__name__:
+        return "資料庫暫時連線異常，請稍後再試一次。"
+    return "發生未預期的錯誤，請稍後再試一次。"
+
 # ── Claude AI 呼叫 ──────────────────────────────────────────────
 
 def _ai_call(prompt, model="claude-haiku-4-5-20251001", max_tokens=2000):
@@ -1741,7 +1749,7 @@ def _run_opportunity_job(job_id, brand_key, category):
         import sys; print(f"[SEO Opportunity Job Error] {e}", file=sys.stderr)
         try:
             _q("UPDATE seo_opportunity_jobs SET status='error', error_msg=%s, updated_at=%s WHERE id=%s",
-               (str(e), time.time(), job_id))
+               (_safe_job_error_msg(e), time.time(), job_id))
         except Exception:
             pass
 
@@ -1917,7 +1925,7 @@ def _run_knowledge_import_job(job_id, raw_text):
         import sys; print(f"[SEO Knowledge Import Job Error] {e}", file=sys.stderr)
         try:
             _q("UPDATE seo_knowledge_import_jobs SET status='error', error_msg=%s, updated_at=%s WHERE id=%s",
-               (str(e), time.time(), job_id))
+               (_safe_job_error_msg(e), time.time(), job_id))
         except Exception:
             pass
 
@@ -1981,7 +1989,8 @@ def seo_knowledge_import_confirm():
     try:
         inserted, updated = _knowledge_upsert(brand, category, items)
     except Exception as e:
-        return jsonify({"error": f"寫入失敗：{e}"}), 200
+        import sys; print(f"[SEO Knowledge Import Confirm Error] {e}", file=sys.stderr)
+        return jsonify({"error": f"寫入失敗：{_safe_job_error_msg(e)}"}), 200
     return jsonify({"inserted": inserted, "updated": updated})
 
 @seo_bp.route("/admin/seo-settings")
@@ -2080,7 +2089,7 @@ def _run_generate_job(job_id, brand_key, category, topic, analysis, opp_id=None)
         import sys; print(f"[SEO Generate Job Error] {e}", file=sys.stderr)
         try:
             _q("UPDATE seo_generate_jobs SET status='error', error_msg=%s, updated_at=%s WHERE id=%s",
-               (str(e), time.time(), job_id))
+               (_safe_job_error_msg(e), time.time(), job_id))
         except Exception:
             pass
 
