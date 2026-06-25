@@ -2010,9 +2010,10 @@ async function whitebgSelected(id){
 }
 
 function tab3Html(j){
+  const fixNl = (v) => String(v||"").replace(/\\r\\n|\\n/g, "\\n");
   const field = (label, id, val, multiline) => `<div class="copy-field">
     <div class="copy-field-hd"><div class="slabel">${label}</div><button class="copy-btn" style="position:static" onclick='cp(this,document.getElementById("${id}").value)'>複製</button></div>
-    ${multiline?`<textarea id="${id}" style="height:${multiline}px">${esc(val||"")}</textarea>`:`<input type="text" id="${id}" value="${esc(val||"")}">`}
+    ${multiline?`<textarea id="${id}" style="height:${multiline}px">${esc(fixNl(val))}</textarea>`:`<input type="text" id="${id}" value="${esc(val||"")}">`}
   </div>`;
   let h = field("商品名稱","t3_name",j.ai_name);
   h += field("商品描述","t3_desc",j.ai_desc,180);
