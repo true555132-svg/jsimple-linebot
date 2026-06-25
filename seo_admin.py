@@ -110,6 +110,21 @@ def init_seo_db():
                     updated_at   FLOAT DEFAULT 0
                 )
             """)
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS seo_knowledge (
+                    id           SERIAL PRIMARY KEY,
+                    brand        TEXT DEFAULT '',
+                    category     TEXT DEFAULT '',
+                    type         TEXT DEFAULT 'spec',
+                    title        TEXT NOT NULL DEFAULT '',
+                    content      TEXT DEFAULT '',
+                    tags         TEXT DEFAULT '',
+                    allow_ai     BOOLEAN DEFAULT TRUE,
+                    created_at   FLOAT DEFAULT 0,
+                    updated_at   FLOAT DEFAULT 0
+                )
+            """)
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_seo_knowledge_filter ON seo_knowledge(brand, category, type)")
             conn.commit()
             cur.close()
             conn.close()
@@ -154,6 +169,70 @@ def _get_brand(brand_key):
         return {"key": row[0], "name": row[1], "category": row[2], "style": row[3], "tone": row[4], "custom_prompt": row[5]}
     except Exception:
         return {}
+
+# ── 知識庫（讓AI生成文章時引用真實品牌資料，提升EEAT、避免虛構）──
+
+KNOWLEDGE_TYPES = [
+    ("spec", "商品規格"),
+    ("faq", "FAQ"),
+    ("case", "案例"),
+    ("brand_feature", "品牌特色"),
+]
+KNOWLEDGE_TYPE_LABELS = dict(KNOWLEDGE_TYPES)
+
+def _list_knowledge(brand="", category="", ktype=""):
+    if not DATABASE_URL:
+        return []
+    try:
+        where = []
+        params = []
+        if brand:
+            where.append("brand=%s"); params.append(brand)
+        if category:
+            where.append("category=%s"); params.append(category)
+        if ktype:
+            where.append("type=%s"); params.append(ktype)
+        where_sql = (" WHERE " + " AND ".join(where)) if where else ""
+        rows = _q(f"""SELECT id,brand,category,type,title,content,tags,allow_ai,updated_at
+                      FROM seo_knowledge{where_sql} ORDER BY updated_at DESC""", tuple(params), fetch="all") or []
+        return [{
+            "id": r[0], "brand": r[1], "category": r[2], "type": r[3], "title": r[4],
+            "content": r[5], "tags": r[6], "allow_ai": r[7],
+            "updated_at": time.strftime("%Y-%m-%d %H:%M", time.localtime(r[8])) if r[8] else "",
+        } for r in rows]
+    except Exception as e:
+        import sys; print(f"[SEO Knowledge] 讀取清單失敗：{e}", file=sys.stderr)
+        return []
+
+def _get_knowledge_for_prompt(brand, category, limit=10):
+    """生成文章前呼叫：依品牌+品類取最多limit筆 allow_ai=true 的知識庫資料"""
+    if not DATABASE_URL:
+        return []
+    try:
+        where = ["allow_ai = TRUE"]
+        params = []
+        if brand:
+            where.append("brand=%s"); params.append(brand)
+        if category:
+            where.append("category=%s"); params.append(category)
+        params.append(limit)
+        rows = _q(f"""SELECT type,title,content FROM seo_knowledge
+                      WHERE {' AND '.join(where)}
+                      ORDER BY updated_at DESC LIMIT %s""", tuple(params), fetch="all") or []
+        return [{"type": r[0], "title": r[1], "content": r[2]} for r in rows]
+    except Exception as e:
+        import sys; print(f"[SEO Knowledge] 讀取AI引用資料失敗：{e}", file=sys.stderr)
+        return []
+
+def _knowledge_block(items):
+    """把知識庫資料轉成丟進Prompt的文字區塊"""
+    if not items:
+        return "（目前知識庫沒有符合此品牌/品類的資料，請用一般專業說明，不要編造具體數據、案例或認證）"
+    lines = []
+    for i, it in enumerate(items, 1):
+        label = KNOWLEDGE_TYPE_LABELS.get(it["type"], it["type"])
+        lines.append(f"{i}. [{label}] {it['title']}：{it['content']}")
+    return "\n".join(lines)
 
 # ── Claude AI 呼叫 ──────────────────────────────────────────────
 
@@ -224,6 +303,15 @@ DEFAULT_GENERATE_PROMPT = """你是台灣SEO/GEO/AEO內容策略專家與文案�
 
 搜尋意圖分析參考：
 [[ANALYSIS]]
+
+品牌知識庫（真實資料，請優先引用）：
+[[KNOWLEDGE]]
+
+━━━ 知識庫引用規則（重要） ━━━
+1. 優先引用上面「品牌知識庫」的內容（規格、FAQ、案例、品牌特色），不要憑空想像
+2. 不得虛構案例、數據、認證——如果知識庫沒有相關資料，就用一般專業說明帶過，不要假裝有具體數據或案例
+3. 如果知識庫顯示「沒有符合此品牌/品類的資料」，文章仍要寫完，只是不要編造具體數字或案例去填補
+4. 文章最後（FAQ與CTA之間或CTA之後）新增一個小節，標題為「本篇引用知識庫」：如果有引用，列出引用了哪幾筆資料的標題；如果完全沒有可引用的資料，就寫「本篇未引用品牌知識庫資料，內容為一般專業說明」
 
 ━━━ 第一步：判斷文章類型 ━━━
 依主題自動判斷，優先順序：價格型 > 比較型 > 商業型 > 資訊型
@@ -301,12 +389,13 @@ def _analyze_intent_prompt(brand, category, topic):
         BRAND_NAME=brand.get('name', ''), BRAND_CATEGORY=brand.get('category', ''),
         BRAND_STYLE=brand.get('style', ''), CATEGORY=category, TOPIC=topic)
 
-def _generate_article_prompt(brand, category, topic, intent_analysis):
+def _generate_article_prompt(brand, category, topic, intent_analysis, knowledge_items=None):
     tmpl = _get_prompt_template("generate", DEFAULT_GENERATE_PROMPT)
     return _fill_tokens(tmpl,
         BRAND_NAME=brand.get('name', ''), BRAND_CATEGORY=brand.get('category', ''),
         BRAND_STYLE=brand.get('style', ''), BRAND_TONE=brand.get('tone', ''),
-        CATEGORY=category, TOPIC=topic, ANALYSIS=intent_analysis)
+        CATEGORY=category, TOPIC=topic, ANALYSIS=intent_analysis,
+        KNOWLEDGE=_knowledge_block(knowledge_items or []))
 
 # ── Auth（複製自 app.py，避免 circular import，與既有後台共用同一支密碼）──
 
@@ -381,6 +470,7 @@ SIDEBAR_ITEMS = [
     ("seo-dashboard",  "📊 SEO 營運中心",   "/admin/seo-dashboard"),
     ("seo",            "📝 文章管理",       "/admin/seo"),
     ("seo-generator",  "✨ AI 生成文章",    "/admin/seo-generator"),
+    ("seo-knowledge",  "📚 知識庫管理",     "/admin/seo-knowledge"),
     ("seo-settings",   "⚙️ Prompt 設定",   "/admin/seo-settings"),
 ]
 
@@ -606,6 +696,134 @@ th{color:#888;font-weight:600;font-size:11px;text-transform:uppercase}
 """ + SHELL_CLOSE + """
 </body></html>"""
 
+KNOWLEDGE_LIST_HTML = """<!DOCTYPE html>
+<html lang="zh-TW"><head><meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>知識庫管理</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:-apple-system,sans-serif;background:#f5f5f5;color:#333}
+""" + SIDEBAR_CSS + """
+.container{max-width:1100px;margin:24px auto;padding:0 16px}
+.section{background:#fff;border-radius:14px;padding:20px;margin-bottom:20px;box-shadow:0 1px 4px rgba(0,0,0,.08)}
+.section h3{font-size:15px;margin-bottom:12px}
+.filter-bar{display:flex;gap:10px;align-items:center;margin-bottom:18px;flex-wrap:wrap}
+.filter-bar select{border:1px solid #ddd;border-radius:8px;padding:7px 10px;font-size:13px;background:#fff}
+table{width:100%;border-collapse:collapse;font-size:13px}
+th,td{text-align:left;padding:8px 6px;border-bottom:1px solid #f0f0f0}
+th{color:#888;font-weight:600;font-size:11px;text-transform:uppercase}
+td.content-cell{max-width:320px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#666}
+.badge{font-size:11px;padding:2px 8px;border-radius:10px;font-weight:700;white-space:nowrap}
+.b-spec{background:#e3f2fd;color:#1565c0}
+.b-faq{background:#fff8e1;color:#f57f17}
+.b-case{background:#e8f5e9;color:#2e7d32}
+.b-brand_feature{background:#fce4ec;color:#ad1457}
+.yes{color:#2e7d32;font-weight:700}.no{color:#bbb}
+.btn{padding:8px 16px;background:#0d6efd;color:#fff;border:none;border-radius:8px;font-size:13px;font-weight:600;cursor:pointer;text-decoration:none;display:inline-block}
+.btn-del{background:#dc3545;padding:4px 10px;font-size:11px}
+.link{color:#0d6efd;text-decoration:none;font-weight:600;font-size:12px}
+form.inline{display:inline}
+</style></head><body>
+{{ shell|safe }}
+<div class="container">
+
+  <div class="section">
+    <form class="filter-bar" method="GET" action="/admin/seo-knowledge">
+      <input type="hidden" name="key" value="{{ key }}">
+      <select name="brand" onchange="this.form.submit()">
+        <option value="">全部品牌</option>
+        {% for b in brands %}<option value="{{ b.key }}" {{ 'selected' if b.key==brand else '' }}>{{ b.name }}</option>{% endfor %}
+      </select>
+      <select name="category" onchange="this.form.submit()">
+        <option value="">全部品類</option>
+        {% for c in categories %}<option value="{{ c }}" {{ 'selected' if c==category else '' }}>{{ c }}</option>{% endfor %}
+      </select>
+      <select name="type" onchange="this.form.submit()">
+        <option value="">全部類型</option>
+        {% for tk, tl in knowledge_types %}<option value="{{ tk }}" {{ 'selected' if tk==ktype else '' }}>{{ tl }}</option>{% endfor %}
+      </select>
+      <a class="btn" href="/admin/seo-knowledge/item/new?key={{ key }}">+ 新增資料</a>
+    </form>
+
+    <table>
+      <tr><th>品牌</th><th>品類</th><th>類型</th><th>標題</th><th>內容</th><th>標籤</th><th>AI可引用</th><th>更新時間</th><th>操作</th></tr>
+      {% for it in items %}
+      <tr>
+        <td>{{ it.brand }}</td><td>{{ it.category }}</td>
+        <td><span class="badge b-{{ it.type }}">{{ knowledge_type_labels.get(it.type, it.type) }}</span></td>
+        <td>{{ it.title }}</td>
+        <td class="content-cell">{{ it.content }}</td>
+        <td>{{ it.tags }}</td>
+        <td class="{{ 'yes' if it.allow_ai else 'no' }}">{{ '✓' if it.allow_ai else '—' }}</td>
+        <td>{{ it.updated_at }}</td>
+        <td>
+          <a class="link" href="/admin/seo-knowledge/item/{{ it.id }}?key={{ key }}">編輯</a>
+          <form class="inline" method="POST" action="/admin/seo-knowledge/item/{{ it.id }}/delete?key={{ key }}" onsubmit="return confirm('刪除這筆知識庫資料？')">
+            <button class="btn btn-del" type="submit">刪除</button>
+          </form>
+        </td>
+      </tr>
+      {% endfor %}
+    </table>
+    {% if not items %}<p style="color:#999;font-size:13px;padding:14px 0">目前沒有符合篩選條件的資料。</p>{% endif %}
+  </div>
+
+</div>
+""" + SHELL_CLOSE + """
+</body></html>"""
+
+KNOWLEDGE_ITEM_HTML = """<!DOCTYPE html>
+<html lang="zh-TW"><head><meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>知識庫資料</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:-apple-system,sans-serif;background:#f5f5f5;color:#333}
+""" + SIDEBAR_CSS + """
+.container{max-width:680px;margin:24px auto;padding:0 16px 80px}
+.section{background:#fff;border-radius:14px;padding:20px;margin-bottom:16px;box-shadow:0 1px 4px rgba(0,0,0,.08)}
+label{font-size:12px;color:#888;font-weight:700;display:block;margin-bottom:5px;margin-top:14px}
+label:first-child{margin-top:0}
+input[type=text],select,textarea{width:100%;border:1px solid #ddd;border-radius:8px;padding:9px 11px;font-size:14px;font-family:inherit}
+textarea{resize:vertical;line-height:1.7}
+.checkbox-row{display:flex;align-items:center;gap:8px;margin-top:14px}
+.checkbox-row input{width:auto}
+.checkbox-row label{margin:0}
+.btn{padding:10px 22px;background:#0d6efd;color:#fff;border:none;border-radius:8px;font-size:14px;font-weight:600;cursor:pointer}
+</style></head><body>
+{{ shell|safe }}
+<div class="container">
+<form method="POST" action="/admin/seo-knowledge/item/save?key={{ key }}">
+  <input type="hidden" name="id" value="{{ it.id if it else '' }}">
+  <div class="section">
+    <label>品牌</label>
+    <select name="brand">
+      <option value="">（不限品牌）</option>
+      {% for b in brands %}<option value="{{ b.key }}" {{ 'selected' if it and it.brand==b.key else '' }}>{{ b.name }}</option>{% endfor %}
+    </select>
+    <label>品類</label>
+    <input type="text" name="category" value="{{ it.category if it else '' }}" placeholder="例如：高架床">
+    <label>類型</label>
+    <select name="type">
+      {% for tk, tl in knowledge_types %}<option value="{{ tk }}" {{ 'selected' if it and it.type==tk else '' }}>{{ tl }}</option>{% endfor %}
+    </select>
+    <label>標題</label>
+    <input type="text" name="title" value="{{ it.title if it else '' }}" required placeholder="例如：JS3026 高架床承重規格">
+    <label>內容</label>
+    <textarea name="content" rows="8" placeholder="實際資料，例如：承重120kg、床架厚度2mm冷軋鋼、保固3年...">{{ it.content if it else '' }}</textarea>
+    <label>標籤</label>
+    <input type="text" name="tags" value="{{ it.tags if it else '' }}" placeholder="逗號分隔，例如：承重,規格,鋼製">
+    <div class="checkbox-row">
+      <input type="checkbox" name="allow_ai" id="allow_ai" {{ 'checked' if (not it) or it.allow_ai else '' }}>
+      <label for="allow_ai" style="margin:0">允許AI生成文章時引用這筆資料</label>
+    </div>
+  </div>
+  <button class="btn" type="submit">儲存</button>
+</form>
+</div>
+""" + SHELL_CLOSE + """
+</body></html>"""
+
 SETTINGS_HTML = """<!DOCTYPE html>
 <html lang="zh-TW"><head><meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
@@ -646,7 +864,7 @@ textarea{width:100%;border:1px solid #ddd;border-radius:8px;padding:10px;font-si
 
   <div class="section">
     <h3>② AI 生成文章 Prompt</h3>
-    <div class="hint">可用變數：<code>[[BRAND_NAME]]</code> <code>[[BRAND_CATEGORY]]</code> <code>[[BRAND_STYLE]]</code> <code>[[BRAND_TONE]]</code> <code>[[CATEGORY]]</code> <code>[[TOPIC]]</code> <code>[[ANALYSIS]]</code>（搜尋意圖分析結果）— 結尾的JSON輸出格式請保留，否則文章會存不進去</div>
+    <div class="hint">可用變數：<code>[[BRAND_NAME]]</code> <code>[[BRAND_CATEGORY]]</code> <code>[[BRAND_STYLE]]</code> <code>[[BRAND_TONE]]</code> <code>[[CATEGORY]]</code> <code>[[TOPIC]]</code> <code>[[ANALYSIS]]</code>（搜尋意圖分析結果）<code>[[KNOWLEDGE]]</code>（<a href="/admin/seo-knowledge?key={{ key }}">知識庫</a>引用資料）— 結尾的JSON輸出格式請保留，否則文章會存不進去</div>
     <form method="POST" action="/admin/seo-settings/save?key={{ key }}">
       <input type="hidden" name="prompt_key" value="generate">
       <textarea name="content" rows="32">{{ generate_prompt }}</textarea>
@@ -946,6 +1164,79 @@ def seo_tracking_add(aid):
         "manual", time.time()))
     return redirect(f"/admin/seo/article/{aid}/tracking?key={key}")
 
+@seo_bp.route("/admin/seo-knowledge")
+def seo_knowledge_page():
+    ok, key = check_auth()
+    if not ok:
+        return render_template_string(LOGIN_HTML, error=None)
+    brand = request.args.get("brand", "")
+    category = request.args.get("category", "")
+    ktype = request.args.get("type", "")
+    items = _list_knowledge(brand, category, ktype)
+    try:
+        brands = _list_brands()
+        categories = _list_categories()
+    except Exception:
+        brands, categories = [], []
+    shell = _shell_open(key, "seo-knowledge", [("知識庫管理", None)])
+    return render_template_string(KNOWLEDGE_LIST_HTML, key=key, shell=shell, items=items,
+        brand=brand, category=category, ktype=ktype, brands=brands, categories=categories,
+        knowledge_types=KNOWLEDGE_TYPES, knowledge_type_labels=KNOWLEDGE_TYPE_LABELS)
+
+@seo_bp.route("/admin/seo-knowledge/item/new")
+def seo_knowledge_item_new():
+    ok, key = check_auth()
+    if not ok:
+        return render_template_string(LOGIN_HTML, error=None)
+    brands = _list_brands()
+    shell = _shell_open(key, "seo-knowledge", [("知識庫管理", "/admin/seo-knowledge"), ("新增資料", None)])
+    return render_template_string(KNOWLEDGE_ITEM_HTML, key=key, shell=shell, it=None,
+        brands=brands, knowledge_types=KNOWLEDGE_TYPES)
+
+@seo_bp.route("/admin/seo-knowledge/item/<int:item_id>")
+def seo_knowledge_item_edit(item_id):
+    ok, key = check_auth()
+    if not ok:
+        return render_template_string(LOGIN_HTML, error=None)
+    row = _q("SELECT id,brand,category,type,title,content,tags,allow_ai FROM seo_knowledge WHERE id=%s",
+              (item_id,), fetch="one")
+    if not row:
+        abort(404)
+    it = {"id": row[0], "brand": row[1], "category": row[2], "type": row[3],
+          "title": row[4], "content": row[5], "tags": row[6], "allow_ai": row[7]}
+    brands = _list_brands()
+    shell = _shell_open(key, "seo-knowledge", [("知識庫管理", "/admin/seo-knowledge"), ("編輯資料", None)])
+    return render_template_string(KNOWLEDGE_ITEM_HTML, key=key, shell=shell, it=it,
+        brands=brands, knowledge_types=KNOWLEDGE_TYPES)
+
+@seo_bp.route("/admin/seo-knowledge/item/save", methods=["POST"])
+def seo_knowledge_item_save():
+    ok, key = check_auth()
+    if not ok:
+        abort(403)
+    f = request.form
+    item_id = f.get("id", "")
+    now = time.time()
+    if item_id:
+        _q("""UPDATE seo_knowledge SET brand=%s, category=%s, type=%s, title=%s, content=%s,
+              tags=%s, allow_ai=%s, updated_at=%s WHERE id=%s""",
+           (f.get("brand", ""), f.get("category", ""), f.get("type", "spec"), f.get("title", ""),
+            f.get("content", ""), f.get("tags", ""), bool(f.get("allow_ai")), now, item_id))
+    else:
+        _q("""INSERT INTO seo_knowledge (brand,category,type,title,content,tags,allow_ai,created_at,updated_at)
+              VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+           (f.get("brand", ""), f.get("category", ""), f.get("type", "spec"), f.get("title", ""),
+            f.get("content", ""), f.get("tags", ""), bool(f.get("allow_ai")), now, now))
+    return redirect(f"/admin/seo-knowledge?key={key}")
+
+@seo_bp.route("/admin/seo-knowledge/item/<int:item_id>/delete", methods=["POST"])
+def seo_knowledge_item_delete(item_id):
+    ok, key = check_auth()
+    if not ok:
+        abort(403)
+    _q("DELETE FROM seo_knowledge WHERE id=%s", (item_id,))
+    return redirect(f"/admin/seo-knowledge?key={key}")
+
 @seo_bp.route("/admin/seo-settings")
 def seo_settings_page():
     ok, key = check_auth()
@@ -1014,7 +1305,8 @@ def _run_generate_job(job_id, brand_key, category, topic, analysis):
     try:
         _q("UPDATE seo_generate_jobs SET status='running', updated_at=%s WHERE id=%s", (time.time(), job_id))
         brand = _get_brand(brand_key)
-        prompt = _generate_article_prompt(brand, category, topic, analysis)
+        knowledge_items = _get_knowledge_for_prompt(brand_key, category, limit=10)
+        prompt = _generate_article_prompt(brand, category, topic, analysis, knowledge_items)
         result, err = _ai_call_json(prompt, model="claude-sonnet-4-6", max_tokens=8000)
         if err:
             _q("UPDATE seo_generate_jobs SET status='error', error_msg=%s, updated_at=%s WHERE id=%s",
