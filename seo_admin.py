@@ -103,6 +103,13 @@ def init_seo_db():
                     updated_at   FLOAT DEFAULT 0
                 )
             """)
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS seo_prompt_templates (
+                    key          TEXT PRIMARY KEY,
+                    content      TEXT DEFAULT '',
+                    updated_at   FLOAT DEFAULT 0
+                )
+            """)
             conn.commit()
             cur.close()
             conn.close()
@@ -187,13 +194,15 @@ def _ai_call_json(prompt, model="claude-sonnet-4-6", max_tokens=8000):
     except Exception as e:
         return None, f"JSON 解析失敗：{e}；原文：{text[:300]}"
 
-def _analyze_intent_prompt(brand, category, topic):
-    return f"""你是台灣SEO/GEO/AEO內容策略專家。
+# ── AI Prompt 模板（可在 /admin/seo-settings 頁面編輯，存DB後立即生效，不需重新部署）──
+# 模板用 [[TOKEN]] 代表變數，避免跟JSON輸出格式裡的 { } 符號衝突（不是用 str.format）
 
-品牌：{brand.get('name','')}（{brand.get('category','')}）
-品牌風格：{brand.get('style','')}
-品類：{category}
-主題：{topic}
+DEFAULT_ANALYZE_PROMPT = """你是台灣SEO/GEO/AEO內容策略專家。
+
+品牌：[[BRAND_NAME]]（[[BRAND_CATEGORY]]）
+品牌風格：[[BRAND_STYLE]]
+品類：[[CATEGORY]]
+主題：[[TOPIC]]
 
 請分析這個主題的搜尋意圖，輸出繁體中文、台灣用語，不要寫成英文翻譯腔：
 1. 搜尋者是誰
@@ -206,16 +215,15 @@ def _analyze_intent_prompt(brand, category, topic):
 
 直接輸出分析內容，不要加開頭結尾的客套話。"""
 
-def _generate_article_prompt(brand, category, topic, intent_analysis):
-    return f"""你是台灣SEO/GEO/AEO內容策略專家與文案編輯，為「{brand.get('name','')}」（{brand.get('category','')}）撰寫一篇繁體中文SEO文章。
+DEFAULT_GENERATE_PROMPT = """你是台灣SEO/GEO/AEO內容策略專家與文案編輯，為「[[BRAND_NAME]]」（[[BRAND_CATEGORY]]）撰寫一篇繁體中文SEO文章。
 
-品牌風格：{brand.get('style','')}
-語氣要求：{brand.get('tone','')}
-品類：{category}
-主題：{topic}
+品牌風格：[[BRAND_STYLE]]
+語氣要求：[[BRAND_TONE]]
+品類：[[CATEGORY]]
+主題：[[TOPIC]]
 
 搜尋意圖分析參考：
-{intent_analysis}
+[[ANALYSIS]]
 
 ━━━ 第一步：判斷文章類型 ━━━
 依主題自動判斷，優先順序：價格型 > 比較型 > 商業型 > 資訊型
@@ -257,14 +265,48 @@ def _generate_article_prompt(brand, category, topic, intent_analysis):
 段落順序：開頭直接回答問題 → 原因或背景 → 實務建議（規格/挑選/比較視主題而定）→ 商品或服務說明 → FAQ（3~5題）→ 詢價CTA
 
 輸出格式（只輸出JSON，不要其他文字，不要markdown code block）：
-{{
+{
   "title": "標題（主關鍵字在前）",
   "slug": "/blog/xxx-xxx-xxx（英文小寫，連字號）",
   "meta_title": "Meta Title（含品牌名，60字以內）",
   "meta_description": "Meta Description（120字以內，含關鍵字與品牌名）",
   "ai_summary": "AI Overview摘要，100~200字，純文字，包含1~2個關鍵數字或結論",
   "content": "完整文章內容，Markdown格式，##標示H2、###標示H3，包含表格、定義段落、條列清單、FAQ"
-}}"""
+}"""
+
+def _get_prompt_template(key, default):
+    if not DATABASE_URL:
+        return default
+    try:
+        row = _q("SELECT content FROM seo_prompt_templates WHERE key=%s", (key,), fetch="one")
+        return row[0] if row and row[0].strip() else default
+    except Exception:
+        return default
+
+def _save_prompt_template(key, content):
+    now = time.time()
+    _q("""INSERT INTO seo_prompt_templates (key,content,updated_at) VALUES (%s,%s,%s)
+          ON CONFLICT (key) DO UPDATE SET content=EXCLUDED.content, updated_at=EXCLUDED.updated_at""",
+       (key, content, now))
+
+def _fill_tokens(template, **tokens):
+    out = template
+    for k, v in tokens.items():
+        out = out.replace(f"[[{k}]]", v or "")
+    return out
+
+def _analyze_intent_prompt(brand, category, topic):
+    tmpl = _get_prompt_template("analyze", DEFAULT_ANALYZE_PROMPT)
+    return _fill_tokens(tmpl,
+        BRAND_NAME=brand.get('name', ''), BRAND_CATEGORY=brand.get('category', ''),
+        BRAND_STYLE=brand.get('style', ''), CATEGORY=category, TOPIC=topic)
+
+def _generate_article_prompt(brand, category, topic, intent_analysis):
+    tmpl = _get_prompt_template("generate", DEFAULT_GENERATE_PROMPT)
+    return _fill_tokens(tmpl,
+        BRAND_NAME=brand.get('name', ''), BRAND_CATEGORY=brand.get('category', ''),
+        BRAND_STYLE=brand.get('style', ''), BRAND_TONE=brand.get('tone', ''),
+        CATEGORY=category, TOPIC=topic, ANALYSIS=intent_analysis)
 
 # ── Auth（複製自 app.py，避免 circular import，與既有後台共用同一支密碼）──
 
@@ -339,6 +381,7 @@ SIDEBAR_ITEMS = [
     ("seo-dashboard",  "📊 SEO 營運中心",   "/admin/seo-dashboard"),
     ("seo",            "📝 文章管理",       "/admin/seo"),
     ("seo-generator",  "✨ AI 生成文章",    "/admin/seo-generator"),
+    ("seo-settings",   "⚙️ Prompt 設定",   "/admin/seo-settings"),
 ]
 
 SHELL_CLOSE = "</div></div></div>"
@@ -559,6 +602,66 @@ th{color:#888;font-weight:600;font-size:11px;text-transform:uppercase}
       <button class="btn" type="submit">新增記錄</button>
     </form>
   </div>
+</div>
+""" + SHELL_CLOSE + """
+</body></html>"""
+
+SETTINGS_HTML = """<!DOCTYPE html>
+<html lang="zh-TW"><head><meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Prompt 設定</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:-apple-system,sans-serif;background:#f5f5f5;color:#333}
+""" + SIDEBAR_CSS + """
+.container{max-width:860px;margin:24px auto;padding:0 16px 80px}
+.section{background:#fff;border-radius:14px;padding:20px;margin-bottom:16px;box-shadow:0 1px 4px rgba(0,0,0,.08)}
+.section h3{font-size:15px;margin-bottom:6px}
+.hint{font-size:12px;color:#999;margin-bottom:12px;line-height:1.6}
+.hint code{background:#f0f0f0;padding:1px 5px;border-radius:4px;font-size:11px}
+textarea{width:100%;border:1px solid #ddd;border-radius:8px;padding:10px;font-size:13px;font-family:inherit;line-height:1.6;resize:vertical}
+.btn{padding:9px 18px;background:#0d6efd;color:#fff;border:none;border-radius:8px;font-size:13px;font-weight:600;cursor:pointer;margin-top:10px}
+.btn-outline{background:#fff;color:#666;border:1.5px solid #ddd}
+.btn-row{display:flex;gap:8px}
+.saved-msg{font-size:12px;color:#2e7d32;font-weight:700;margin-left:10px;display:none}
+</style></head><body>
+{{ shell|safe }}
+<div class="container">
+
+  <div class="section">
+    <h3>① 搜尋意圖分析 Prompt</h3>
+    <div class="hint">可用變數：<code>[[BRAND_NAME]]</code> <code>[[BRAND_CATEGORY]]</code> <code>[[BRAND_STYLE]]</code> <code>[[CATEGORY]]</code> <code>[[TOPIC]]</code> — 存檔後立即生效，不需重新部署</div>
+    <form method="POST" action="/admin/seo-settings/save?key={{ key }}" onsubmit="return true">
+      <input type="hidden" name="prompt_key" value="analyze">
+      <textarea name="content" rows="14">{{ analyze_prompt }}</textarea>
+      <div class="btn-row">
+        <button class="btn" type="submit">儲存</button>
+      </div>
+    </form>
+    <form method="POST" action="/admin/seo-settings/reset?key={{ key }}" onsubmit="return confirm('還原成系統預設的分析Prompt？')" style="margin-top:6px">
+      <input type="hidden" name="prompt_key" value="analyze">
+      <button class="btn btn-outline" type="submit">還原預設值</button>
+    </form>
+  </div>
+
+  <div class="section">
+    <h3>② AI 生成文章 Prompt</h3>
+    <div class="hint">可用變數：<code>[[BRAND_NAME]]</code> <code>[[BRAND_CATEGORY]]</code> <code>[[BRAND_STYLE]]</code> <code>[[BRAND_TONE]]</code> <code>[[CATEGORY]]</code> <code>[[TOPIC]]</code> <code>[[ANALYSIS]]</code>（搜尋意圖分析結果）— 結尾的JSON輸出格式請保留，否則文章會存不進去</div>
+    <form method="POST" action="/admin/seo-settings/save?key={{ key }}">
+      <input type="hidden" name="prompt_key" value="generate">
+      <textarea name="content" rows="32">{{ generate_prompt }}</textarea>
+      <div class="btn-row">
+        <button class="btn" type="submit">儲存</button>
+      </div>
+    </form>
+    <form method="POST" action="/admin/seo-settings/reset?key={{ key }}" onsubmit="return confirm('還原成系統預設的生成文章Prompt？')" style="margin-top:6px">
+      <input type="hidden" name="prompt_key" value="generate">
+      <button class="btn btn-outline" type="submit">還原預設值</button>
+    </form>
+  </div>
+
+  {% if flash %}<div class="section" style="color:#2e7d32;font-weight:700">{{ flash }}</div>{% endif %}
+
 </div>
 """ + SHELL_CLOSE + """
 </body></html>"""
@@ -842,6 +945,41 @@ def seo_tracking_add(aid):
         int(f.get("line_inquiries") or 0), int(f.get("orders") or 0), float(f.get("revenue") or 0),
         "manual", time.time()))
     return redirect(f"/admin/seo/article/{aid}/tracking?key={key}")
+
+@seo_bp.route("/admin/seo-settings")
+def seo_settings_page():
+    ok, key = check_auth()
+    if not ok:
+        return render_template_string(LOGIN_HTML, error=None)
+    analyze_prompt = _get_prompt_template("analyze", DEFAULT_ANALYZE_PROMPT)
+    generate_prompt = _get_prompt_template("generate", DEFAULT_GENERATE_PROMPT)
+    shell = _shell_open(key, "seo-settings", [("Prompt 設定", None)])
+    return render_template_string(SETTINGS_HTML, key=key, shell=shell,
+        analyze_prompt=analyze_prompt, generate_prompt=generate_prompt, flash=request.args.get("flash", ""))
+
+@seo_bp.route("/admin/seo-settings/save", methods=["POST"])
+def seo_settings_save():
+    ok, key = check_auth()
+    if not ok:
+        abort(403)
+    prompt_key = request.form.get("prompt_key", "")
+    content = request.form.get("content", "")
+    if prompt_key not in ("analyze", "generate") or not content.strip():
+        return redirect(f"/admin/seo-settings?key={key}")
+    _save_prompt_template(prompt_key, content)
+    return redirect(f"/admin/seo-settings?key={key}&flash=已儲存")
+
+@seo_bp.route("/admin/seo-settings/reset", methods=["POST"])
+def seo_settings_reset():
+    ok, key = check_auth()
+    if not ok:
+        abort(403)
+    prompt_key = request.form.get("prompt_key", "")
+    if prompt_key not in ("analyze", "generate"):
+        return redirect(f"/admin/seo-settings?key={key}")
+    default = DEFAULT_ANALYZE_PROMPT if prompt_key == "analyze" else DEFAULT_GENERATE_PROMPT
+    _save_prompt_template(prompt_key, default)
+    return redirect(f"/admin/seo-settings?key={key}&flash=已還原預設值")
 
 @seo_bp.route("/admin/seo-generator")
 def seo_generator_page():
