@@ -605,12 +605,37 @@ def scrape_taobao(page, url):
     if not result["raw_title"]:
         result["raw_title"] = page.title().replace("- 淘宝网", "").replace("- 淘寶網", "").strip()
 
-    for sel in [".tb-rmb", ".price--5SQHM"]:
-        try:
-            p = page.text_content(sel, timeout=1500)
-            if p and p.strip():
-                result["raw_price"] = p.strip(); break
-        except Exception: pass
+    # 價格：先從 JS 全域資料取，再 fallback DOM
+    try:
+        price_js = page.evaluate("""() => {
+            try {
+                const d = window.__INIT_DATA__ || window.__GLOBAL_DATA__ || {};
+                // 路徑1: item.price
+                const p1 = d.item?.price || d.data?.item?.price;
+                if(p1) return String(p1);
+                // 路徑2: skuCore sku2info 第一筆
+                const sku2 = d.item?.skuCore?.sku2info || {};
+                const first = Object.values(sku2)[0];
+                if(first?.price?.priceText) return first.price.priceText;
+                // 路徑3: script 內 JSON "price":"xx"
+                for(const s of document.querySelectorAll('script')) {
+                    const m = s.textContent.match(/"price"\s*:\s*"([\d.]+)"/);
+                    if(m) return m[1];
+                }
+            } catch(e) {}
+            // 路徑4: DOM fallback（各種 class pattern）
+            for(const sel of ['[class*="priceText"]','[class*="Price--price"]',
+                               '.tb-rmb','.price-text','[itemprop="price"]',
+                               '[class*="price--"]','[class*="itemPrice"]']) {
+                const el = document.querySelector(sel);
+                if(el){ const t=el.textContent.trim(); if(/[\d.]+/.test(t)) return t; }
+            }
+            return '';
+        }""")
+        if price_js:
+            result["raw_price"] = price_js.strip()
+    except Exception as e:
+        print(f"    [Taobao price err] {e}")
 
     # 規格屬性 + 多 SKU 價格
     try:
@@ -751,6 +776,50 @@ def scrape_taobao(page, url):
             print(f"    [Taobao SKU] {len(sku_js)} 張")
     except Exception as e:
         print(f"    [Taobao SKU err] {e}")
+    # SKU 屬性文字 + 多規格價格
+    try:
+        sku_data = page.evaluate("""() => {
+            const out = { props: [], sku_prices: [] };
+            try {
+                const d = window.__INIT_DATA__ || window.__GLOBAL_DATA__ || {};
+                const item = d.item || d.data?.item || {};
+                // SKU 屬性
+                const props = item.props?.props || item.skuCore?.props || [];
+                out.props = props.map(p => ({
+                    name: p.name || p.propName || '',
+                    values: (p.values || p.propValues || []).map(v => ({
+                        name: v.name || v.valueName || '',
+                        image: v.imageUrl || v.picUrl || ''
+                    }))
+                })).filter(p => p.name && p.values.length);
+                // 多規格價格
+                const sku2 = item.skuCore?.sku2info || {};
+                Object.entries(sku2).forEach(([k, v]) => {
+                    if(v?.price?.priceText) {
+                        out.sku_prices.push({
+                            sku_id: k,
+                            price: v.price.priceText,
+                            stock: v.quantity || 0
+                        });
+                    }
+                });
+            } catch(e) {}
+            return out;
+        }""")
+        if sku_data:
+            if sku_data.get("props"):
+                result["raw_extra"]["sku_props"] = sku_data["props"]
+                print(f"    [Taobao SKU props] {len(sku_data['props'])} 組規格")
+            if sku_data.get("sku_prices"):
+                result["raw_extra"]["sku_prices"] = sku_data["sku_prices"]
+                # 取最低/最高價
+                prices = [float(p["price"]) for p in sku_data["sku_prices"] if p.get("price")]
+                if prices and not result["raw_price"]:
+                    mn, mx = min(prices), max(prices)
+                    result["raw_price"] = f"{mn}~{mx}" if mn != mx else str(mn)
+                    print(f"    [Taobao SKU price range] {result['raw_price']}")
+    except Exception as e:
+        print(f"    [Taobao SKU data err] {e}")
     # 淘寶評價圖片（買家秀）— 多策略掃描
     try:
         for tab_sel in ["text=用户评价", '[data-name*="评价"]', ".J_TabBar a"]:
