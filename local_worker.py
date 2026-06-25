@@ -818,6 +818,28 @@ def scrape_taobao(page, url):
                     mn, mx = min(prices), max(prices)
                     result["raw_price"] = f"{mn}~{mx}" if mn != mx else str(mn)
                     print(f"    [Taobao SKU price range] {result['raw_price']}")
+        if not (sku_data and (sku_data.get("props") or sku_data.get("sku_prices"))):
+            try:
+                diag = page.evaluate("""() => {
+                    const keys = (o) => (o && typeof o === 'object') ? Object.keys(o) : [];
+                    const g = window.__GLOBAL_DATA__ || null;
+                    const i = window.__INIT_DATA__ || null;
+                    const gi = g && (g.item || g.data?.item) || null;
+                    const ii = i && (i.item || i.data?.item) || null;
+                    return {
+                        hasGlobal: !!g, hasInit: !!i,
+                        globalTopKeys: keys(g),
+                        initTopKeys: keys(i),
+                        globalItemKeys: keys(gi),
+                        initItemKeys: keys(ii),
+                        globalSkuCoreKeys: keys(gi && gi.skuCore),
+                        initSkuCoreKeys: keys(ii && ii.skuCore),
+                        windowKeysWithSku: Object.keys(window).filter(k => /sku|Sku|GLOBAL|INIT|PAGE/i.test(k)),
+                    };
+                }""")
+                print(f"    [淘寶診斷] {json.dumps(diag, ensure_ascii=False)}")
+            except Exception as e:
+                print(f"    [淘寶診斷 err] {e}")
     except Exception as e:
         print(f"    [Taobao SKU data err] {e}")
     # 淘寶評價圖片（買家秀）— 多策略掃描
