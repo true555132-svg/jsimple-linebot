@@ -1875,12 +1875,32 @@ function tab1Html(j){
       <div class="compare-col-hd">台灣版商品</div>
       <div class="compare-field"><label>商品名稱</label><input type="text" id="t1_name" value="${esc(j.ai_name||"")}"></div>
       <div class="compare-field"><label>品牌</label><select id="t1_brand">${brandOpts}</select></div>
-      <div class="compare-field"><label>建議售價</label><div style="display:flex;gap:8px"><input type="text" id="t1_price_min" placeholder="下限" value="${esc(j.price_min||"")}"><input type="text" id="t1_price_max" placeholder="上限" value="${esc(j.price_max||"")}"></div></div>
+      <div class="compare-field"><label>建議售價</label><div style="display:flex;gap:8px"><input type="text" id="t1_price_min" placeholder="下限" value="${esc(j.price_min||"")}"><input type="text" id="t1_price_max" placeholder="上限" value="${esc(j.price_max||"")}"></div>
+        <div style="display:flex;gap:6px;margin-top:6px;align-items:center">
+          <input type="text" id="t1_mult" placeholder="乘數，例如 4.3" style="width:110px;border:1.5px solid #ddd;border-radius:8px;padding:7px 10px;font-size:13px">
+          <button type="button" class="sel-btn" onclick="applyMultiplier(${j.id})">用原始價格 × 乘數 換算</button>
+        </div>
+      </div>
       <div class="compare-field"><label>商品分類</label><input type="text" id="t1_category" value="${esc(j.category||"")}"></div>
       <div class="compare-field"><label>狀態</label><select id="t1_status">${["草稿","待審核","待上架","上架中","已下架"].map(s=>`<option${j.listing_status===s?" selected":""}>${s}</option>`).join("")}</select></div>
       <button class="btn-save" onclick="saveTab1(${j.id})">儲存</button>
     </div>
   </div>`;
+}
+
+function applyMultiplier(id){
+  const mult = parseFloat(document.getElementById("t1_mult").value);
+  if(!mult || mult<=0){toast("請輸入有效的乘數");return;}
+  const raw = (_curJob && _curJob.raw_price) || "";
+  const skuPrices = (_curJob && _curJob.raw_extra && _curJob.raw_extra.sku_prices) || [];
+  let nums = skuPrices.map(p=>parseFloat(p.price)).filter(n=>!isNaN(n) && n>0);
+  if(!nums.length) nums = (raw.match(/[\\d.]+/g)||[]).map(Number).filter(n=>n>0);
+  if(!nums.length){toast("沒有原始價格可供換算");return;}
+  const lo = Math.round(Math.min(...nums)*mult);
+  const hi = Math.round(Math.max(...nums)*mult);
+  document.getElementById("t1_price_min").value = lo;
+  document.getElementById("t1_price_max").value = hi;
+  toast(`已套用乘數 ${mult}：NT$ ${lo}${hi!==lo?" ~ "+hi:""}（記得按儲存）`);
 }
 
 async function saveTab1(id){
