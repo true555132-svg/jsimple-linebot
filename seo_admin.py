@@ -19,6 +19,7 @@ _db_lock = threading.Lock()
 
 TITLE_STATUS  = ["待寫", "已寫", "已發布"]
 ARTICLE_STATUS = ["draft", "published"]
+ARTICLE_STATUS_LABELS = {"draft": "草稿", "published": "已發布"}
 
 # ── DB ───────────────────────────────────────────────────────────
 
@@ -531,10 +532,10 @@ DEFAULT_GENERATE_PROMPT = """你是台灣SEO/GEO/AEO內容策略專家與文案�
 不要為了湊字數填廢話，寧可精簡也不要膨脹。
 
 ━━━ GEO結構元素（每篇必要） ━━━
-1. 至少1個比較表或數據表（Markdown table格式，AI可直接引用）
-2. 至少2個定義段落，格式：> **詞彙**：解釋其實際意義與用途
-3. 至少2個條列清單（步驟、重點、注意事項，每點一個概念）
-4. 3~5個FAQ問答，用###H3寫問題，直接回答不繞彎，每題80~120字
+1. 至少1個比較表或數據表（用HTML <table><tr><th><td>標籤，AI可直接引用）
+2. 至少2個定義段落，格式：<blockquote><strong>詞彙</strong>：解釋其實際意義與用途</blockquote>
+3. 至少2個條列清單（步驟、重點、注意事項，每點一個概念，用<ul><li>或<ol><li>標籤）
+4. 3~5個FAQ問答，用<h3>標籤寫問題，直接回答不繞彎，每題80~120字
 5. 倒金字塔結構：每個H2開頭先給結論，再展開說明
 
 ━━━ EEAT佔位符規則 ━━━
@@ -560,7 +561,7 @@ DEFAULT_GENERATE_PROMPT = """你是台灣SEO/GEO/AEO內容策略專家與文案�
   "meta_title": "Meta Title（含品牌名，60字以內）",
   "meta_description": "Meta Description（120字以內，含關鍵字與品牌名）",
   "ai_summary": "AI Overview摘要，100~200字，純文字，包含1~2個關鍵數字或結論",
-  "content": "完整文章內容，Markdown格式，##標示H2、###標示H3，包含表格、定義段落、條列清單、FAQ"
+  "content": "完整文章內容，純HTML格式（用<h2><h3><p><table><ul><ol><li><blockquote><strong>標籤），絕對不要用Markdown符號（不要##、不要**、不要>開頭的引用），這樣才能直接貼到網站後台的HTML/原始碼模式正常顯示，不需要再轉換"
 }"""
 
 def _get_prompt_template(key, default):
@@ -777,7 +778,7 @@ form.inline{display:inline}
       {% for a in articles %}
       <tr>
         <td>{{ a[1] }}</td>
-        <td><span class="badge b-{{ a[2] }}">{{ a[2] }}</span></td>
+        <td><span class="badge b-{{ a[2] }}">{{ article_status_labels.get(a[2], a[2]) }}</span></td>
         <td>{{ a[3] }}</td>
         <td>{{ a[4] }}</td>
         <td>
@@ -825,7 +826,7 @@ textarea{resize:vertical;line-height:1.7}
     <label>狀態</label>
     <select name="status">
       {% for s in article_status %}
-      <option value="{{ s }}" {{ 'selected' if a and a[7]==s else '' }}>{{ s }}</option>
+      <option value="{{ s }}" {{ 'selected' if a and a[7]==s else '' }}>{{ article_status_labels[s] }}</option>
       {% endfor %}
     </select>
   </div>
@@ -1609,7 +1610,8 @@ def seo_dashboard():
     articles = _q("SELECT id,title,status,slug,updated_at FROM seo_articles ORDER BY id DESC", fetch="all") or []
     articles = [(a[0], a[1], a[2], a[3], time.strftime("%Y-%m-%d %H:%M", time.localtime(a[4])) if a[4] else "") for a in articles]
     shell = _shell_open(key, "seo", [("文章管理", None)])
-    return render_template_string(LIST_HTML, key=key, shell=shell, titles=titles, articles=articles, title_status=TITLE_STATUS)
+    return render_template_string(LIST_HTML, key=key, shell=shell, titles=titles, articles=articles,
+        title_status=TITLE_STATUS, article_status_labels=ARTICLE_STATUS_LABELS)
 
 @seo_bp.route("/admin/seo/title/add", methods=["POST"])
 def seo_title_add():
@@ -1648,7 +1650,7 @@ def seo_article_new():
         if row:
             default_title = row[0]
     shell = _shell_open(key, "seo", [("文章管理", "/admin/seo"), ("新增文章", None)])
-    return render_template_string(ARTICLE_HTML, key=key, shell=shell, a=None, default_title=default_title, article_status=ARTICLE_STATUS)
+    return render_template_string(ARTICLE_HTML, key=key, shell=shell, a=None, default_title=default_title, article_status=ARTICLE_STATUS, article_status_labels=ARTICLE_STATUS_LABELS)
 
 @seo_bp.route("/admin/seo/article/<int:aid>")
 def seo_article_edit(aid):
@@ -1660,7 +1662,7 @@ def seo_article_edit(aid):
     if not a:
         abort(404)
     shell = _shell_open(key, "seo", [("文章管理", "/admin/seo"), ("編輯文章", None)])
-    return render_template_string(ARTICLE_HTML, key=key, shell=shell, a=a, default_title="", article_status=ARTICLE_STATUS)
+    return render_template_string(ARTICLE_HTML, key=key, shell=shell, a=a, default_title="", article_status=ARTICLE_STATUS, article_status_labels=ARTICLE_STATUS_LABELS)
 
 @seo_bp.route("/admin/seo/article/save", methods=["POST"])
 def seo_article_save():
