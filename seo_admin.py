@@ -18,8 +18,16 @@ seo_bp = Blueprint("seo", __name__)
 _db_lock = threading.Lock()
 
 TITLE_STATUS  = ["待寫", "已寫", "已發布"]
-ARTICLE_STATUS = ["draft", "published"]
-ARTICLE_STATUS_LABELS = {"draft": "草稿", "published": "已發布"}
+ARTICLE_STATUS = ["topic_pending", "ai_generating", "draft_review", "needs_revision",
+                  "ready_to_publish", "published", "needs_optimization", "inactive",
+                  "draft"]
+ARTICLE_STATUS_LABELS = {
+    "topic_pending": "主題待確認", "ai_generating": "AI產生中", "draft_review": "草稿待審",
+    "needs_revision": "需人工修改", "ready_to_publish": "可發布", "published": "已發布",
+    "needs_optimization": "需優化", "inactive": "已失效／暫停",
+    "draft": "草稿",  # 舊資料相容（升級前生成的文章）
+}
+NEXT_ACTION_OPTIONS = ["生成文章", "AI檢查", "人工審稿", "修改內容", "發布", "優化標題", "補FAQ", "補內部連結"]
 
 # ── DB ───────────────────────────────────────────────────────────
 
@@ -164,6 +172,57 @@ def init_seo_db():
                     error_msg      TEXT DEFAULT '',
                     created_at     FLOAT DEFAULT 0,
                     updated_at     FLOAT DEFAULT 0
+                )
+            """)
+            # AI SEO 生產線升級：先用 extra（JSON存成TEXT）放新欄位，不大動既有資料表結構
+            for col_sql in [
+                "ALTER TABLE seo_articles ADD COLUMN IF NOT EXISTS extra TEXT DEFAULT '{}'",
+                "ALTER TABLE seo_opportunities ADD COLUMN IF NOT EXISTS extra TEXT DEFAULT '{}'",
+            ]:
+                try: cur.execute(col_sql)
+                except Exception: pass
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS seo_brand_rules (
+                    id               SERIAL PRIMARY KEY,
+                    brand            TEXT DEFAULT '',
+                    category         TEXT DEFAULT '',
+                    positioning      TEXT DEFAULT '',
+                    target_audience  TEXT DEFAULT '',
+                    key_products     TEXT DEFAULT '',
+                    avoid_directions TEXT DEFAULT '',
+                    tone             TEXT DEFAULT '',
+                    cta_direction    TEXT DEFAULT '',
+                    keywords         TEXT DEFAULT '',
+                    negative_keywords TEXT DEFAULT '',
+                    created_at       FLOAT DEFAULT 0,
+                    updated_at       FLOAT DEFAULT 0
+                )
+            """)
+            cur.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_seo_brand_rules_unique ON seo_brand_rules(brand, category)")
+            cur.execute("SELECT COUNT(*) FROM seo_brand_rules")
+            if cur.fetchone()[0] == 0:
+                now0 = time.time()
+                cur.execute("""INSERT INTO seo_brand_rules
+                    (brand,category,positioning,target_audience,key_products,avoid_directions,tone,cta_direction,keywords,negative_keywords,created_at,updated_at)
+                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+                    ("jsimple", "辦公家具",
+                     "中價位／中高質感辦公家具，不走低價路線。主打現代工業風、木質搭配黑鐵件、實用且有質感的辦公室配置。",
+                     "中小企業、工作室、公司採購、設計公司、辦公室搬遷、新設立辦公室的客戶。",
+                     "員工桌、主管桌、經理桌、會議桌、洽談桌、辦公椅、培訓椅、資料櫃、展示櫃、辦公室整體配置。",
+                     "不要寫成學生宿舍、租屋套房、高架床、小房間家具、低價家具、便宜辦公桌導向。",
+                     "專業、清楚、務實、不浮誇，適合公司採購與老闆閱讀。",
+                     "請使用者提供辦公室尺寸、人數、預算與需求，可協助搭配辦公桌椅、會議桌、主管桌與收納櫃，提供配置與報價建議。",
+                     "辦公家具、辦公桌、主管桌、經理桌、員工桌、多人工作站、會議桌、洽談桌、辦公椅、培訓椅、資料櫃、小型辦公室家具、中小企業辦公家具、辦公室配置、辦公家具採購。",
+                     "", now0, now0))
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS seo_quality_check_jobs (
+                    id           SERIAL PRIMARY KEY,
+                    status       TEXT DEFAULT 'pending',
+                    article_id   INTEGER DEFAULT NULL,
+                    result       TEXT DEFAULT '',
+                    error_msg    TEXT DEFAULT '',
+                    created_at   FLOAT DEFAULT 0,
+                    updated_at   FLOAT DEFAULT 0
                 )
             """)
             conn.commit()
@@ -331,15 +390,23 @@ def _knowledge_upsert(brand, category, items):
 
 # ── SEO Opportunity 主題池 ─────────────────────────────────────
 
-OPPORTUNITY_STATUS = ["idea", "selected", "generated", "published"]
-OPPORTUNITY_STATUS_LABELS = {"idea": "待評估", "selected": "已選定", "generated": "已生成", "published": "已發布"}
+OPPORTUNITY_STATUS = ["idea", "confirmed", "draft_generated", "published", "paused"]
+OPPORTUNITY_STATUS_LABELS = {
+    "idea": "待確認", "confirmed": "已確認", "draft_generated": "已生成草稿",
+    "published": "已發布", "paused": "暫停",
+    "selected": "已確認", "generated": "已生成草稿",  # 舊資料相容（badge顯示用，下拉選單不會出現這兩個值）
+}
+ARTICLE_TYPES = ["導購文", "比較文", "尺寸指南", "案例文", "FAQ文", "採購指南", "問題解決文", "品牌介紹文"]
 
-def _opportunity_prompt(brand, category, knowledge_items):
+def _opportunity_prompt(brand, category, knowledge_items, brand_rule=None):
     return f"""你是台灣SEO/GEO/AEO內容策略專家。請根據以下品牌資訊，產生20個有價值的SEO文章主題。
 
 品牌：{brand.get('name','')}（{brand.get('category','')}）
 品牌風格：{brand.get('style','')}
 品類：{category}
+
+品牌SEO規則（重要，主題不可偏離）：
+{_brand_rule_block(brand_rule)}
 
 品牌知識庫參考（真實資料，主題應該盡量貼近這些內容，不要憑空想像不存在的功能或案例）：
 {_knowledge_block(knowledge_items)}
@@ -348,18 +415,28 @@ def _opportunity_prompt(brand, category, knowledge_items):
 1. 是真實使用者會搜尋的問題，不要空泛的標題
 2. 涵蓋不同類型：價格型、比較型、商業型、資訊型都要有，不要全部都一樣
 3. 盡量能對應到上面知識庫的真實商品/案例/特色
+4. 不可偏離品牌SEO規則裡的「禁止偏離方向」
 
 每個主題請評估：
+- main_keyword：這個主題的主關鍵字
 - seo_score（1~10）：搜尋量與排名機會
 - geo_score（1~10）：適合被Google AI Overview / ChatGPT引用的程度
 - conversion_score（1~10）：帶來詢價/成交的機會
 - difficulty（1~10）：競爭難度，10代表最難
+- business_score（1~100）：整體商業價值（綜合考量帶來詢價/成交的潛力與品牌契合度）
+- competition_score（1~100）：競爭度，分數越高代表越難排名
+- priority：A（優先）/ B（中等）/ C（次要）
+- suggested_article_type：建議文章類型，從「導購文/比較文/尺寸指南/案例文/FAQ文/採購指南/問題解決文/品牌介紹文」選一個
+- related_products：對應商品，逗號分隔
 - reason：50字以內，說明為什麼推薦這個主題
 
 輸出格式（只輸出JSON陣列，不要其他文字，不要markdown code block）：
 [
-  {{"topic": "主題", "search_intent": "搜尋意圖簡述", "target_customer": "目標客群",
-    "seo_score": 8, "geo_score": 7, "conversion_score": 9, "difficulty": 4, "reason": "推薦原因"}}
+  {{"topic": "主題", "main_keyword": "主關鍵字", "search_intent": "搜尋意圖簡述", "target_customer": "目標客群",
+    "seo_score": 8, "geo_score": 7, "conversion_score": 9, "difficulty": 4,
+    "business_score": 85, "competition_score": 50, "priority": "A",
+    "suggested_article_type": "採購指南", "related_products": "員工桌,辦公椅",
+    "reason": "推薦原因"}}
 ]"""
 
 def _opportunity_insert_batch(brand, category, items):
@@ -377,14 +454,22 @@ def _opportunity_insert_batch(brand, category, items):
         if existing:
             skipped += 1
             continue
+        extra = _dump_extra({
+            "main_keyword": it.get("main_keyword", ""),
+            "business_score": int(it.get("business_score", 0) or 0),
+            "competition_score": int(it.get("competition_score", 0) or 0),
+            "priority": it.get("priority", "") if it.get("priority") in ("A", "B", "C") else "",
+            "suggested_article_type": it.get("suggested_article_type", ""),
+            "related_products": it.get("related_products", ""),
+        })
         _q("""INSERT INTO seo_opportunities
               (brand,category,topic,search_intent,target_customer,seo_score,geo_score,conversion_score,
-               difficulty,reason,status,created_at,updated_at)
-              VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+               difficulty,reason,status,extra,created_at,updated_at)
+              VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
            (brand, category, topic, it.get("search_intent", ""), it.get("target_customer", ""),
             int(it.get("seo_score", 0) or 0), int(it.get("geo_score", 0) or 0),
             int(it.get("conversion_score", 0) or 0), int(it.get("difficulty", 0) or 0),
-            it.get("reason", ""), "idea", now, now))
+            it.get("reason", ""), "idea", extra, now, now))
         inserted += 1
     return inserted, skipped
 
@@ -402,16 +487,26 @@ def _list_opportunities(brand="", category="", status=""):
             where.append("status=%s"); params.append(status)
         where_sql = (" WHERE " + " AND ".join(where)) if where else ""
         rows = _q(f"""SELECT id,brand,category,topic,search_intent,target_customer,
-                      seo_score,geo_score,conversion_score,difficulty,reason,status,updated_at
+                      seo_score,geo_score,conversion_score,difficulty,reason,status,updated_at,extra
                       FROM seo_opportunities{where_sql}
                       ORDER BY (seo_score+geo_score+conversion_score-difficulty) DESC, id DESC""",
                    tuple(params), fetch="all") or []
-        return [{
-            "id": r[0], "brand": r[1], "category": r[2], "topic": r[3], "search_intent": r[4],
-            "target_customer": r[5], "seo_score": r[6], "geo_score": r[7], "conversion_score": r[8],
-            "difficulty": r[9], "reason": r[10], "status": r[11],
-            "updated_at": time.strftime("%Y-%m-%d %H:%M", time.localtime(r[12])) if r[12] else "",
-        } for r in rows]
+        out = []
+        for r in rows:
+            extra = _parse_extra(r[13])
+            out.append({
+                "id": r[0], "brand": r[1], "category": r[2], "topic": r[3], "search_intent": r[4],
+                "target_customer": r[5], "seo_score": r[6], "geo_score": r[7], "conversion_score": r[8],
+                "difficulty": r[9], "reason": r[10], "status": r[11],
+                "updated_at": time.strftime("%Y-%m-%d %H:%M", time.localtime(r[12])) if r[12] else "",
+                "main_keyword": extra.get("main_keyword", ""),
+                "business_score": extra.get("business_score", 0),
+                "competition_score": extra.get("competition_score", 0),
+                "priority": extra.get("priority", ""),
+                "related_products": extra.get("related_products", ""),
+                "suggested_article_type": extra.get("suggested_article_type", ""),
+            })
+        return out
     except Exception as e:
         import sys; print(f"[SEO Opportunities] 讀取清單失敗：{e}", file=sys.stderr)
         return []
@@ -423,6 +518,173 @@ def _safe_job_error_msg(e):
     if "psycopg2" in text or "connection to server" in text or "OperationalError" in type(e).__name__:
         return "資料庫暫時連線異常，請稍後再試一次。"
     return "發生未預期的錯誤，請稍後再試一次。"
+
+# ── extra（JSON存成TEXT）共用工具：避免大改既有資料表結構 ──────────
+
+def _parse_extra(raw):
+    try:
+        return json.loads(raw) if raw else {}
+    except Exception:
+        return {}
+
+def _dump_extra(d):
+    return json.dumps(d or {}, ensure_ascii=False)
+
+def _update_article_extra(article_id, patch):
+    """讀出 seo_articles.extra，合併patch欄位後寫回（不覆蓋未提及的舊欄位）"""
+    row = _q("SELECT extra FROM seo_articles WHERE id=%s", (article_id,), fetch="one")
+    extra = _parse_extra(row[0] if row else None)
+    extra.update(patch)
+    _q("UPDATE seo_articles SET extra=%s, updated_at=%s WHERE id=%s", (_dump_extra(extra), time.time(), article_id))
+    return extra
+
+# ── 品牌 SEO 規則 ───────────────────────────────────────────────
+
+def _list_brand_rules():
+    if not DATABASE_URL:
+        return []
+    try:
+        rows = _q("""SELECT id,brand,category,positioning,target_audience,key_products,avoid_directions,
+                     tone,cta_direction,keywords,negative_keywords,updated_at
+                     FROM seo_brand_rules ORDER BY brand,category""", fetch="all") or []
+        return [{
+            "id": r[0], "brand": r[1], "category": r[2], "positioning": r[3], "target_audience": r[4],
+            "key_products": r[5], "avoid_directions": r[6], "tone": r[7], "cta_direction": r[8],
+            "keywords": r[9], "negative_keywords": r[10],
+            "updated_at": time.strftime("%Y-%m-%d %H:%M", time.localtime(r[11])) if r[11] else "",
+        } for r in rows]
+    except Exception as e:
+        import sys; print(f"[SEO Brand Rules] 讀取清單失敗：{e}", file=sys.stderr)
+        return []
+
+def _get_brand_rule(brand, category):
+    if not DATABASE_URL or not brand:
+        return {}
+    try:
+        row = _q("""SELECT brand,category,positioning,target_audience,key_products,avoid_directions,
+                    tone,cta_direction,keywords,negative_keywords
+                    FROM seo_brand_rules WHERE brand=%s AND category=%s""", (brand, category), fetch="one")
+        if not row:
+            return {}
+        return {"brand": row[0], "category": row[1], "positioning": row[2], "target_audience": row[3],
+                "key_products": row[4], "avoid_directions": row[5], "tone": row[6],
+                "cta_direction": row[7], "keywords": row[8], "negative_keywords": row[9]}
+    except Exception:
+        return {}
+
+def _save_brand_rule(form):
+    rule_id = form.get("id", "")
+    now = time.time()
+    fields = (form.get("brand", ""), form.get("category", ""), form.get("positioning", ""),
+              form.get("target_audience", ""), form.get("key_products", ""), form.get("avoid_directions", ""),
+              form.get("tone", ""), form.get("cta_direction", ""), form.get("keywords", ""),
+              form.get("negative_keywords", ""))
+    if rule_id:
+        _q("""UPDATE seo_brand_rules SET brand=%s,category=%s,positioning=%s,target_audience=%s,
+              key_products=%s,avoid_directions=%s,tone=%s,cta_direction=%s,keywords=%s,negative_keywords=%s,
+              updated_at=%s WHERE id=%s""", fields + (now, rule_id))
+    else:
+        _q("""INSERT INTO seo_brand_rules
+              (brand,category,positioning,target_audience,key_products,avoid_directions,tone,cta_direction,
+               keywords,negative_keywords,created_at,updated_at)
+              VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""", fields + (now, now))
+
+def _brand_rule_block(rule):
+    """把品牌SEO規則轉成丟進Prompt的文字區塊"""
+    if not rule:
+        return "（沒有套用品牌SEO規則）"
+    return f"""品牌定位：{rule.get('positioning','')}
+目標客群：{rule.get('target_audience','')}
+主打商品：{rule.get('key_products','')}
+禁止偏離方向：{rule.get('avoid_directions','')}
+語氣風格：{rule.get('tone','')}
+CTA方向：{rule.get('cta_direction','')}
+常用關鍵字：{rule.get('keywords','')}
+禁用關鍵字／不建議方向：{rule.get('negative_keywords','')}"""
+
+# ── AI 文章品質檢查 ─────────────────────────────────────────────
+
+def _quality_check_prompt(article, brand_rule, extra):
+    return f"""你是台灣SEO/GEO/AEO內容策略專家，請幫以下文章做發布前品質檢查。
+
+品牌SEO規則（文章必須符合，不可偏離）：
+{_brand_rule_block(brand_rule)}
+
+文章主關鍵字：{extra.get('main_keyword','')}
+文章目標客群：{extra.get('target_audience','')}
+文章對應商品：{extra.get('related_products','')}
+
+標題：{article.get('title','')}
+Meta Title：{article.get('meta_title','')}
+Meta Description：{article.get('meta_description','')}
+文章內容：
+{article.get('content','')[:8000]}
+
+請檢查以下14項：
+1. 標題是否包含主關鍵字
+2. Meta Title是否清楚
+3. Meta Description是否有吸引點擊
+4. 開頭是否直接回答搜尋意圖
+5. 內容是否符合品牌定位
+6. 是否偏離目標客群
+7. 是否有商品導購段落
+8. 是否有對應商品
+9. 是否有FAQ
+10. 是否有CTA
+11. 是否有內部連結建議
+12. 是否需要拆成多篇文章
+13. 是否有內容太泛、太像AI文的問題
+14. 是否有錯誤或不適合品牌的方向（尤其注意是否偏離「禁止偏離方向」）
+
+輸出格式（只輸出JSON，不要其他文字，不要markdown code block）：
+{{
+  "score": 0到100的整數,
+  "recommend_publish": true或false,
+  "issues": "主要問題，條列式文字，找到的問題具體寫出來",
+  "suggestions": "修改建議，具體可執行",
+  "next_status": "從 draft_review/needs_revision/ready_to_publish 選一個",
+  "suggested_sections": "建議補強的段落，例如：補FAQ、補商品導購段落",
+  "suggested_internal_links": "建議內部連結，逗號分隔",
+  "suggested_related_products": "建議對應商品，逗號分隔"
+}}"""
+
+def _run_quality_check_job(job_id, article_id):
+    try:
+        _q("UPDATE seo_quality_check_jobs SET status='running', updated_at=%s WHERE id=%s", (time.time(), job_id))
+        row = _q("""SELECT title,meta_title,meta_description,content,brand_key,category,extra
+                    FROM seo_articles WHERE id=%s""", (article_id,), fetch="one")
+        if not row:
+            _q("UPDATE seo_quality_check_jobs SET status='error', error_msg=%s, updated_at=%s WHERE id=%s",
+               ("找不到這篇文章", time.time(), job_id))
+            return
+        article = {"title": row[0], "meta_title": row[1], "meta_description": row[2], "content": row[3]}
+        brand_key, category = row[4], row[5]
+        extra = _parse_extra(row[6])
+        brand_rule = _get_brand_rule(brand_key, category)
+        prompt = _quality_check_prompt(article, brand_rule, extra)
+        result, err = _ai_call_json(prompt, model="claude-sonnet-4-6", max_tokens=2000)
+        if err:
+            _q("UPDATE seo_quality_check_jobs SET status='error', error_msg=%s, updated_at=%s WHERE id=%s",
+               (f"AI檢查失敗：{err}", time.time(), job_id))
+            return
+        next_status = result.get("next_status", "")
+        if next_status not in ARTICLE_STATUS:
+            next_status = "needs_revision"
+        extra["ai_score"] = int(result.get("score", 0) or 0)
+        extra["quality_check"] = result
+        extra["next_action"] = "人工審稿" if result.get("recommend_publish") else "修改內容"
+        now = time.time()
+        _q("UPDATE seo_articles SET extra=%s, status=%s, updated_at=%s WHERE id=%s",
+           (_dump_extra(extra), next_status, now, article_id))
+        _q("UPDATE seo_quality_check_jobs SET status='done', result=%s, updated_at=%s WHERE id=%s",
+           (_dump_extra(result), now, job_id))
+    except Exception as e:
+        import sys; print(f"[SEO Quality Check Job Error] {e}", file=sys.stderr)
+        try:
+            _q("UPDATE seo_quality_check_jobs SET status='error', error_msg=%s, updated_at=%s WHERE id=%s",
+               (_safe_job_error_msg(e), time.time(), job_id))
+        except Exception:
+            pass
 
 # ── Claude AI 呼叫 ──────────────────────────────────────────────
 
@@ -502,9 +764,19 @@ DEFAULT_GENERATE_PROMPT = """你是台灣SEO/GEO/AEO內容策略專家與文案�
 語氣要求：[[BRAND_TONE]]
 品類：[[CATEGORY]]
 主題：[[TOPIC]]
+主關鍵字：[[MAIN_KEYWORD]]
+搜尋意圖：[[SEARCH_INTENT]]
+目標客群：[[TARGET_AUDIENCE]]
+對應商品（文章必須導向這些商品，自然提及並建議）：[[RELATED_PRODUCTS]]
+禁止偏離方向（絕對不要寫到這些主題或方向）：[[AVOID_DIRECTIONS]]
+CTA方向：[[CTA_DIRECTION]]
+文章類型：[[ARTICLE_TYPE]]
 
 搜尋意圖分析參考：
 [[ANALYSIS]]
+
+品牌SEO規則（重要，整篇文章不可偏離這份規則）：
+[[BRAND_RULE]]
 
 品牌知識庫（真實資料，請優先引用）：
 [[KNOWLEDGE]]
@@ -515,28 +787,52 @@ DEFAULT_GENERATE_PROMPT = """你是台灣SEO/GEO/AEO內容策略專家與文案�
 3. 如果知識庫顯示「沒有符合此品牌/品類的資料」，文章仍要寫完，只是不要編造具體數字或案例去填補
 4. 文章最後（FAQ與CTA之間或CTA之後）新增一個小節，標題為「本篇引用知識庫」：如果有引用，列出引用了哪幾筆資料的標題；如果完全沒有可引用的資料，就寫「本篇未引用品牌知識庫資料，內容為一般專業說明」
 
-━━━ 第一步：判斷文章類型 ━━━
-依主題自動判斷，優先順序：價格型 > 比較型 > 商業型 > 資訊型
-- 價格型（含「費用」「價格」「多少錢」）→ 報價表＋影響因素，語氣直接、數字導向
-- 比較型（含「比較」「vs」「哪個好」）→ 對比表為核心，語氣中立有結論
-- 商業型（含「服務」「推薦」「找哪家」）→ FAQ＋服務說明，解決問題導向
-- 資訊型（含「是什麼」「怎麼做」）→ 定義段落＋步驟，教學口語風格
-文章類型只影響語氣與GEO元素密度，不增減架構段落數。
+━━━ 品牌規則與目標客群（重要） ━━━
+- 嚴格遵守上面的「禁止偏離方向」，絕對不要往那些方向寫
+- 目標客群是[[TARGET_AUDIENCE]]，全文視角、用詞、案例都要對著這群人寫，不要寫成其他客群會看的內容
+- 文章不能只講知識，必須自然導向「對應商品」，至少安排一段具體的商品導購段落
+- CTA要呼應「CTA方向」，自然引導但不要太硬銷
+
+━━━ 第一步：依文章類型規劃架構 ━━━
+文章類型：[[ARTICLE_TYPE]]
+- 導購文 → 商品特色＋適用情境為核心，引導詢價
+- 比較文 → 對比表為核心，語氣中立有結論
+- 尺寸指南 → 規格數據＋空間/人數對照表
+- 案例文 → 情境描述＋解決方案＋成果
+- FAQ文 → 以常見問題集為主體
+- 採購指南 → 採購流程、評估要點、配置建議
+- 問題解決文 → 問題診斷＋解決步驟
+- 品牌介紹文 → 品牌定位、優勢、適合對象
+文章類型只影響語氣與架構重點，下面的GEO結構元素仍然每篇必要。
 
 ━━━ 第二步：規劃架構並寫完整文章 ━━━
 從搜尋意圖挑最值得寫、問題導向、適合Google AI Overview與ChatGPT引用的標題。
-主關鍵字必須出現在：H1標題、文章開頭第一段、至少1個H2小標。
+主關鍵字「[[MAIN_KEYWORD]]」必須出現在：H1標題、文章開頭第一段、至少1個H2小標。
 
 字數目標公式：(H2數量 + H3數量) × 200字 ± 25%
 範例：4個H2 + 4個H3 = 目標約1600字；6個H2 + 6個H3 = 目標約2400字
 不要為了湊字數填廢話，寧可精簡也不要膨脹。
 
+━━━ 固定輸出結構（每篇必要，依序） ━━━
+1. Meta Title
+2. Meta Description
+3. H1標題
+4. 前言（直接回答搜尋意圖）
+5. 主要內容段落（依文章類型規劃，至少2個H2）
+6. 表格或條列比較（HTML <table>或<ul><li>）
+7. 商品導購段落（自然提及「對應商品」，說明適用情境）
+8. 品牌定位段落（簡述[[BRAND_NAME]]的定位與優勢，呼應品牌SEO規則）
+9. FAQ（至少5題，<h3>寫問題，每題80~120字直接回答）
+10. CTA結尾（呼應CTA方向，至少80字）
+11. 建議內部連結（列出2~3個可以連結的相關主題，例如：xx怎麼選、xx比較）
+12. 對應商品建議（重複列出本篇對應的商品，方便編輯加商品連結）
+13. 主關鍵字與長尾關鍵字（列出本篇用到的主關鍵字與3~5個長尾關鍵字）
+
 ━━━ GEO結構元素（每篇必要） ━━━
 1. 至少1個比較表或數據表（用HTML <table><tr><th><td>標籤，AI可直接引用）
 2. 至少2個定義段落，格式：<blockquote><strong>詞彙</strong>：解釋其實際意義與用途</blockquote>
 3. 至少2個條列清單（步驟、重點、注意事項，每點一個概念，用<ul><li>或<ol><li>標籤）
-4. 3~5個FAQ問答，用<h3>標籤寫問題，直接回答不繞彎，每題80~120字
-5. 倒金字塔結構：每個H2開頭先給結論，再展開說明
+4. 倒金字塔結構：每個H2開頭先給結論，再展開說明
 
 ━━━ EEAT佔位符規則 ━━━
 僅在真的缺乏具體資料時使用，每1000字最多1個，一般性陳述不需要。
@@ -550,9 +846,8 @@ DEFAULT_GENERATE_PROMPT = """你是台灣SEO/GEO/AEO內容策略專家與文案�
 - 用具體數字代替模糊描述（「NT$3萬起」而非「價格不便宜」）
 - 不寫「保證」「最好」「絕對」「100%」，不虛構數據或案例
 - 一段2~4句，一段一個概念，不堆砌形容詞
-- 結尾CTA至少80字，明確說明詢價或聯絡方式
-
-段落順序：開頭直接回答問題 → 原因或背景 → 實務建議（規格/挑選/比較視主題而定）→ 商品或服務說明 → FAQ（3~5題）→ 詢價CTA
+- 不要寫得太空泛、太像罐頭AI文章——多用具體場景、具體數字、具體商品名稱
+- FAQ要對應真實搜尋問題，不要硬湊
 
 輸出格式（只輸出JSON，不要其他文字，不要markdown code block）：
 {
@@ -561,7 +856,9 @@ DEFAULT_GENERATE_PROMPT = """你是台灣SEO/GEO/AEO內容策略專家與文案�
   "meta_title": "Meta Title（含品牌名，60字以內）",
   "meta_description": "Meta Description（120字以內，含關鍵字與品牌名）",
   "ai_summary": "AI Overview摘要，100~200字，純文字，包含1~2個關鍵數字或結論",
-  "content": "完整文章內容，純HTML格式（用<h2><h3><p><table><ul><ol><li><blockquote><strong>標籤），絕對不要用Markdown符號（不要##、不要**、不要>開頭的引用），這樣才能直接貼到網站後台的HTML/原始碼模式正常顯示，不需要再轉換"
+  "internal_links": "建議內部連結，逗號分隔，2~3個",
+  "long_tail_keywords": "長尾關鍵字，逗號分隔，3~5個",
+  "content": "完整文章內容，純HTML格式（用<h2><h3><p><table><ul><ol><li><blockquote><strong>標籤），絕對不要用Markdown符號（不要##、不要**、不要>開頭的引用），這樣才能直接貼到網站後台的HTML/原始碼模式正常顯示，不需要再轉換。內容裡要包含上面13點固定結構（Meta部分已經是獨立欄位不用再放進content，從H1開始放進content即可）"
 }"""
 
 def _get_prompt_template(key, default):
@@ -591,13 +888,24 @@ def _analyze_intent_prompt(brand, category, topic):
         BRAND_NAME=brand.get('name', ''), BRAND_CATEGORY=brand.get('category', ''),
         BRAND_STYLE=brand.get('style', ''), CATEGORY=category, TOPIC=topic)
 
-def _generate_article_prompt(brand, category, topic, intent_analysis, knowledge_items=None):
+def _generate_article_prompt(brand, category, topic, intent_analysis, knowledge_items=None, fields=None, brand_rule=None):
+    """fields: 結構化表單欄位 dict（main_keyword/search_intent/target_audience/related_products/
+    avoid_directions/cta_direction/article_type），缺省時用空字串，不影響舊呼叫方式。"""
+    fields = fields or {}
     tmpl = _get_prompt_template("generate", DEFAULT_GENERATE_PROMPT)
     return _fill_tokens(tmpl,
         BRAND_NAME=brand.get('name', ''), BRAND_CATEGORY=brand.get('category', ''),
         BRAND_STYLE=brand.get('style', ''), BRAND_TONE=brand.get('tone', ''),
         CATEGORY=category, TOPIC=topic, ANALYSIS=intent_analysis,
-        KNOWLEDGE=_knowledge_block(knowledge_items or []))
+        KNOWLEDGE=_knowledge_block(knowledge_items or []),
+        MAIN_KEYWORD=fields.get('main_keyword', ''),
+        SEARCH_INTENT=fields.get('search_intent', ''),
+        TARGET_AUDIENCE=fields.get('target_audience', ''),
+        RELATED_PRODUCTS=fields.get('related_products', ''),
+        AVOID_DIRECTIONS=fields.get('avoid_directions', ''),
+        CTA_DIRECTION=fields.get('cta_direction', ''),
+        ARTICLE_TYPE=fields.get('article_type', ''),
+        BRAND_RULE=_brand_rule_block(brand_rule))
 
 # ── Auth（複製自 app.py，避免 circular import，與既有後台共用同一支密碼）──
 
@@ -674,6 +982,7 @@ SIDEBAR_ITEMS = [
     ("seo-opportunities","🎯 主題機會池",    "/admin/seo-opportunities"),
     ("seo-generator",   "✨ AI 生成文章",    "/admin/seo-generator"),
     ("seo-knowledge",   "📚 知識庫管理",     "/admin/seo-knowledge"),
+    ("seo-brand-rules", "🏷️ 品牌SEO規則",   "/admin/seo-brand-rules"),
     ("seo-settings",    "⚙️ Prompt 設定",   "/admin/seo-settings"),
 ]
 
@@ -726,6 +1035,18 @@ th{color:#888;font-weight:600;font-size:11px;text-transform:uppercase}
 .b-已發布{background:#e8f5e9;color:#2e7d32}
 .b-draft{background:#fff8e1;color:#f57f17}
 .b-published{background:#e8f5e9;color:#2e7d32}
+.b-topic_pending{background:#f3e5f5;color:#7b1fa2}
+.b-ai_generating{background:#e3f2fd;color:#1565c0}
+.b-draft_review{background:#fff8e1;color:#f57f17}
+.b-needs_revision{background:#fdecea;color:#c62828}
+.b-ready_to_publish{background:#e0f2f1;color:#00695c}
+.b-needs_optimization{background:#fff3e0;color:#e65100}
+.b-inactive{background:#eceff1;color:#546e7a}
+.scroll-x{overflow-x:auto}
+.score-badge{display:inline-block;min-width:30px;text-align:center;padding:2px 8px;border-radius:10px;font-weight:700;font-size:12px}
+.score-good{background:#e8f5e9;color:#2e7d32}
+.score-warn{background:#fff8e1;color:#f57f17}
+.score-bad{background:#fdecea;color:#c62828}
 input[type=text],select,textarea{width:100%;border:1px solid #ddd;border-radius:6px;padding:7px 9px;font-size:13px;font-family:inherit}
 .add-row{display:flex;gap:8px;margin-top:10px}
 .add-row input{flex:1}
@@ -773,24 +1094,33 @@ form.inline{display:inline}
 
   <div class="section">
     <h3>文章（{{ articles|length }}）</h3>
+    <div class="scroll-x">
     <table>
-      <tr><th>標題</th><th>狀態</th><th>Slug</th><th>更新時間</th><th>操作</th></tr>
+      <tr><th>標題</th><th>狀態</th><th>主關鍵字</th><th>AI評分</th><th>對應商品</th><th>下一步</th><th>更新時間</th><th>操作</th></tr>
       {% for a in articles %}
       <tr>
-        <td>{{ a[1] }}</td>
-        <td><span class="badge b-{{ a[2] }}">{{ article_status_labels.get(a[2], a[2]) }}</span></td>
-        <td>{{ a[3] }}</td>
-        <td>{{ a[4] }}</td>
+        <td style="font-weight:600">{{ a.title }}</td>
+        <td><span class="badge b-{{ a.status }}">{{ article_status_labels.get(a.status, a.status) }}</span></td>
+        <td>{{ a.main_keyword }}</td>
         <td>
-          <a class="link btn-sm" href="/admin/seo/article/{{ a[0] }}?key={{ key }}">編輯</a>
-          <a class="link btn-sm" href="/admin/seo/article/{{ a[0] }}/tracking?key={{ key }}">成效記錄</a>
-          <form class="inline" method="POST" action="/admin/seo/article/{{ a[0] }}/delete?key={{ key }}" onsubmit="return confirm('刪除這篇文章？')">
+          {% if a.ai_score %}
+          <span class="score-badge {{ 'score-good' if a.ai_score>=80 else ('score-warn' if a.ai_score>=60 else 'score-bad') }}">{{ a.ai_score }}</span>
+          {% else %}<span style="color:#bbb">—</span>{% endif %}
+        </td>
+        <td style="max-width:160px;font-size:12px;color:#666">{{ a.related_products }}</td>
+        <td>{% if a.next_action %}<span class="badge" style="background:#eef2ff;color:#3730a3">{{ a.next_action }}</span>{% endif %}</td>
+        <td style="white-space:nowrap">{{ a.updated_at }}</td>
+        <td style="white-space:nowrap">
+          <a class="link btn-sm" href="/admin/seo/article/{{ a.id }}?key={{ key }}">編輯</a>
+          <a class="link btn-sm" href="/admin/seo/article/{{ a.id }}/tracking?key={{ key }}">成效記錄</a>
+          <form class="inline" method="POST" action="/admin/seo/article/{{ a.id }}/delete?key={{ key }}" onsubmit="return confirm('刪除這篇文章？')">
             <button class="btn btn-del btn-sm" type="submit">刪除</button>
           </form>
         </td>
       </tr>
       {% endfor %}
     </table>
+    </div>
     <a class="btn" style="display:inline-block;margin-top:10px;text-decoration:none" href="/admin/seo/article/new?key={{ key }}">+ 新增文章</a>
   </div>
 
@@ -813,6 +1143,18 @@ label:first-child{margin-top:0}
 input[type=text],select,textarea{width:100%;border:1px solid #ddd;border-radius:8px;padding:9px 11px;font-size:14px;font-family:inherit}
 textarea{resize:vertical;line-height:1.7}
 .btn{padding:10px 22px;background:#0d6efd;color:#fff;border:none;border-radius:8px;font-size:14px;font-weight:600;cursor:pointer}
+.btn:disabled{background:#ccc;cursor:not-allowed}
+.btn-outline{background:#fff;color:#0d6efd;border:1.5px solid #0d6efd}
+.loading{font-size:13px;color:#888;margin-top:8px}
+.err{color:#c62828;font-size:13px;margin-top:8px}
+.qc-result{display:none;margin-top:14px;border-radius:10px;padding:14px;background:#fafafa}
+.qc-result.active{display:block}
+.qc-score{display:inline-block;font-size:22px;font-weight:800;padding:4px 16px;border-radius:10px}
+.qc-good{background:#e8f5e9;color:#2e7d32}
+.qc-warn{background:#fff8e1;color:#f57f17}
+.qc-bad{background:#fdecea;color:#c62828}
+.qc-row{margin-top:10px;font-size:13px;line-height:1.6}
+.qc-row b{display:block;font-size:11px;color:#999;text-transform:uppercase;margin-bottom:2px}
 </style></head><body>
 {{ shell|safe }}
 <div class="container">
@@ -824,10 +1166,23 @@ textarea{resize:vertical;line-height:1.7}
     <label>URL Slug</label>
     <input type="text" name="slug" value="{{ a[2] if a else '' }}" placeholder="/blog/xxx">
     <label>狀態</label>
-    <select name="status">
+    <select name="status" id="status-select">
       {% for s in article_status %}
       <option value="{{ s }}" {{ 'selected' if a and a[7]==s else '' }}>{{ article_status_labels[s] }}</option>
       {% endfor %}
+    </select>
+  </div>
+  <div class="section">
+    <label>主關鍵字</label>
+    <input type="text" name="main_keyword" value="{{ extra.main_keyword or '' }}">
+    <label>目標客群</label>
+    <input type="text" name="target_audience" value="{{ extra.target_audience or '' }}">
+    <label>對應商品</label>
+    <input type="text" name="related_products" value="{{ extra.related_products or '' }}">
+    <label>下一步動作</label>
+    <select name="next_action">
+      <option value="">（無）</option>
+      {% for na in next_action_options %}<option value="{{ na }}" {{ 'selected' if extra.next_action==na else '' }}>{{ na }}</option>{% endfor %}
     </select>
   </div>
   <div class="section">
@@ -844,7 +1199,88 @@ textarea{resize:vertical;line-height:1.7}
   </div>
   <button class="btn" type="submit">儲存</button>
 </form>
+
+{% if a %}
+<div class="section">
+  <label>AI 品質檢查</label>
+  <button class="btn btn-outline" id="btn-qc" onclick="doQualityCheck({{ a[0] }})" type="button">🔍 AI 品質檢查</button>
+  <div class="loading" id="qc-loading" style="display:none">AI檢查中，請稍候...</div>
+  <div class="err" id="qc-err"></div>
+  <div class="qc-result" id="qc-result">
+    <span class="qc-score" id="qc-score"></span>
+    <span id="qc-recommend" style="margin-left:10px;font-weight:700"></span>
+    <div class="qc-row"><b>主要問題</b><span id="qc-issues"></span></div>
+    <div class="qc-row"><b>修改建議</b><span id="qc-suggestions"></span></div>
+    <div class="qc-row"><b>建議補強段落</b><span id="qc-sections"></span></div>
+    <div class="qc-row"><b>建議內部連結</b><span id="qc-links"></span></div>
+    <div class="qc-row"><b>建議對應商品</b><span id="qc-products"></span></div>
+    <div class="qc-row"><b>建議下一步狀態</b><span id="qc-next-status"></span>
+      <button class="btn btn-outline" style="margin-left:8px;padding:4px 10px;font-size:11px" type="button" onclick="applyNextStatus()">套用到上面狀態欄位</button>
+    </div>
+  </div>
+  {% if extra.quality_check %}
+  <div class="hint" style="font-size:11px;color:#999;margin-top:8px">上次檢查分數：{{ extra.ai_score }}</div>
+  {% endif %}
 </div>
+{% endif %}
+
+</div>
+<script>
+const KEY = {{ key|tojson }};
+async function safeJson(res){
+  const text = await res.text();
+  try { return JSON.parse(text); }
+  catch(e) { throw new Error('伺服器回應異常（可能是逾時或部署中），請稍後再試。HTTP ' + res.status); }
+}
+let _qcNextStatus = '';
+async function doQualityCheck(articleId){
+  document.getElementById('btn-qc').disabled = true;
+  document.getElementById('qc-loading').style.display = 'block';
+  document.getElementById('qc-err').textContent = '';
+  try {
+    const res = await fetch('/admin/seo/article/' + articleId + '/quality-check?key=' + encodeURIComponent(KEY), {method:'POST'});
+    const data = await safeJson(res);
+    if (data.error) { document.getElementById('qc-err').textContent = data.error; document.getElementById('btn-qc').disabled = false; document.getElementById('qc-loading').style.display = 'none'; return; }
+    await pollQc(data.job_id);
+  } catch(e) {
+    document.getElementById('qc-err').textContent = String(e.message || e);
+    document.getElementById('btn-qc').disabled = false;
+    document.getElementById('qc-loading').style.display = 'none';
+  }
+}
+async function pollQc(jobId){
+  while (true) {
+    await new Promise(r => setTimeout(r, 3000));
+    const res = await fetch('/admin/seo/article/quality-check/status/' + jobId + '?key=' + encodeURIComponent(KEY));
+    const data = await safeJson(res);
+    if (data.status === 'pending' || data.status === 'running') continue;
+    if (data.status === 'error') { document.getElementById('qc-err').textContent = data.error || '檢查失敗'; break; }
+    if (data.status === 'done') { renderQc(data.result); break; }
+  }
+  document.getElementById('btn-qc').disabled = false;
+  document.getElementById('qc-loading').style.display = 'none';
+}
+function renderQc(r){
+  const score = r.score || 0;
+  const el = document.getElementById('qc-score');
+  el.textContent = 'AI評分：' + score + '分';
+  el.className = 'qc-score ' + (score>=80?'qc-good':(score>=60?'qc-warn':'qc-bad'));
+  document.getElementById('qc-recommend').textContent = '是否建議發布：' + (r.recommend_publish ? '是' : '否');
+  document.getElementById('qc-issues').textContent = r.issues || '（無）';
+  document.getElementById('qc-suggestions').textContent = r.suggestions || '（無）';
+  document.getElementById('qc-sections').textContent = r.suggested_sections || '（無）';
+  document.getElementById('qc-links').textContent = r.suggested_internal_links || '（無）';
+  document.getElementById('qc-products').textContent = r.suggested_related_products || '（無）';
+  document.getElementById('qc-next-status').textContent = r.next_status || '（無）';
+  _qcNextStatus = r.next_status || '';
+  document.getElementById('qc-result').classList.add('active');
+}
+function applyNextStatus(){
+  if (!_qcNextStatus) return;
+  const sel = document.getElementById('status-select');
+  for (const opt of sel.options) { if (opt.value === _qcNextStatus) { sel.value = _qcNextStatus; break; } }
+}
+</script>
 """ + SHELL_CLOSE + """
 </body></html>"""
 
@@ -922,6 +1358,7 @@ body{font-family:-apple-system,sans-serif;background:#f5f5f5;color:#333}
 .banner{background:#fdecea;color:#c62828;border-radius:10px;padding:12px 16px;margin-bottom:16px;font-size:13px;font-weight:600}
 .filter-bar{display:flex;gap:10px;align-items:center;margin-bottom:16px;flex-wrap:wrap}
 .filter-bar select{border:1px solid #ddd;border-radius:8px;padding:7px 10px;font-size:13px;background:#fff}
+.scroll-x{overflow-x:auto}
 table{width:100%;border-collapse:collapse;font-size:12px}
 th,td{text-align:left;padding:7px 5px;border-bottom:1px solid #f0f0f0;vertical-align:top}
 th{color:#888;font-weight:600;font-size:10px;text-transform:uppercase}
@@ -930,11 +1367,16 @@ td.reason-cell{max-width:200px;color:#888;font-size:11px}
 input.score{width:42px;text-align:center;border:1px solid #ddd;border-radius:6px;padding:3px;font-size:12px}
 select.status-sel{font-size:11px;padding:4px 6px;border-radius:6px}
 .b-idea{background:#fff8e1;color:#f57f17}
-.b-selected{background:#e3f2fd;color:#1565c0}
-.b-generated{background:#e8f5e9;color:#2e7d32}
+.b-confirmed,.b-selected{background:#e3f2fd;color:#1565c0}
+.b-draft_generated,.b-generated{background:#e8f5e9;color:#2e7d32}
 .b-published{background:#f3e5f5;color:#7b1fa2}
+.b-paused{background:#eceff1;color:#546e7a}
 form.inline{display:inline}
 .row-actions{display:flex;gap:4px;flex-wrap:wrap}
+.priority-tag{font-size:10px;font-weight:800;padding:1px 6px;border-radius:6px;display:inline-block}
+.priority-A{background:#fdecea;color:#c62828}
+.priority-B{background:#fff3e0;color:#e65100}
+.priority-C{background:#eceff1;color:#546e7a}
 </style></head><body>
 {{ shell|safe }}
 <div class="container">
@@ -978,17 +1420,25 @@ form.inline{display:inline}
       </select>
     </form>
 
+    <div class="scroll-x">
     <table>
       <tr>
-        <th>主題</th><th>搜尋意圖</th><th>目標客群</th>
+        <th>主題</th><th>主關鍵字</th><th>搜尋意圖</th><th>目標客群</th>
+        <th>商業價值</th><th>競爭度</th><th>優先級</th><th>對應商品</th><th>建議類型</th>
         <th>SEO</th><th>GEO</th><th>成交</th><th>難度</th>
         <th>推薦原因</th><th>狀態</th><th>操作</th>
       </tr>
       {% for o in items %}
       <tr>
         <td class="topic-cell">{{ o.topic }}<div style="font-size:10px;color:#aaa;font-weight:400">{{ o.brand }} / {{ o.category }}</div></td>
+        <td>{{ o.main_keyword }}</td>
         <td>{{ o.search_intent }}</td>
         <td>{{ o.target_customer }}</td>
+        <td>{{ o.business_score }}</td>
+        <td>{{ o.competition_score }}</td>
+        <td>{% if o.priority %}<span class="priority-tag priority-{{ o.priority }}">{{ o.priority }}</span>{% endif %}</td>
+        <td style="max-width:140px;font-size:11px">{{ o.related_products }}</td>
+        <td>{{ o.suggested_article_type }}</td>
         <form class="inline score-form" method="POST" action="/admin/seo-opportunities/{{ o.id }}/update?key={{ key }}">
         <td><input class="score" type="number" name="seo_score" min="0" max="10" value="{{ o.seo_score }}"></td>
         <td><input class="score" type="number" name="geo_score" min="0" max="10" value="{{ o.geo_score }}"></td>
@@ -1006,6 +1456,8 @@ form.inline{display:inline}
         </form>
             <button class="btn btn-outline btn-sm" type="button"
                data-id="{{ o.id }}" data-brand="{{ o.brand }}" data-category="{{ o.category }}" data-topic="{{ o.topic }}"
+               data-main_keyword="{{ o.main_keyword }}" data-search_intent="{{ o.search_intent }}"
+               data-target_audience="{{ o.target_customer }}" data-related_products="{{ o.related_products }}"
                onclick="goGenerate(this)">用此主題生成</button>
             <form class="inline" method="POST" action="/admin/seo-opportunities/{{ o.id }}/delete?key={{ key }}" onsubmit="return confirm('刪除這個主題？')">
               <button class="btn btn-sm" style="background:#dc3545" type="submit">刪除</button>
@@ -1015,6 +1467,7 @@ form.inline{display:inline}
       </tr>
       {% endfor %}
     </table>
+    </div>
     {% if not items %}<p style="color:#999;font-size:13px;padding:14px 0">目前沒有符合篩選條件的主題，先用上面「AI產生主題池」產生一批。</p>{% endif %}
   </div>
 
@@ -1025,6 +1478,8 @@ function goGenerate(btn){
   const params = new URLSearchParams({
     key: KEY, opp_id: btn.dataset.id, brand: btn.dataset.brand,
     category: btn.dataset.category, topic: btn.dataset.topic,
+    main_keyword: btn.dataset.main_keyword || '', search_intent: btn.dataset.search_intent || '',
+    target_audience: btn.dataset.target_audience || '', related_products: btn.dataset.related_products || '',
   });
   window.location.href = '/admin/seo-generator?' + params.toString();
 }
@@ -1388,6 +1843,94 @@ async function doConfirm(){
 """ + SHELL_CLOSE + """
 </body></html>"""
 
+BRAND_RULES_LIST_HTML = """<!DOCTYPE html>
+<html lang="zh-TW"><head><meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>品牌SEO規則</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:-apple-system,sans-serif;background:#f5f5f5;color:#333}
+""" + SIDEBAR_CSS + """
+.container{max-width:1000px;margin:24px auto;padding:0 16px}
+.section{background:#fff;border-radius:14px;padding:20px;margin-bottom:20px;box-shadow:0 1px 4px rgba(0,0,0,.08)}
+table{width:100%;border-collapse:collapse;font-size:13px}
+th,td{text-align:left;padding:8px 6px;border-bottom:1px solid #f0f0f0;vertical-align:top}
+th{color:#888;font-weight:600;font-size:11px;text-transform:uppercase}
+td.excerpt{max-width:260px;color:#666;font-size:12px}
+.btn{padding:7px 14px;background:#0d6efd;color:#fff;border:none;border-radius:6px;font-size:12px;font-weight:600;cursor:pointer;white-space:nowrap;text-decoration:none;display:inline-block}
+.link{color:#0d6efd;text-decoration:none;font-weight:600;font-size:12px}
+</style></head><body>
+{{ shell|safe }}
+<div class="container">
+  <div class="section">
+    <h3 style="font-size:15px;margin-bottom:12px">品牌SEO規則（{{ rules|length }}）</h3>
+    <table>
+      <tr><th>品牌</th><th>品類</th><th>品牌定位</th><th>目標客群</th><th>禁止偏離方向</th><th>更新時間</th><th>操作</th></tr>
+      {% for r in rules %}
+      <tr>
+        <td>{{ r.brand }}</td><td>{{ r.category }}</td>
+        <td class="excerpt">{{ r.positioning }}</td>
+        <td class="excerpt">{{ r.target_audience }}</td>
+        <td class="excerpt">{{ r.avoid_directions }}</td>
+        <td>{{ r.updated_at }}</td>
+        <td><a class="link" href="/admin/seo-brand-rules/item/{{ r.id }}?key={{ key }}">編輯</a></td>
+      </tr>
+      {% endfor %}
+    </table>
+    <a class="btn" style="margin-top:14px" href="/admin/seo-brand-rules/item/new?key={{ key }}">+ 新增品牌規則</a>
+  </div>
+</div>
+""" + SHELL_CLOSE + """
+</body></html>"""
+
+BRAND_RULE_ITEM_HTML = """<!DOCTYPE html>
+<html lang="zh-TW"><head><meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>品牌SEO規則</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:-apple-system,sans-serif;background:#f5f5f5;color:#333}
+""" + SIDEBAR_CSS + """
+.container{max-width:700px;margin:24px auto;padding:0 16px 80px}
+.section{background:#fff;border-radius:14px;padding:20px;margin-bottom:16px;box-shadow:0 1px 4px rgba(0,0,0,.08)}
+label{font-size:12px;color:#888;font-weight:700;display:block;margin-bottom:5px;margin-top:14px}
+label:first-child{margin-top:0}
+input[type=text],textarea{width:100%;border:1px solid #ddd;border-radius:8px;padding:9px 11px;font-size:14px;font-family:inherit}
+textarea{resize:vertical;line-height:1.6}
+.btn{padding:10px 22px;background:#0d6efd;color:#fff;border:none;border-radius:8px;font-size:14px;font-weight:600;cursor:pointer}
+</style></head><body>
+{{ shell|safe }}
+<div class="container">
+<form method="POST" action="/admin/seo-brand-rules/item/save?key={{ key }}">
+  <input type="hidden" name="id" value="{{ r.id if r else '' }}">
+  <div class="section">
+    <label>品牌（建議用跟AI生成文章一致的品牌Key，例如 jsimple）</label>
+    <input type="text" name="brand" value="{{ r.brand if r else '' }}" required>
+    <label>品類</label>
+    <input type="text" name="category" value="{{ r.category if r else '' }}" required placeholder="例如：辦公家具">
+    <label>品牌定位</label>
+    <textarea name="positioning" rows="3">{{ r.positioning if r else '' }}</textarea>
+    <label>目標客群</label>
+    <textarea name="target_audience" rows="2">{{ r.target_audience if r else '' }}</textarea>
+    <label>主打商品</label>
+    <textarea name="key_products" rows="2">{{ r.key_products if r else '' }}</textarea>
+    <label>禁止偏離方向</label>
+    <textarea name="avoid_directions" rows="2">{{ r.avoid_directions if r else '' }}</textarea>
+    <label>語氣風格</label>
+    <textarea name="tone" rows="2">{{ r.tone if r else '' }}</textarea>
+    <label>CTA方向</label>
+    <textarea name="cta_direction" rows="2">{{ r.cta_direction if r else '' }}</textarea>
+    <label>常用關鍵字</label>
+    <textarea name="keywords" rows="2">{{ r.keywords if r else '' }}</textarea>
+    <label>禁用關鍵字或不建議方向</label>
+    <textarea name="negative_keywords" rows="2">{{ r.negative_keywords if r else '' }}</textarea>
+  </div>
+  <button class="btn" type="submit">儲存</button>
+</form>
+</div>
+""" + SHELL_CLOSE + """
+</body></html>"""
+
 SETTINGS_HTML = """<!DOCTYPE html>
 <html lang="zh-TW"><head><meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
@@ -1471,6 +2014,12 @@ textarea{resize:vertical;line-height:1.7}
 pre{white-space:pre-wrap;font-family:inherit;font-size:13px;line-height:1.7;background:#fafafa;border-radius:8px;padding:12px;max-height:400px;overflow-y:auto}
 .err{color:#c62828;font-size:13px;margin-top:8px}
 .banner{background:#fdecea;color:#c62828;border-radius:10px;padding:12px 16px;margin-bottom:16px;font-size:13px;font-weight:600}
+.grid2{display:grid;grid-template-columns:1fr 1fr;gap:0 16px}
+@media(max-width:640px){.grid2{grid-template-columns:1fr}}
+.checkbox-row{display:flex;align-items:center;gap:8px;margin-top:14px}
+.checkbox-row input{width:auto}
+.checkbox-row label{margin:0}
+.hint{font-size:11px;color:#999;margin-top:4px}
 </style></head><body>
 {{ shell|safe }}
 <div class="container">
@@ -1481,17 +2030,59 @@ pre{white-space:pre-wrap;font-family:inherit;font-size:13px;line-height:1.7;back
 
   <div class="section">
     <input type="hidden" id="opp_id" value="{{ prefill_opp_id }}">
-    <label>1. 選品牌</label>
-    <select id="brand">
-      {% for b in brands %}
-      <option value="{{ b.key }}" data-category="{{ b.category }}" {{ 'selected' if b.key==prefill_brand else '' }}>{{ b.name }}</option>
-      {% endfor %}
-    </select>
-    <label>2. 選品類</label>
-    <input type="text" id="category" value="{{ prefill_category }}" placeholder="例如：高架床">
-    <label>3. 輸入主題</label>
-    <input type="text" id="topic" value="{{ prefill_topic }}" placeholder="例如：高架床房間最小要多大">
-    <button class="btn" id="btn-analyze" onclick="doAnalyze()" {{ 'disabled' if not ai_key_set else '' }}>4. AI 分析搜尋意圖</button>
+    <div class="grid2">
+      <div>
+        <label>品牌</label>
+        <select id="brand">
+          {% for b in brands %}
+          <option value="{{ b.key }}" data-category="{{ b.category }}" {{ 'selected' if b.key==prefill_brand else '' }}>{{ b.name }}</option>
+          {% endfor %}
+        </select>
+      </div>
+      <div>
+        <label>品類</label>
+        <input type="text" id="category" value="{{ prefill_category }}" placeholder="例如：辦公家具">
+      </div>
+    </div>
+
+    <label>主題</label>
+    <input type="text" id="topic" value="{{ prefill_topic }}" placeholder="例如：小型辦公室家具怎麼選？">
+
+    <div class="grid2">
+      <div>
+        <label>主關鍵字</label>
+        <input type="text" id="main_keyword" value="{{ prefill_main_keyword }}" placeholder="例如：小型辦公室家具">
+      </div>
+      <div>
+        <label>文章類型</label>
+        <select id="article_type">
+          {% for t in article_types %}<option value="{{ t }}">{{ t }}</option>{% endfor %}
+        </select>
+      </div>
+    </div>
+
+    <label>搜尋意圖</label>
+    <input type="text" id="search_intent" value="{{ prefill_search_intent }}" placeholder="例如：中小企業採購前想了解辦公桌椅配置方式">
+
+    <label>目標客群</label>
+    <input type="text" id="target_audience" value="{{ prefill_target_audience }}" placeholder="例如：公司採購、老闆、工作室負責人">
+
+    <label>對應商品</label>
+    <input type="text" id="related_products" value="{{ prefill_related_products }}" placeholder="例如：員工桌、主管桌、會議桌、辦公椅">
+
+    <label>禁止偏離方向</label>
+    <input type="text" id="avoid_directions" placeholder="例如：不要寫高架床、學生宿舍、租屋套房">
+
+    <label>CTA方向</label>
+    <input type="text" id="cta_direction" placeholder="例如：提供空間尺寸、人數與預算，可協助配置與報價">
+
+    <div class="checkbox-row">
+      <input type="checkbox" id="apply_brand_rules" checked>
+      <label for="apply_brand_rules">套用品牌SEO規則（選好品牌+品類後自動帶入定位/客群/禁區/CTA，可手動覆寫上面欄位）</label>
+    </div>
+    <div class="hint" id="brand-rule-hint"></div>
+
+    <button class="btn" id="btn-analyze" onclick="doAnalyze()" {{ 'disabled' if not ai_key_set else '' }} style="margin-top:18px">AI 分析搜尋意圖</button>
     <div class="loading" id="loading-analyze" style="display:none">分析中，請稍候...</div>
     <div class="err" id="err-analyze"></div>
   </div>
@@ -1513,12 +2104,34 @@ pre{white-space:pre-wrap;font-family:inherit;font-size:13px;line-height:1.7;back
 </div>
 <script>
 const KEY = {{ key|tojson }};
+const BRAND_RULES = {{ brand_rules_json|safe }};
+
+function applyBrandRule(){
+  if (!document.getElementById('apply_brand_rules').checked) {
+    document.getElementById('brand-rule-hint').textContent = '';
+    return;
+  }
+  const brand = document.getElementById('brand').value;
+  const category = document.getElementById('category').value.trim();
+  const rule = BRAND_RULES[brand + '|' + category];
+  if (!rule) { document.getElementById('brand-rule-hint').textContent = '（這個品牌+品類目前沒有設定品牌SEO規則，可去左側「品牌SEO規則」新增）'; return; }
+  if (!document.getElementById('target_audience').value) document.getElementById('target_audience').value = rule.target_audience || '';
+  if (!document.getElementById('related_products').value) document.getElementById('related_products').value = rule.key_products || '';
+  if (!document.getElementById('avoid_directions').value) document.getElementById('avoid_directions').value = rule.avoid_directions || '';
+  if (!document.getElementById('cta_direction').value) document.getElementById('cta_direction').value = rule.cta_direction || '';
+  document.getElementById('brand-rule-hint').textContent = '✓ 已套用品牌SEO規則（' + brand + ' / ' + category + '）';
+}
+
 document.getElementById('brand').addEventListener('change', function(){
   document.getElementById('category').value = this.selectedOptions[0].dataset.category || '';
+  applyBrandRule();
 });
+document.getElementById('category').addEventListener('blur', applyBrandRule);
+document.getElementById('apply_brand_rules').addEventListener('change', applyBrandRule);
 if (document.getElementById('brand').options.length && !document.getElementById('category').value) {
   document.getElementById('category').value = document.getElementById('brand').selectedOptions[0].dataset.category || '';
 }
+applyBrandRule();
 
 async function doAnalyze(){
   const brand = document.getElementById('brand').value;
@@ -1562,7 +2175,15 @@ async function doGenerate(){
       body: JSON.stringify({
         brand: window._lastBrand, category: window._lastCategory,
         topic: window._lastTopic, analysis: window._lastAnalysis,
-        opp_id: document.getElementById('opp_id').value
+        opp_id: document.getElementById('opp_id').value,
+        main_keyword: document.getElementById('main_keyword').value,
+        search_intent: document.getElementById('search_intent').value,
+        target_audience: document.getElementById('target_audience').value,
+        related_products: document.getElementById('related_products').value,
+        avoid_directions: document.getElementById('avoid_directions').value,
+        cta_direction: document.getElementById('cta_direction').value,
+        article_type: document.getElementById('article_type').value,
+        apply_brand_rules: document.getElementById('apply_brand_rules').checked,
       })
     });
     const data = await safeJson(res);
@@ -1607,8 +2228,18 @@ def seo_dashboard():
     if not ok:
         return render_template_string(LOGIN_HTML, error=None)
     titles = _q("SELECT id,topic,title,status,slug FROM seo_titles ORDER BY id DESC", fetch="all") or []
-    articles = _q("SELECT id,title,status,slug,updated_at FROM seo_articles ORDER BY id DESC", fetch="all") or []
-    articles = [(a[0], a[1], a[2], a[3], time.strftime("%Y-%m-%d %H:%M", time.localtime(a[4])) if a[4] else "") for a in articles]
+    rows = _q("SELECT id,title,status,slug,updated_at,extra FROM seo_articles ORDER BY id DESC", fetch="all") or []
+    articles = []
+    for r in rows:
+        extra = _parse_extra(r[5])
+        articles.append({
+            "id": r[0], "title": r[1], "status": r[2], "slug": r[3],
+            "updated_at": time.strftime("%Y-%m-%d %H:%M", time.localtime(r[4])) if r[4] else "",
+            "main_keyword": extra.get("main_keyword", ""),
+            "ai_score": extra.get("ai_score", 0),
+            "related_products": extra.get("related_products", ""),
+            "next_action": extra.get("next_action", ""),
+        })
     shell = _shell_open(key, "seo", [("文章管理", None)])
     return render_template_string(LIST_HTML, key=key, shell=shell, titles=titles, articles=articles,
         title_status=TITLE_STATUS, article_status_labels=ARTICLE_STATUS_LABELS)
@@ -1650,19 +2281,22 @@ def seo_article_new():
         if row:
             default_title = row[0]
     shell = _shell_open(key, "seo", [("文章管理", "/admin/seo"), ("新增文章", None)])
-    return render_template_string(ARTICLE_HTML, key=key, shell=shell, a=None, default_title=default_title, article_status=ARTICLE_STATUS, article_status_labels=ARTICLE_STATUS_LABELS)
+    return render_template_string(ARTICLE_HTML, key=key, shell=shell, a=None, extra={}, default_title=default_title,
+        article_status=ARTICLE_STATUS, article_status_labels=ARTICLE_STATUS_LABELS, next_action_options=NEXT_ACTION_OPTIONS)
 
 @seo_bp.route("/admin/seo/article/<int:aid>")
 def seo_article_edit(aid):
     ok, key = check_auth()
     if not ok:
         return render_template_string(LOGIN_HTML, error=None)
-    a = _q("""SELECT id,title,slug,meta_title,meta_description,content,ai_summary,status
+    a = _q("""SELECT id,title,slug,meta_title,meta_description,content,ai_summary,status,extra
               FROM seo_articles WHERE id=%s""", (aid,), fetch="one")
     if not a:
         abort(404)
+    extra = _parse_extra(a[8])
     shell = _shell_open(key, "seo", [("文章管理", "/admin/seo"), ("編輯文章", None)])
-    return render_template_string(ARTICLE_HTML, key=key, shell=shell, a=a, default_title="", article_status=ARTICLE_STATUS, article_status_labels=ARTICLE_STATUS_LABELS)
+    return render_template_string(ARTICLE_HTML, key=key, shell=shell, a=a, extra=extra, default_title="",
+        article_status=ARTICLE_STATUS, article_status_labels=ARTICLE_STATUS_LABELS, next_action_options=NEXT_ACTION_OPTIONS)
 
 @seo_bp.route("/admin/seo/article/save", methods=["POST"])
 def seo_article_save():
@@ -1672,21 +2306,26 @@ def seo_article_save():
     f = request.form
     aid = f.get("id", "")
     now = time.time()
+    extra_patch = {"main_keyword": f.get("main_keyword", ""), "target_audience": f.get("target_audience", ""),
+                   "related_products": f.get("related_products", ""), "next_action": f.get("next_action", "")}
     if aid:
+        existing = _q("SELECT extra FROM seo_articles WHERE id=%s", (aid,), fetch="one")
+        extra = _parse_extra(existing[0] if existing else None)
+        extra.update(extra_patch)
         published_at_sql = ", published_at=CASE WHEN status!='published' AND %s='published' THEN %s ELSE published_at END"
         _q(f"""UPDATE seo_articles SET title=%s, slug=%s, meta_title=%s, meta_description=%s,
-               content=%s, ai_summary=%s, status=%s, updated_at=%s {published_at_sql}
+               content=%s, ai_summary=%s, status=%s, extra=%s, updated_at=%s {published_at_sql}
                WHERE id=%s""",
            (f.get("title",""), f.get("slug",""), f.get("meta_title",""), f.get("meta_description",""),
-            f.get("content",""), f.get("ai_summary",""), f.get("status","draft"), now,
-            f.get("status","draft"), now, aid))
+            f.get("content",""), f.get("ai_summary",""), f.get("status","draft_review"), _dump_extra(extra), now,
+            f.get("status","draft_review"), now, aid))
         new_id = aid
     else:
         new_id = _q("""INSERT INTO seo_articles
-               (title,slug,meta_title,meta_description,content,ai_summary,status,created_at,updated_at,published_at)
-               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id""",
+               (title,slug,meta_title,meta_description,content,ai_summary,status,extra,created_at,updated_at,published_at)
+               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id""",
            (f.get("title",""), f.get("slug",""), f.get("meta_title",""), f.get("meta_description",""),
-            f.get("content",""), f.get("ai_summary",""), f.get("status","draft"), now, now,
+            f.get("content",""), f.get("ai_summary",""), f.get("status","draft_review"), _dump_extra(extra_patch), now, now,
             now if f.get("status") == "published" else 0), fetch="id")
     return redirect(f"/admin/seo/article/{new_id}?key={key}")
 
@@ -1698,6 +2337,35 @@ def seo_article_delete(aid):
     _q("DELETE FROM seo_tracking WHERE article_id=%s", (aid,))
     _q("DELETE FROM seo_articles WHERE id=%s", (aid,))
     return redirect(f"/admin/seo?key={key}")
+
+@seo_bp.route("/admin/seo/article/<int:aid>/quality-check", methods=["POST"])
+def seo_article_quality_check(aid):
+    ok, _ = auth_required()
+    if not ok:
+        return jsonify({"error": "unauthorized"}), 403
+    if not ANTHROPIC_API_KEY:
+        return jsonify({"error": "尚未設定 ANTHROPIC_API_KEY，請在 Render → Environment 加上這個環境變數才能使用AI功能"}), 200
+    now = time.time()
+    job_id = _q("INSERT INTO seo_quality_check_jobs (status,article_id,created_at,updated_at) VALUES (%s,%s,%s,%s) RETURNING id",
+                ("pending", aid, now, now), fetch="id")
+    threading.Thread(target=_run_quality_check_job, args=(job_id, aid), daemon=True).start()
+    return jsonify({"job_id": job_id})
+
+@seo_bp.route("/admin/seo/article/quality-check/status/<int:job_id>")
+def seo_article_quality_check_status(job_id):
+    ok, _ = auth_required()
+    if not ok:
+        return jsonify({"error": "unauthorized"}), 403
+    row = _q("SELECT status,result,error_msg FROM seo_quality_check_jobs WHERE id=%s", (job_id,), fetch="one")
+    if not row:
+        return jsonify({"status": "error", "error": "找不到這個檢查任務"})
+    status, result, error_msg = row
+    out = {"status": status}
+    if status == "error":
+        out["error"] = error_msg
+    elif status == "done":
+        out["result"] = _parse_extra(result)
+    return jsonify(out)
 
 @seo_bp.route("/admin/seo/article/<int:aid>/tracking")
 def seo_tracking_view(aid):
@@ -1738,7 +2406,8 @@ def _run_opportunity_job(job_id, brand_key, category):
         _q("UPDATE seo_opportunity_jobs SET status='running', updated_at=%s WHERE id=%s", (time.time(), job_id))
         brand = _get_brand(brand_key)
         knowledge_items = _get_knowledge_for_prompt(brand_key, category, limit=15)
-        prompt = _opportunity_prompt(brand, category, knowledge_items)
+        brand_rule = _get_brand_rule(brand_key, category)
+        prompt = _opportunity_prompt(brand, category, knowledge_items, brand_rule)
         items, err = _ai_call_json_array(prompt, model="claude-sonnet-4-6", max_tokens=6000)
         if err:
             _q("UPDATE seo_opportunity_jobs SET status='error', error_msg=%s, updated_at=%s WHERE id=%s",
@@ -1995,6 +2664,49 @@ def seo_knowledge_import_confirm():
         return jsonify({"error": f"寫入失敗：{_safe_job_error_msg(e)}"}), 200
     return jsonify({"inserted": inserted, "updated": updated})
 
+# ── 品牌SEO規則 ─────────────────────────────────────────────────
+
+@seo_bp.route("/admin/seo-brand-rules")
+def seo_brand_rules_page():
+    ok, key = check_auth()
+    if not ok:
+        return render_template_string(LOGIN_HTML, error=None)
+    rules = _list_brand_rules()
+    shell = _shell_open(key, "seo-brand-rules", [("品牌SEO規則", None)])
+    return render_template_string(BRAND_RULES_LIST_HTML, key=key, shell=shell, rules=rules)
+
+@seo_bp.route("/admin/seo-brand-rules/item/new")
+def seo_brand_rule_new():
+    ok, key = check_auth()
+    if not ok:
+        return render_template_string(LOGIN_HTML, error=None)
+    shell = _shell_open(key, "seo-brand-rules", [("品牌SEO規則", "/admin/seo-brand-rules"), ("新增規則", None)])
+    return render_template_string(BRAND_RULE_ITEM_HTML, key=key, shell=shell, r=None)
+
+@seo_bp.route("/admin/seo-brand-rules/item/<int:rule_id>")
+def seo_brand_rule_edit(rule_id):
+    ok, key = check_auth()
+    if not ok:
+        return render_template_string(LOGIN_HTML, error=None)
+    row = _q("""SELECT id,brand,category,positioning,target_audience,key_products,avoid_directions,
+                tone,cta_direction,keywords,negative_keywords FROM seo_brand_rules WHERE id=%s""",
+              (rule_id,), fetch="one")
+    if not row:
+        abort(404)
+    r = {"id": row[0], "brand": row[1], "category": row[2], "positioning": row[3], "target_audience": row[4],
+         "key_products": row[5], "avoid_directions": row[6], "tone": row[7], "cta_direction": row[8],
+         "keywords": row[9], "negative_keywords": row[10]}
+    shell = _shell_open(key, "seo-brand-rules", [("品牌SEO規則", "/admin/seo-brand-rules"), ("編輯規則", None)])
+    return render_template_string(BRAND_RULE_ITEM_HTML, key=key, shell=shell, r=r)
+
+@seo_bp.route("/admin/seo-brand-rules/item/save", methods=["POST"])
+def seo_brand_rule_save():
+    ok, key = check_auth()
+    if not ok:
+        abort(403)
+    _save_brand_rule(request.form)
+    return redirect(f"/admin/seo-brand-rules?key={key}")
+
 @seo_bp.route("/admin/seo-settings")
 def seo_settings_page():
     ok, key = check_auth()
@@ -2036,10 +2748,20 @@ def seo_generator_page():
     if not ok:
         return render_template_string(LOGIN_HTML, error=None)
     brands = _list_brands()
+    try:
+        rules = _list_brand_rules()
+    except Exception:
+        rules = []
+    brand_rules_map = {f"{r['brand']}|{r['category']}": r for r in rules}
     shell = _shell_open(key, "seo-generator", [("AI 生成文章", None)])
     return render_template_string(GENERATOR_HTML, key=key, shell=shell, brands=brands, ai_key_set=bool(ANTHROPIC_API_KEY),
+        article_types=ARTICLE_TYPES, brand_rules_json=json.dumps(brand_rules_map, ensure_ascii=False),
         prefill_brand=request.args.get("brand", ""), prefill_category=request.args.get("category", ""),
-        prefill_topic=request.args.get("topic", ""), prefill_opp_id=request.args.get("opp_id", ""))
+        prefill_topic=request.args.get("topic", ""), prefill_opp_id=request.args.get("opp_id", ""),
+        prefill_main_keyword=request.args.get("main_keyword", ""),
+        prefill_search_intent=request.args.get("search_intent", ""),
+        prefill_target_audience=request.args.get("target_audience", ""),
+        prefill_related_products=request.args.get("related_products", ""))
 
 @seo_bp.route("/admin/seo-generator/analyze", methods=["POST"])
 def seo_generator_analyze():
@@ -2061,30 +2783,46 @@ def seo_generator_analyze():
         return jsonify({"error": f"AI分析失敗：{err}"}), 200
     return jsonify({"analysis": text})
 
-def _run_generate_job(job_id, brand_key, category, topic, analysis, opp_id=None):
+def _run_generate_job(job_id, brand_key, category, topic, analysis, opp_id=None, fields=None):
+    fields = fields or {}
     try:
         _q("UPDATE seo_generate_jobs SET status='running', updated_at=%s WHERE id=%s", (time.time(), job_id))
         brand = _get_brand(brand_key)
         knowledge_items = _get_knowledge_for_prompt(brand_key, category, limit=10)
-        prompt = _generate_article_prompt(brand, category, topic, analysis, knowledge_items)
+        apply_brand_rules = fields.get("apply_brand_rules", True)
+        brand_rule = _get_brand_rule(brand_key, category) if apply_brand_rules else {}
+        prompt = _generate_article_prompt(brand, category, topic, analysis, knowledge_items, fields, brand_rule)
         result, err = _ai_call_json(prompt, model="claude-sonnet-4-6", max_tokens=8000)
         if err:
             _q("UPDATE seo_generate_jobs SET status='error', error_msg=%s, updated_at=%s WHERE id=%s",
                (f"AI生成失敗：{err}", time.time(), job_id))
             return
         now = time.time()
+        extra = _dump_extra({
+            "main_keyword": fields.get("main_keyword", ""),
+            "search_intent": fields.get("search_intent", "") or analysis[:200],
+            "target_audience": fields.get("target_audience", ""),
+            "related_products": fields.get("related_products", ""),
+            "article_type": fields.get("article_type", ""),
+            "internal_links": result.get("internal_links", ""),
+            "long_tail_keywords": result.get("long_tail_keywords", ""),
+            "ai_score": 0,
+            "quality_check": {},
+            "brand_rule_applied": bool(apply_brand_rules and brand_rule),
+            "next_action": "AI檢查",
+        })
         new_id = _q("""INSERT INTO seo_articles
                (title,slug,meta_title,meta_description,content,ai_summary,status,
-                brand_key,category,created_at,updated_at,published_at)
-               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id""",
+                brand_key,category,extra,created_at,updated_at,published_at)
+               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id""",
            (result.get("title",""), result.get("slug",""), result.get("meta_title",""),
             result.get("meta_description",""), result.get("content",""), result.get("ai_summary",""),
-            "draft", brand_key, category, now, now, 0), fetch="id")
+            "draft_review", brand_key, category, extra, now, now, 0), fetch="id")
         _q("""UPDATE seo_generate_jobs SET status='done', article_id=%s, updated_at=%s WHERE id=%s""",
            (new_id, time.time(), job_id))
         if opp_id:
             try:
-                _q("UPDATE seo_opportunities SET status='generated', updated_at=%s WHERE id=%s", (now, int(opp_id)))
+                _q("UPDATE seo_opportunities SET status='draft_generated', updated_at=%s WHERE id=%s", (now, int(opp_id)))
             except Exception as e:
                 import sys; print(f"[SEO Opportunity] 更新狀態失敗：{e}", file=sys.stderr)
     except Exception as e:
@@ -2106,6 +2844,16 @@ def seo_generator_generate():
     topic = data.get("topic", "")
     analysis = data.get("analysis", "")
     opp_id = data.get("opp_id") or None
+    fields = {
+        "main_keyword": data.get("main_keyword", ""),
+        "search_intent": data.get("search_intent", ""),
+        "target_audience": data.get("target_audience", ""),
+        "related_products": data.get("related_products", ""),
+        "avoid_directions": data.get("avoid_directions", ""),
+        "cta_direction": data.get("cta_direction", ""),
+        "article_type": data.get("article_type", ""),
+        "apply_brand_rules": bool(data.get("apply_brand_rules", True)),
+    }
     if not topic.strip():
         return jsonify({"error": "請輸入主題"}), 400
     if not ANTHROPIC_API_KEY:
@@ -2113,7 +2861,7 @@ def seo_generator_generate():
     now = time.time()
     job_id = _q("INSERT INTO seo_generate_jobs (status,created_at,updated_at) VALUES (%s,%s,%s) RETURNING id",
                 ("pending", now, now), fetch="id")
-    threading.Thread(target=_run_generate_job, args=(job_id, brand_key, category, topic, analysis, opp_id), daemon=True).start()
+    threading.Thread(target=_run_generate_job, args=(job_id, brand_key, category, topic, analysis, opp_id, fields), daemon=True).start()
     return jsonify({"job_id": job_id})
 
 @seo_bp.route("/admin/seo-generator/generate/status/<int:job_id>")
@@ -2247,6 +2995,87 @@ def _list_categories():
     rows = _q("SELECT DISTINCT category FROM seo_articles WHERE category != '' ORDER BY category", fetch="all") or []
     return [r[0] for r in rows]
 
+def _today_tasks(brand_key="", category=""):
+    """產生「今日SEO任務」清單。邏輯先簡化成5條固定規則，純Python判斷，不用AI，避免每次開儀表板都耗費API成本。"""
+    tasks = []
+    a_where = []
+    a_params = []
+    if brand_key:
+        a_where.append("brand_key=%s"); a_params.append(brand_key)
+    if category:
+        a_where.append("category=%s"); a_params.append(category)
+    a_where_sql = (" AND " + " AND ".join(a_where)) if a_where else ""
+    try:
+        # 1. 草稿待審 → 審核草稿
+        rows = _q(f"""SELECT id,title,brand_key,category FROM seo_articles
+                      WHERE status IN ('draft_review','draft'){a_where_sql}
+                      ORDER BY updated_at DESC LIMIT 5""", tuple(a_params), fetch="all") or []
+        for r in rows:
+            tasks.append({"priority": "中", "name": f"審核草稿：{r[1]}", "reason": "文章已生成，等待人工審稿",
+                          "action": "審核草稿", "brand": r[2], "category": r[3], "link": f"/admin/seo/article/{r[0]}"})
+
+        # 2. 待產出主題 → 生成文章
+        t_where = ["status='待寫'"]
+        if category:
+            t_where.append("topic=%s")
+        rows2 = _q(f"SELECT id,topic,title FROM seo_titles WHERE {' AND '.join(t_where)} ORDER BY id DESC LIMIT 5",
+                   (category,) if category else (), fetch="all") or []
+        for r in rows2:
+            tasks.append({"priority": "低", "name": f"生成文章：{r[2]}", "reason": "標題庫已建立，尚未產生草稿",
+                          "action": "生成文章", "brand": brand_key, "category": r[1] or category,
+                          "link": f"/admin/seo-generator?topic={r[2]}&category={r[1] or category}&brand={brand_key}"})
+
+        # 3. 已發布但曝光為0 → 檢查收錄或等待數據
+        rows3 = _q(f"""SELECT a.id,a.title,a.brand_key,a.category FROM seo_articles a
+                      LEFT JOIN (
+                        SELECT t1.* FROM seo_tracking t1
+                        INNER JOIN (SELECT article_id, MAX(id) AS max_id FROM seo_tracking GROUP BY article_id) t2
+                          ON t1.article_id = t2.article_id AND t1.id = t2.max_id
+                      ) t ON t.article_id = a.id
+                      WHERE a.status='published' AND (t.impressions IS NULL OR t.impressions=0){a_where_sql.replace('brand_key','a.brand_key').replace('category','a.category')}
+                      ORDER BY a.updated_at DESC LIMIT 5""", tuple(a_params), fetch="all") or []
+        for r in rows3:
+            tasks.append({"priority": "中", "name": f"檢查收錄：{r[1]}", "reason": "已發布但目前曝光為0，可能尚未被收錄",
+                          "action": "檢查收錄／等待數據", "brand": r[2], "category": r[3], "link": f"/admin/seo/article/{r[0]}"})
+
+        # 4. CTR < 2% → 優化標題與Meta
+        rows4 = _q(f"""SELECT a.id,a.title,a.brand_key,a.category,t.clicks,t.impressions FROM seo_articles a
+                      INNER JOIN (
+                        SELECT t1.* FROM seo_tracking t1
+                        INNER JOIN (SELECT article_id, MAX(id) AS max_id FROM seo_tracking GROUP BY article_id) t2
+                          ON t1.article_id = t2.article_id AND t1.id = t2.max_id
+                      ) t ON t.article_id = a.id
+                      WHERE a.status='published' AND t.impressions>0{a_where_sql.replace('brand_key','a.brand_key').replace('category','a.category')}
+                      ORDER BY a.updated_at DESC LIMIT 30""", tuple(a_params), fetch="all") or []
+        count = 0
+        for r in rows4:
+            ctr = (r[4] or 0) / r[5] * 100 if r[5] else 0
+            if ctr < 2:
+                tasks.append({"priority": "高", "name": f"優化標題與Meta：{r[1]}", "reason": f"CTR僅{round(ctr,2)}%，低於2%門檻",
+                              "action": "優化標題／Meta", "brand": r[2], "category": r[3], "link": f"/admin/seo/article/{r[0]}"})
+                count += 1
+                if count >= 5:
+                    break
+
+        # 5. AI評分 < 70 → 重新修改文章
+        rows5 = _q(f"SELECT id,title,brand_key,category,extra FROM seo_articles WHERE extra IS NOT NULL{a_where_sql} ORDER BY updated_at DESC LIMIT 30",
+                   tuple(a_params), fetch="all") or []
+        count = 0
+        for r in rows5:
+            score = _parse_extra(r[4]).get("ai_score", 0)
+            if score and score < 70:
+                tasks.append({"priority": "高", "name": f"重新修改文章：{r[1]}", "reason": f"AI評分{score}分，低於70分門檻",
+                              "action": "修改內容", "brand": r[2], "category": r[3], "link": f"/admin/seo/article/{r[0]}"})
+                count += 1
+                if count >= 5:
+                    break
+    except Exception as e:
+        import sys; print(f"[SEO Today Tasks] {e}", file=sys.stderr)
+
+    order = {"高": 0, "中": 1, "低": 2}
+    tasks.sort(key=lambda t: order.get(t["priority"], 3))
+    return tasks
+
 def _get_ai_suggestion(force=False):
     """絕不丟例外給呼叫端——任何失敗都回傳一句友善訊息，確保 Dashboard 一定能正常開啟。"""
     try:
@@ -2334,6 +3163,15 @@ th{color:#888;font-weight:600;font-size:11px;text-transform:uppercase}
 .rank-tab.active{background:#0d6efd;border-color:#0d6efd;color:#fff}
 .rank-panel{display:none}
 .rank-panel.active{display:block}
+.priority-tag{font-size:11px;font-weight:800;padding:2px 8px;border-radius:6px;display:inline-block}
+.priority-A{background:#fdecea;color:#c62828}
+.priority-B{background:#fff3e0;color:#e65100}
+.priority-C{background:#eceff1;color:#546e7a}
+.grid2col{display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:20px}
+@media(max-width:800px){.grid2col{grid-template-columns:1fr}}
+.mini-row{display:flex;justify-content:space-between;align-items:center;gap:10px;padding:8px 0;border-bottom:1px solid #f0f0f0;font-size:13px}
+.mini-row:last-child{border-bottom:none}
+.task-link{color:#0d6efd;text-decoration:none;font-weight:600;font-size:12px;white-space:nowrap}
 </style></head><body>
 {{ shell|safe }}
 <div class="container">
@@ -2368,6 +3206,52 @@ th{color:#888;font-weight:600;font-size:11px;text-transform:uppercase}
     </div>
     <div class="stat-card"><div class="label">本月成交金額</div><div class="value">${{ stats.cur.revenue }}</div>
       {% if stats.pct.revenue is not none %}<div class="delta {{ 'delta-up' if stats.pct.revenue>=0 else 'delta-down' }}">{{ '↑' if stats.pct.revenue>=0 else '↓' }} {{ stats.pct.revenue|abs }}% 較上月</div>{% endif %}
+    </div>
+  </div>
+
+  <div class="section">
+    <h3>📋 今日 SEO 任務（{{ today_tasks|length }}）</h3>
+    {% if today_tasks %}
+    <table>
+      <tr><th>優先級</th><th>任務名稱</th><th>原因</th><th>建議動作</th><th>品牌</th><th>類別</th><th>操作</th></tr>
+      {% for t in today_tasks %}
+      <tr>
+        <td><span class="priority-tag priority-{{ {'高':'A','中':'B','低':'C'}[t.priority] }}">{{ t.priority }}</span></td>
+        <td style="font-weight:600">{{ t.name }}</td>
+        <td style="color:#888;font-size:12px">{{ t.reason }}</td>
+        <td>{{ t.action }}</td>
+        <td>{{ t.brand }}</td><td>{{ t.category }}</td>
+        <td><a class="task-link" href="{{ t.link }}?key={{ key }}">前往處理 →</a></td>
+      </tr>
+      {% endfor %}
+    </table>
+    {% else %}
+    <p style="color:#999;font-size:13px;padding:10px 0">目前沒有待辦任務，文章與數據都還算正常 🎉</p>
+    {% endif %}
+  </div>
+
+  <div class="grid2col">
+    <div class="section">
+      <h3>📝 待審草稿（{{ draft_articles|length }}）</h3>
+      {% for d in draft_articles %}
+      <div class="mini-row">
+        <div><b>{{ d.title }}</b><div style="font-size:11px;color:#999">{{ d.brand }} / {{ d.category }} · {{ d.updated_at }}</div></div>
+        <a class="task-link" href="/admin/seo/article/{{ d.id }}?key={{ key }}">審核 →</a>
+      </div>
+      {% else %}
+      <p style="color:#999;font-size:13px">目前沒有待審草稿。</p>
+      {% endfor %}
+    </div>
+    <div class="section">
+      <h3>🎯 高優先主題機會（{{ top_opps|length }}）</h3>
+      {% for o in top_opps %}
+      <div class="mini-row">
+        <div><b>{{ o.topic }}</b><div style="font-size:11px;color:#999">{{ o.brand }} / {{ o.category }} · 商業價值{{ o.business_score }}</div></div>
+        <a class="task-link" href="/admin/seo-opportunities?key={{ key }}">查看 →</a>
+      </div>
+      {% else %}
+      <p style="color:#999;font-size:13px">目前沒有A級優先主題，去主題機會池產生一批。</p>
+      {% endfor %}
     </div>
   </div>
 
@@ -2458,10 +3342,33 @@ def seo_dashboard_page():
         categories = _list_categories()
     except Exception:
         brands, categories = [], []
+    try:
+        today_tasks = _today_tasks(brand_key, category)
+    except Exception as e:
+        import sys; print(f"[SEO Dashboard] 今日任務計算失敗：{e}", file=sys.stderr)
+        today_tasks = []
+    try:
+        draft_articles = _q(f"""SELECT id,title,brand_key,category,updated_at FROM seo_articles
+                                 WHERE status IN ('draft_review','draft')
+                                 {"AND brand_key=%s" if brand_key else ""} {"AND category=%s" if category else ""}
+                                 ORDER BY updated_at DESC LIMIT 8""",
+                             tuple(p for p in [brand_key, category] if p), fetch="all") or []
+        draft_articles = [{"id": r[0], "title": r[1], "brand": r[2], "category": r[3],
+                            "updated_at": time.strftime("%Y-%m-%d %H:%M", time.localtime(r[4])) if r[4] else ""} for r in draft_articles]
+    except Exception as e:
+        import sys; print(f"[SEO Dashboard] 待審草稿讀取失敗：{e}", file=sys.stderr)
+        draft_articles = []
+    try:
+        top_opps = _list_opportunities(brand_key, category)
+        top_opps = [o for o in top_opps if o.get("priority") == "A" and o["status"] in ("idea", "confirmed")][:8]
+    except Exception as e:
+        import sys; print(f"[SEO Dashboard] 高優先主題讀取失敗：{e}", file=sys.stderr)
+        top_opps = []
     suggestion, gen_at = _get_ai_suggestion()
     shell = _shell_open(key, "seo-dashboard", [("SEO 營運中心", None)])
     return render_template_string(DASHBOARD_HTML, key=key, shell=shell, items=items,
         brand_key=brand_key, category=category, brands=brands, categories=categories, stats=stats,
+        today_tasks=today_tasks, draft_articles=draft_articles, top_opps=top_opps,
         top_clicks=_top_n(items, "clicks"), top_ctr=_top_n(items, "ctr"),
         top_inquiries=_top_n(items, "line_inquiries"), top_orders=_top_n(items, "orders"),
         top_revenue=_top_n(items, "revenue"),
