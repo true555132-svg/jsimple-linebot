@@ -826,6 +826,9 @@ def scrape_taobao(page, url):
                     const i = window.__INIT_DATA__ || null;
                     const gi = g && (g.item || g.data?.item) || null;
                     const ii = i && (i.item || i.data?.item) || null;
+                    const safeStr = (o) => { try { return JSON.stringify(o); } catch(e) { return String(e); } };
+                    const cache = window.__general_skupanel_cache_data || null;
+                    const initPanel = window.__general_skupanel_initPanel || null;
                     return {
                         hasGlobal: !!g, hasInit: !!i,
                         globalTopKeys: keys(g),
@@ -835,6 +838,10 @@ def scrape_taobao(page, url):
                         globalSkuCoreKeys: keys(gi && gi.skuCore),
                         initSkuCoreKeys: keys(ii && ii.skuCore),
                         windowKeysWithSku: Object.keys(window).filter(k => /sku|Sku|GLOBAL|INIT|PAGE/i.test(k)),
+                        skupanelCacheKeys: keys(cache),
+                        skupanelCacheDump: safeStr(cache).slice(0, 4000),
+                        skupanelInitPanelKeys: keys(initPanel),
+                        skupanelInitPanelDump: safeStr(initPanel).slice(0, 4000),
                     };
                 }""")
                 print(f"    [淘寶診斷] {json.dumps(diag, ensure_ascii=False)}")
