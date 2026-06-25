@@ -2101,7 +2101,17 @@ function tab5Html(j){
   h += `<div class="compare-col-hd">原始資料</div>`;
   h += `<div class="section"><div class="slabel">平台 / 來源網址</div><div class="rbox">${esc(j.platform)} — <a href="${esc(j.url)}" target="_blank" style="color:#1a73e8;word-break:break-all">${esc(j.url)}</a></div></div>`;
   if(j.raw_title) h+=`<div class="section"><div class="slabel">原始標題</div><div class="rbox">${esc(j.raw_title)}</div></div>`;
-  if(j.raw_price) h+=`<div class="section"><div class="slabel">原始價格</div><div class="rbox">${esc(j.raw_price)}</div></div>`;
+  if(j.raw_price) h+=`<div class="section"><div class="slabel">原始價格（人民幣）</div><div class="rbox">¥ ${esc(j.raw_price)}</div></div>`;
+  const re2 = j.raw_extra || {};
+  if(re2.sku_props && re2.sku_props.length){
+    let sp = re2.sku_props.map(p=>`<b>${esc(p.name)}</b>：${(p.values||[]).map(v=>esc(v.name)).join('、')}`).join('<br>');
+    h+=`<div class="section"><div class="slabel">規格選項</div><div class="rbox" style="line-height:1.8">${sp}</div></div>`;
+  }
+  if(re2.sku_prices && re2.sku_prices.length){
+    const prices2 = re2.sku_prices.map(s=>`¥${esc(s.price)}`);
+    const uniq2 = [...new Set(prices2)];
+    h+=`<div class="section"><div class="slabel">多規格價格（共 ${re2.sku_prices.length} 筆）</div><div class="rbox">${uniq2.slice(0,20).join('　')}</div></div>`;
+  }
   if(j.raw_desc)  h+=`<div class="section"><div class="slabel">原始描述</div><div class="rbox" style="max-height:220px;overflow-y:auto">${esc(j.raw_desc.slice(0,1500))}${j.raw_desc.length>1500?"…":""}</div></div>`;
   return h;
 }
