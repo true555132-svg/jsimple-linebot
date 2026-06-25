@@ -135,6 +135,36 @@ def init_seo_db():
                     updated_at   FLOAT DEFAULT 0
                 )
             """)
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS seo_opportunities (
+                    id               SERIAL PRIMARY KEY,
+                    brand            TEXT DEFAULT '',
+                    category         TEXT DEFAULT '',
+                    topic            TEXT NOT NULL DEFAULT '',
+                    search_intent    TEXT DEFAULT '',
+                    target_customer  TEXT DEFAULT '',
+                    seo_score        INTEGER DEFAULT 0,
+                    geo_score        INTEGER DEFAULT 0,
+                    conversion_score INTEGER DEFAULT 0,
+                    difficulty       INTEGER DEFAULT 0,
+                    reason           TEXT DEFAULT '',
+                    status           TEXT DEFAULT 'idea',
+                    created_at       FLOAT DEFAULT 0,
+                    updated_at       FLOAT DEFAULT 0
+                )
+            """)
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_seo_opportunities_filter ON seo_opportunities(brand, category, status)")
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS seo_opportunity_jobs (
+                    id             SERIAL PRIMARY KEY,
+                    status         TEXT DEFAULT 'pending',
+                    inserted_count INTEGER DEFAULT 0,
+                    skipped_count  INTEGER DEFAULT 0,
+                    error_msg      TEXT DEFAULT '',
+                    created_at     FLOAT DEFAULT 0,
+                    updated_at     FLOAT DEFAULT 0
+                )
+            """)
             conn.commit()
             cur.close()
             conn.close()
@@ -297,6 +327,93 @@ def _knowledge_upsert(brand, category, items):
                (brand, category, ktype, title, content, tags, allow_ai, now, now))
             inserted += 1
     return inserted, updated
+
+# ── SEO Opportunity 主題池 ─────────────────────────────────────
+
+OPPORTUNITY_STATUS = ["idea", "selected", "generated", "published"]
+OPPORTUNITY_STATUS_LABELS = {"idea": "待評估", "selected": "已選定", "generated": "已生成", "published": "已發布"}
+
+def _opportunity_prompt(brand, category, knowledge_items):
+    return f"""你是台灣SEO/GEO/AEO內容策略專家。請根據以下品牌資訊，產生20個有價值的SEO文章主題。
+
+品牌：{brand.get('name','')}（{brand.get('category','')}）
+品牌風格：{brand.get('style','')}
+品類：{category}
+
+品牌知識庫參考（真實資料，主題應該盡量貼近這些內容，不要憑空想像不存在的功能或案例）：
+{_knowledge_block(knowledge_items)}
+
+請產生20個SEO文章主題，要求：
+1. 是真實使用者會搜尋的問題，不要空泛的標題
+2. 涵蓋不同類型：價格型、比較型、商業型、資訊型都要有，不要全部都一樣
+3. 盡量能對應到上面知識庫的真實商品/案例/特色
+
+每個主題請評估：
+- seo_score（1~10）：搜尋量與排名機會
+- geo_score（1~10）：適合被Google AI Overview / ChatGPT引用的程度
+- conversion_score（1~10）：帶來詢價/成交的機會
+- difficulty（1~10）：競爭難度，10代表最難
+- reason：50字以內，說明為什麼推薦這個主題
+
+輸出格式（只輸出JSON陣列，不要其他文字，不要markdown code block）：
+[
+  {{"topic": "主題", "search_intent": "搜尋意圖簡述", "target_customer": "目標客群",
+    "seo_score": 8, "geo_score": 7, "conversion_score": 9, "difficulty": 4, "reason": "推薦原因"}}
+]"""
+
+def _opportunity_insert_batch(brand, category, items):
+    """依 brand+category+topic（去頭尾空白、不分大小寫）比對，重複就跳過（不覆蓋既有狀態與分數）。回傳 (inserted, skipped)。"""
+    inserted = 0
+    skipped = 0
+    now = time.time()
+    for it in items:
+        topic = (it.get("topic") or "").strip()
+        if not topic:
+            continue
+        existing = _q("""SELECT id FROM seo_opportunities
+                          WHERE brand=%s AND category=%s AND LOWER(TRIM(topic))=LOWER(TRIM(%s))""",
+                       (brand, category, topic), fetch="one")
+        if existing:
+            skipped += 1
+            continue
+        _q("""INSERT INTO seo_opportunities
+              (brand,category,topic,search_intent,target_customer,seo_score,geo_score,conversion_score,
+               difficulty,reason,status,created_at,updated_at)
+              VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+           (brand, category, topic, it.get("search_intent", ""), it.get("target_customer", ""),
+            int(it.get("seo_score", 0) or 0), int(it.get("geo_score", 0) or 0),
+            int(it.get("conversion_score", 0) or 0), int(it.get("difficulty", 0) or 0),
+            it.get("reason", ""), "idea", now, now))
+        inserted += 1
+    return inserted, skipped
+
+def _list_opportunities(brand="", category="", status=""):
+    if not DATABASE_URL:
+        return []
+    try:
+        where = []
+        params = []
+        if brand:
+            where.append("brand=%s"); params.append(brand)
+        if category:
+            where.append("category=%s"); params.append(category)
+        if status:
+            where.append("status=%s"); params.append(status)
+        where_sql = (" WHERE " + " AND ".join(where)) if where else ""
+        rows = _q(f"""SELECT id,brand,category,topic,search_intent,target_customer,
+                      seo_score,geo_score,conversion_score,difficulty,reason,status,updated_at
+                      FROM seo_opportunities{where_sql}
+                      ORDER BY (seo_score+geo_score+conversion_score-difficulty) DESC, id DESC""",
+                   tuple(params), fetch="all") or []
+        return [{
+            "id": r[0], "brand": r[1], "category": r[2], "topic": r[3], "search_intent": r[4],
+            "target_customer": r[5], "seo_score": r[6], "geo_score": r[7], "conversion_score": r[8],
+            "difficulty": r[9], "reason": r[10], "status": r[11],
+            "updated_at": time.strftime("%Y-%m-%d %H:%M", time.localtime(r[12])) if r[12] else "",
+        } for r in rows]
+    except Exception as e:
+        import sys; print(f"[SEO Opportunities] 讀取清單失敗：{e}", file=sys.stderr)
+        return []
 
 # ── Claude AI 呼叫 ──────────────────────────────────────────────
 
@@ -542,12 +659,13 @@ SIDEBAR_CSS = """
 """
 
 SIDEBAR_ITEMS = [
-    ("home",           "🏠 後台首頁",       "/admin"),
-    ("seo-dashboard",  "📊 SEO 營運中心",   "/admin/seo-dashboard"),
-    ("seo",            "📝 文章管理",       "/admin/seo"),
-    ("seo-generator",  "✨ AI 生成文章",    "/admin/seo-generator"),
-    ("seo-knowledge",  "📚 知識庫管理",     "/admin/seo-knowledge"),
-    ("seo-settings",   "⚙️ Prompt 設定",   "/admin/seo-settings"),
+    ("home",            "🏠 後台首頁",       "/admin"),
+    ("seo-dashboard",   "📊 SEO 營運中心",   "/admin/seo-dashboard"),
+    ("seo",             "📝 文章管理",       "/admin/seo"),
+    ("seo-opportunities","🎯 主題機會池",    "/admin/seo-opportunities"),
+    ("seo-generator",   "✨ AI 生成文章",    "/admin/seo-generator"),
+    ("seo-knowledge",   "📚 知識庫管理",     "/admin/seo-knowledge"),
+    ("seo-settings",    "⚙️ Prompt 設定",   "/admin/seo-settings"),
 ]
 
 SHELL_CLOSE = "</div></div></div>"
@@ -769,6 +887,185 @@ th{color:#888;font-weight:600;font-size:11px;text-transform:uppercase}
     </form>
   </div>
 </div>
+""" + SHELL_CLOSE + """
+</body></html>"""
+
+OPPORTUNITIES_HTML = """<!DOCTYPE html>
+<html lang="zh-TW"><head><meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>SEO 主題機會池</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:-apple-system,sans-serif;background:#f5f5f5;color:#333}
+""" + SIDEBAR_CSS + """
+.container{max-width:1200px;margin:24px auto;padding:0 16px 60px}
+.section{background:#fff;border-radius:14px;padding:20px;margin-bottom:20px;box-shadow:0 1px 4px rgba(0,0,0,.08)}
+.section h3{font-size:15px;margin-bottom:12px}
+.gen-bar{display:flex;gap:10px;align-items:flex-end;flex-wrap:wrap}
+.gen-bar select,.gen-bar input[type=text]{border:1px solid #ddd;border-radius:8px;padding:8px 10px;font-size:13px}
+.gen-bar label{display:block;font-size:11px;color:#999;font-weight:700;margin-bottom:4px}
+.btn{padding:9px 18px;background:#0d6efd;color:#fff;border:none;border-radius:8px;font-size:13px;font-weight:600;cursor:pointer;white-space:nowrap}
+.btn:disabled{background:#ccc;cursor:not-allowed}
+.btn-sm{padding:5px 12px;font-size:11px}
+.btn-outline{background:#fff;color:#0d6efd;border:1.5px solid #0d6efd}
+.loading{font-size:13px;color:#888;margin-top:8px}
+.err{color:#c62828;font-size:13px;margin-top:8px}
+.banner{background:#fdecea;color:#c62828;border-radius:10px;padding:12px 16px;margin-bottom:16px;font-size:13px;font-weight:600}
+.filter-bar{display:flex;gap:10px;align-items:center;margin-bottom:16px;flex-wrap:wrap}
+.filter-bar select{border:1px solid #ddd;border-radius:8px;padding:7px 10px;font-size:13px;background:#fff}
+table{width:100%;border-collapse:collapse;font-size:12px}
+th,td{text-align:left;padding:7px 5px;border-bottom:1px solid #f0f0f0;vertical-align:top}
+th{color:#888;font-weight:600;font-size:10px;text-transform:uppercase}
+td.topic-cell{max-width:220px;font-weight:700}
+td.reason-cell{max-width:200px;color:#888;font-size:11px}
+input.score{width:42px;text-align:center;border:1px solid #ddd;border-radius:6px;padding:3px;font-size:12px}
+select.status-sel{font-size:11px;padding:4px 6px;border-radius:6px}
+.b-idea{background:#fff8e1;color:#f57f17}
+.b-selected{background:#e3f2fd;color:#1565c0}
+.b-generated{background:#e8f5e9;color:#2e7d32}
+.b-published{background:#f3e5f5;color:#7b1fa2}
+form.inline{display:inline}
+.row-actions{display:flex;gap:4px;flex-wrap:wrap}
+</style></head><body>
+{{ shell|safe }}
+<div class="container">
+
+  {% if not ai_key_set %}
+  <div class="banner">⚠️ 尚未設定 ANTHROPIC_API_KEY，AI主題產生功能目前無法使用。請在 Render → Environment 加上這個環境變數後再試。</div>
+  {% endif %}
+
+  <div class="section">
+    <h3>AI 產生主題池</h3>
+    <div class="gen-bar">
+      <div><label>品牌</label>
+        <select id="gen-brand">
+          <option value="">（不限品牌）</option>
+          {% for b in brands %}<option value="{{ b.key }}">{{ b.name }}</option>{% endfor %}
+        </select>
+      </div>
+      <div><label>品類</label>
+        <input type="text" id="gen-category" placeholder="例如：高架床">
+      </div>
+      <button class="btn" id="btn-generate" onclick="doGenerate()" {{ 'disabled' if not ai_key_set else '' }}>🎯 AI產生20個主題</button>
+    </div>
+    <div class="loading" id="loading-generate" style="display:none">AI產生主題中，會讀取品牌資料與知識庫，可能需要1分鐘，請稍候...</div>
+    <div class="err" id="err-generate"></div>
+  </div>
+
+  <div class="section">
+    <form class="filter-bar" method="GET" action="/admin/seo-opportunities">
+      <input type="hidden" name="key" value="{{ key }}">
+      <select name="brand" onchange="this.form.submit()">
+        <option value="">全部品牌</option>
+        {% for b in brands %}<option value="{{ b.key }}" {{ 'selected' if b.key==brand else '' }}>{{ b.name }}</option>{% endfor %}
+      </select>
+      <select name="category" onchange="this.form.submit()">
+        <option value="">全部品類</option>
+        {% for c in categories %}<option value="{{ c }}" {{ 'selected' if c==category else '' }}>{{ c }}</option>{% endfor %}
+      </select>
+      <select name="status" onchange="this.form.submit()">
+        <option value="">全部狀態</option>
+        {% for sk in opportunity_status %}<option value="{{ sk }}" {{ 'selected' if sk==status else '' }}>{{ opportunity_status_labels[sk] }}</option>{% endfor %}
+      </select>
+    </form>
+
+    <table>
+      <tr>
+        <th>主題</th><th>搜尋意圖</th><th>目標客群</th>
+        <th>SEO</th><th>GEO</th><th>成交</th><th>難度</th>
+        <th>推薦原因</th><th>狀態</th><th>操作</th>
+      </tr>
+      {% for o in items %}
+      <tr>
+        <td class="topic-cell">{{ o.topic }}<div style="font-size:10px;color:#aaa;font-weight:400">{{ o.brand }} / {{ o.category }}</div></td>
+        <td>{{ o.search_intent }}</td>
+        <td>{{ o.target_customer }}</td>
+        <form class="inline score-form" method="POST" action="/admin/seo-opportunities/{{ o.id }}/update?key={{ key }}">
+        <td><input class="score" type="number" name="seo_score" min="0" max="10" value="{{ o.seo_score }}"></td>
+        <td><input class="score" type="number" name="geo_score" min="0" max="10" value="{{ o.geo_score }}"></td>
+        <td><input class="score" type="number" name="conversion_score" min="0" max="10" value="{{ o.conversion_score }}"></td>
+        <td><input class="score" type="number" name="difficulty" min="0" max="10" value="{{ o.difficulty }}"></td>
+        <td class="reason-cell">{{ o.reason }}</td>
+        <td>
+          <select class="status-sel b-{{ o.status }}" name="status">
+            {% for sk in opportunity_status %}<option value="{{ sk }}" {{ 'selected' if sk==o.status else '' }}>{{ opportunity_status_labels[sk] }}</option>{% endfor %}
+          </select>
+        </td>
+        <td>
+          <div class="row-actions">
+            <button class="btn btn-sm" type="submit">💾 儲存</button>
+        </form>
+            <button class="btn btn-outline btn-sm" type="button"
+               data-id="{{ o.id }}" data-brand="{{ o.brand }}" data-category="{{ o.category }}" data-topic="{{ o.topic }}"
+               onclick="goGenerate(this)">用此主題生成</button>
+            <form class="inline" method="POST" action="/admin/seo-opportunities/{{ o.id }}/delete?key={{ key }}" onsubmit="return confirm('刪除這個主題？')">
+              <button class="btn btn-sm" style="background:#dc3545" type="submit">刪除</button>
+            </form>
+          </div>
+        </td>
+      </tr>
+      {% endfor %}
+    </table>
+    {% if not items %}<p style="color:#999;font-size:13px;padding:14px 0">目前沒有符合篩選條件的主題，先用上面「AI產生主題池」產生一批。</p>{% endif %}
+  </div>
+
+</div>
+<script>
+const KEY = {{ key|tojson }};
+function goGenerate(btn){
+  const params = new URLSearchParams({
+    key: KEY, opp_id: btn.dataset.id, brand: btn.dataset.brand,
+    category: btn.dataset.category, topic: btn.dataset.topic,
+  });
+  window.location.href = '/admin/seo-generator?' + params.toString();
+}
+async function safeJson(res){
+  const text = await res.text();
+  try { return JSON.parse(text); }
+  catch(e) { throw new Error('伺服器回應異常（可能是逾時或部署中），請稍後再試。HTTP ' + res.status); }
+}
+async function doGenerate(){
+  const brand = document.getElementById('gen-brand').value;
+  const category = document.getElementById('gen-category').value.trim();
+  document.getElementById('btn-generate').disabled = true;
+  document.getElementById('loading-generate').style.display = 'block';
+  document.getElementById('err-generate').textContent = '';
+  try {
+    const res = await fetch('/admin/seo-opportunities/generate?key=' + encodeURIComponent(KEY), {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({brand, category})
+    });
+    const data = await safeJson(res);
+    if (data.error) { document.getElementById('err-generate').textContent = data.error; document.getElementById('btn-generate').disabled = false; document.getElementById('loading-generate').style.display = 'none'; return; }
+    await pollJob(data.job_id, brand, category);
+  } catch(e) {
+    document.getElementById('err-generate').textContent = String(e.message || e);
+    document.getElementById('btn-generate').disabled = false;
+    document.getElementById('loading-generate').style.display = 'none';
+  }
+}
+async function pollJob(jobId, brand, category){
+  while (true) {
+    await new Promise(r => setTimeout(r, 3000));
+    const res = await fetch('/admin/seo-opportunities/generate/status/' + jobId + '?key=' + encodeURIComponent(KEY));
+    const data = await safeJson(res);
+    if (data.status === 'pending' || data.status === 'running') continue;
+    if (data.status === 'error') {
+      document.getElementById('err-generate').textContent = data.error || '產生失敗';
+      break;
+    }
+    if (data.status === 'done') {
+      const url = new URL(window.location.href);
+      url.searchParams.set('brand', brand);
+      url.searchParams.set('category', category);
+      window.location.href = url.toString();
+      return;
+    }
+  }
+  document.getElementById('btn-generate').disabled = false;
+  document.getElementById('loading-generate').style.display = 'none';
+}
+</script>
 """ + SHELL_CLOSE + """
 </body></html>"""
 
@@ -1174,16 +1471,17 @@ pre{white-space:pre-wrap;font-family:inherit;font-size:13px;line-height:1.7;back
   {% endif %}
 
   <div class="section">
+    <input type="hidden" id="opp_id" value="{{ prefill_opp_id }}">
     <label>1. 選品牌</label>
     <select id="brand">
       {% for b in brands %}
-      <option value="{{ b.key }}" data-category="{{ b.category }}">{{ b.name }}</option>
+      <option value="{{ b.key }}" data-category="{{ b.category }}" {{ 'selected' if b.key==prefill_brand else '' }}>{{ b.name }}</option>
       {% endfor %}
     </select>
     <label>2. 選品類</label>
-    <input type="text" id="category" placeholder="例如：高架床">
+    <input type="text" id="category" value="{{ prefill_category }}" placeholder="例如：高架床">
     <label>3. 輸入主題</label>
-    <input type="text" id="topic" placeholder="例如：高架床房間最小要多大">
+    <input type="text" id="topic" value="{{ prefill_topic }}" placeholder="例如：高架床房間最小要多大">
     <button class="btn" id="btn-analyze" onclick="doAnalyze()" {{ 'disabled' if not ai_key_set else '' }}>4. AI 分析搜尋意圖</button>
     <div class="loading" id="loading-analyze" style="display:none">分析中，請稍候...</div>
     <div class="err" id="err-analyze"></div>
@@ -1209,7 +1507,7 @@ const KEY = {{ key|tojson }};
 document.getElementById('brand').addEventListener('change', function(){
   document.getElementById('category').value = this.selectedOptions[0].dataset.category || '';
 });
-if (document.getElementById('brand').options.length) {
+if (document.getElementById('brand').options.length && !document.getElementById('category').value) {
   document.getElementById('category').value = document.getElementById('brand').selectedOptions[0].dataset.category || '';
 }
 
@@ -1254,7 +1552,8 @@ async function doGenerate(){
       method: 'POST', headers: {'Content-Type':'application/json'},
       body: JSON.stringify({
         brand: window._lastBrand, category: window._lastCategory,
-        topic: window._lastTopic, analysis: window._lastAnalysis
+        topic: window._lastTopic, analysis: window._lastAnalysis,
+        opp_id: document.getElementById('opp_id').value
       })
     });
     const data = await safeJson(res);
@@ -1421,6 +1720,112 @@ def seo_tracking_add(aid):
         int(f.get("line_inquiries") or 0), int(f.get("orders") or 0), float(f.get("revenue") or 0),
         "manual", time.time()))
     return redirect(f"/admin/seo/article/{aid}/tracking?key={key}")
+
+# ── SEO Opportunity 主題機會池 ──────────────────────────────────
+
+def _run_opportunity_job(job_id, brand_key, category):
+    try:
+        _q("UPDATE seo_opportunity_jobs SET status='running', updated_at=%s WHERE id=%s", (time.time(), job_id))
+        brand = _get_brand(brand_key)
+        knowledge_items = _get_knowledge_for_prompt(brand_key, category, limit=15)
+        prompt = _opportunity_prompt(brand, category, knowledge_items)
+        items, err = _ai_call_json_array(prompt, model="claude-sonnet-4-6", max_tokens=6000)
+        if err:
+            _q("UPDATE seo_opportunity_jobs SET status='error', error_msg=%s, updated_at=%s WHERE id=%s",
+               (f"AI產生主題失敗：{err}", time.time(), job_id))
+            return
+        inserted, skipped = _opportunity_insert_batch(brand_key, category, items)
+        _q("""UPDATE seo_opportunity_jobs SET status='done', inserted_count=%s, skipped_count=%s, updated_at=%s
+              WHERE id=%s""", (inserted, skipped, time.time(), job_id))
+    except Exception as e:
+        import sys; print(f"[SEO Opportunity Job Error] {e}", file=sys.stderr)
+        try:
+            _q("UPDATE seo_opportunity_jobs SET status='error', error_msg=%s, updated_at=%s WHERE id=%s",
+               (str(e), time.time(), job_id))
+        except Exception:
+            pass
+
+@seo_bp.route("/admin/seo-opportunities")
+def seo_opportunities_page():
+    ok, key = check_auth()
+    if not ok:
+        return render_template_string(LOGIN_HTML, error=None)
+    brand = request.args.get("brand", "")
+    category = request.args.get("category", "")
+    status = request.args.get("status", "")
+    items = _list_opportunities(brand, category, status)
+    try:
+        brands = _list_brands()
+        categories = _list_categories()
+    except Exception:
+        brands, categories = [], []
+    shell = _shell_open(key, "seo-opportunities", [("主題機會池", None)])
+    return render_template_string(OPPORTUNITIES_HTML, key=key, shell=shell, items=items,
+        brand=brand, category=category, status=status, brands=brands, categories=categories,
+        opportunity_status=OPPORTUNITY_STATUS, opportunity_status_labels=OPPORTUNITY_STATUS_LABELS,
+        ai_key_set=bool(ANTHROPIC_API_KEY))
+
+@seo_bp.route("/admin/seo-opportunities/generate", methods=["POST"])
+def seo_opportunities_generate():
+    ok, _ = auth_required()
+    if not ok:
+        return jsonify({"error": "unauthorized"}), 403
+    data = request.get_json(silent=True) or {}
+    brand_key = data.get("brand", "")
+    category = data.get("category", "")
+    if not ANTHROPIC_API_KEY:
+        return jsonify({"error": "尚未設定 ANTHROPIC_API_KEY，請在 Render → Environment 加上這個環境變數才能使用AI功能"}), 200
+    now = time.time()
+    job_id = _q("INSERT INTO seo_opportunity_jobs (status,created_at,updated_at) VALUES (%s,%s,%s) RETURNING id",
+                ("pending", now, now), fetch="id")
+    threading.Thread(target=_run_opportunity_job, args=(job_id, brand_key, category), daemon=True).start()
+    return jsonify({"job_id": job_id})
+
+@seo_bp.route("/admin/seo-opportunities/generate/status/<int:job_id>")
+def seo_opportunities_generate_status(job_id):
+    ok, _ = auth_required()
+    if not ok:
+        return jsonify({"error": "unauthorized"}), 403
+    row = _q("SELECT status,inserted_count,skipped_count,error_msg FROM seo_opportunity_jobs WHERE id=%s",
+              (job_id,), fetch="one")
+    if not row:
+        return jsonify({"status": "error", "error": "找不到這個任務"})
+    status, inserted, skipped, error_msg = row
+    out = {"status": status}
+    if status == "error":
+        out["error"] = error_msg
+    elif status == "done":
+        out["inserted"] = inserted
+        out["skipped"] = skipped
+    return jsonify(out)
+
+@seo_bp.route("/admin/seo-opportunities/<int:opp_id>/update", methods=["POST"])
+def seo_opportunities_update(opp_id):
+    ok, key = check_auth()
+    if not ok:
+        abort(403)
+    f = request.form
+    def _score(name):
+        try:
+            return max(0, min(10, int(f.get(name, 0) or 0)))
+        except (TypeError, ValueError):
+            return 0
+    status = f.get("status", "idea")
+    if status not in OPPORTUNITY_STATUS:
+        status = "idea"
+    _q("""UPDATE seo_opportunities SET seo_score=%s, geo_score=%s, conversion_score=%s, difficulty=%s,
+          status=%s, updated_at=%s WHERE id=%s""",
+       (_score("seo_score"), _score("geo_score"), _score("conversion_score"), _score("difficulty"),
+        status, time.time(), opp_id))
+    return redirect(f"/admin/seo-opportunities?key={key}")
+
+@seo_bp.route("/admin/seo-opportunities/<int:opp_id>/delete", methods=["POST"])
+def seo_opportunities_delete(opp_id):
+    ok, key = check_auth()
+    if not ok:
+        abort(403)
+    _q("DELETE FROM seo_opportunities WHERE id=%s", (opp_id,))
+    return redirect(f"/admin/seo-opportunities?key={key}")
 
 @seo_bp.route("/admin/seo-knowledge")
 def seo_knowledge_page():
@@ -1621,7 +2026,9 @@ def seo_generator_page():
         return render_template_string(LOGIN_HTML, error=None)
     brands = _list_brands()
     shell = _shell_open(key, "seo-generator", [("AI 生成文章", None)])
-    return render_template_string(GENERATOR_HTML, key=key, shell=shell, brands=brands, ai_key_set=bool(ANTHROPIC_API_KEY))
+    return render_template_string(GENERATOR_HTML, key=key, shell=shell, brands=brands, ai_key_set=bool(ANTHROPIC_API_KEY),
+        prefill_brand=request.args.get("brand", ""), prefill_category=request.args.get("category", ""),
+        prefill_topic=request.args.get("topic", ""), prefill_opp_id=request.args.get("opp_id", ""))
 
 @seo_bp.route("/admin/seo-generator/analyze", methods=["POST"])
 def seo_generator_analyze():
@@ -1643,7 +2050,7 @@ def seo_generator_analyze():
         return jsonify({"error": f"AI分析失敗：{err}"}), 200
     return jsonify({"analysis": text})
 
-def _run_generate_job(job_id, brand_key, category, topic, analysis):
+def _run_generate_job(job_id, brand_key, category, topic, analysis, opp_id=None):
     try:
         _q("UPDATE seo_generate_jobs SET status='running', updated_at=%s WHERE id=%s", (time.time(), job_id))
         brand = _get_brand(brand_key)
@@ -1664,6 +2071,11 @@ def _run_generate_job(job_id, brand_key, category, topic, analysis):
             "draft", brand_key, category, now, now, 0), fetch="id")
         _q("""UPDATE seo_generate_jobs SET status='done', article_id=%s, updated_at=%s WHERE id=%s""",
            (new_id, time.time(), job_id))
+        if opp_id:
+            try:
+                _q("UPDATE seo_opportunities SET status='generated', updated_at=%s WHERE id=%s", (now, int(opp_id)))
+            except Exception as e:
+                import sys; print(f"[SEO Opportunity] 更新狀態失敗：{e}", file=sys.stderr)
     except Exception as e:
         import sys; print(f"[SEO Generate Job Error] {e}", file=sys.stderr)
         try:
@@ -1682,6 +2094,7 @@ def seo_generator_generate():
     category = data.get("category", "")
     topic = data.get("topic", "")
     analysis = data.get("analysis", "")
+    opp_id = data.get("opp_id") or None
     if not topic.strip():
         return jsonify({"error": "請輸入主題"}), 400
     if not ANTHROPIC_API_KEY:
@@ -1689,7 +2102,7 @@ def seo_generator_generate():
     now = time.time()
     job_id = _q("INSERT INTO seo_generate_jobs (status,created_at,updated_at) VALUES (%s,%s,%s) RETURNING id",
                 ("pending", now, now), fetch="id")
-    threading.Thread(target=_run_generate_job, args=(job_id, brand_key, category, topic, analysis), daemon=True).start()
+    threading.Thread(target=_run_generate_job, args=(job_id, brand_key, category, topic, analysis, opp_id), daemon=True).start()
     return jsonify({"job_id": job_id})
 
 @seo_bp.route("/admin/seo-generator/generate/status/<int:job_id>")
