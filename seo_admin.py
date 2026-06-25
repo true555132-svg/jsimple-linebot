@@ -277,32 +277,48 @@ button{width:100%;background:#0d6efd;color:#fff;border:none;border-radius:8px;pa
 </div>
 </body></html>"""
 
-# ── 共用導覽列 ─────────────────────────────────────────────────
+# ── 共用版面外殼（左側Sidebar＋頂部Breadcrumb）──────────────────
 
-NAV_CSS = """
-.topnav{background:#1a1a1a;padding:12px 20px;display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px}
-.nav-home{color:#fff;font-weight:700;font-size:14px;text-decoration:none;white-space:nowrap}
-.nav-pills{display:flex;gap:6px;flex-wrap:wrap}
-.nav-pill{font-size:12px;font-weight:600;color:#ccc;background:rgba(255,255,255,.08);padding:6px 12px;border-radius:20px;text-decoration:none;white-space:nowrap;transition:.15s}
-.nav-pill:hover{background:rgba(255,255,255,.18);color:#fff}
-.nav-pill.active{background:#0d6efd;color:#fff}
-.breadcrumb{background:#fff;padding:9px 20px;font-size:12px;color:#999;border-bottom:1px solid #e8eaed}
-.breadcrumb a{color:#0d6efd;text-decoration:none}
-.breadcrumb a:hover{text-decoration:underline}
-.breadcrumb b{color:#333;font-weight:700}
+SIDEBAR_CSS = """
+.app-shell{display:flex;min-height:100vh;align-items:stretch}
+.sidebar{width:212px;flex-shrink:0;background:#1a1a1a;color:#fff;display:flex;flex-direction:column;padding:18px 0}
+.sidebar-brand{display:flex;flex-direction:column;padding:0 20px 18px;margin-bottom:6px;border-bottom:1px solid rgba(255,255,255,.08)}
+.sidebar-brand b{font-size:16px;font-weight:800}
+.sidebar-brand span{font-size:11px;color:#999;font-weight:600;margin-top:2px}
+.sidebar nav{display:flex;flex-direction:column;gap:2px;padding:10px}
+.side-link{color:#ccc;text-decoration:none;font-size:13px;font-weight:600;padding:10px 14px;border-radius:8px;white-space:nowrap}
+.side-link:hover{background:rgba(255,255,255,.08);color:#fff}
+.side-link.active{background:#0d6efd;color:#fff}
+.main{flex:1;min-width:0;display:flex;flex-direction:column}
+.topbar{background:#fff;padding:13px 24px;font-size:12px;color:#999;border-bottom:1px solid #e8eaed;flex-shrink:0}
+.topbar a{color:#0d6efd;text-decoration:none}
+.topbar a:hover{text-decoration:underline}
+.topbar b{color:#333;font-weight:700}
+.page-content{flex:1;min-width:0}
+@media(max-width:760px){
+  .app-shell{flex-direction:column}
+  .sidebar{width:100%;flex-direction:row;align-items:center;padding:8px 6px;overflow-x:auto}
+  .sidebar-brand{display:none}
+  .sidebar nav{flex-direction:row;padding:0}
+  .side-link{padding:8px 10px}
+}
 """
 
-NAV_ITEMS = [
-    ("seo",            "📝 文章管理",      "/admin/seo"),
-    ("seo-dashboard",  "📊 數據儀表板",    "/admin/seo-dashboard"),
-    ("seo-generator",  "✨ AI 生成文章",   "/admin/seo-generator"),
+SIDEBAR_ITEMS = [
+    ("home",           "🏠 後台首頁",       "/admin"),
+    ("seo-dashboard",  "📊 SEO 營運中心",   "/admin/seo-dashboard"),
+    ("seo",            "📝 文章管理",       "/admin/seo"),
+    ("seo-generator",  "✨ AI 生成文章",    "/admin/seo-generator"),
 ]
 
-def _nav_bar(key, active, crumbs):
-    """crumbs: list of (label, path_or_None). 最後一項視為當前頁面，不可點擊。"""
-    pills = "".join(
-        f'<a class="nav-pill{" active" if slug == active else ""}" href="{path}?key={key}">{label}</a>'
-        for slug, label, path in NAV_ITEMS
+SHELL_CLOSE = "</div></div></div>"
+
+def _shell_open(key, active, crumbs):
+    """crumbs: list of (label, path_or_None)。最後一項視為當前頁面，不可點擊。
+    回傳的字串需要搭配模板尾端的 SHELL_CLOSE 把 sidebar/main/page-content 三層div關起來。"""
+    links = "".join(
+        f'<a class="side-link{" active" if slug == active else ""}" href="{path}?key={key}">{label}</a>'
+        for slug, label, path in SIDEBAR_ITEMS
     )
     parts = []
     for i, (label, path) in enumerate(crumbs):
@@ -312,9 +328,14 @@ def _nav_bar(key, active, crumbs):
             parts.append(f'<b>{label}</b>')
     crumb_html = ' <span style="color:#ccc">›</span> '.join(parts)
     return (
-        f'<div class="topnav"><a class="nav-home" href="/admin?key={key}">⚡ 後台首頁</a>'
-        f'<div class="nav-pills">{pills}</div></div>'
-        f'<div class="breadcrumb">{crumb_html}</div>'
+        '<div class="app-shell">'
+        '<aside class="sidebar">'
+        '<div class="sidebar-brand"><b>JS</b><span>SEO 內容管理後台</span></div>'
+        f'<nav>{links}</nav>'
+        '</aside>'
+        '<div class="main">'
+        f'<div class="topbar">{crumb_html}</div>'
+        '<div class="page-content">'
     )
 
 # ── 列表頁 ─────────────────────────────────────────────────────
@@ -326,7 +347,7 @@ LIST_HTML = """<!DOCTYPE html>
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
 body{font-family:-apple-system,sans-serif;background:#f5f5f5;color:#333}
-""" + NAV_CSS + """
+""" + SIDEBAR_CSS + """
 .container{max-width:1000px;margin:24px auto;padding:0 16px}
 .section{background:#fff;border-radius:14px;padding:20px;margin-bottom:20px;box-shadow:0 1px 4px rgba(0,0,0,.08)}
 .section h3{font-size:15px;margin-bottom:12px}
@@ -348,7 +369,7 @@ input[type=text],select,textarea{width:100%;border:1px solid #ddd;border-radius:
 .link{color:#0d6efd;text-decoration:none;font-weight:600}
 form.inline{display:inline}
 </style></head><body>
-{{ nav|safe }}
+{{ shell|safe }}
 <div class="container">
 
   <div class="section">
@@ -408,6 +429,7 @@ form.inline{display:inline}
   </div>
 
 </div>
+""" + SHELL_CLOSE + """
 </body></html>"""
 
 ARTICLE_HTML = """<!DOCTYPE html>
@@ -417,7 +439,7 @@ ARTICLE_HTML = """<!DOCTYPE html>
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
 body{font-family:-apple-system,sans-serif;background:#f5f5f5;color:#333}
-""" + NAV_CSS + """
+""" + SIDEBAR_CSS + """
 .container{max-width:780px;margin:24px auto;padding:0 16px 80px}
 .section{background:#fff;border-radius:14px;padding:20px;margin-bottom:16px;box-shadow:0 1px 4px rgba(0,0,0,.08)}
 label{font-size:12px;color:#888;font-weight:700;display:block;margin-bottom:5px;margin-top:14px}
@@ -426,7 +448,7 @@ input[type=text],select,textarea{width:100%;border:1px solid #ddd;border-radius:
 textarea{resize:vertical;line-height:1.7}
 .btn{padding:10px 22px;background:#0d6efd;color:#fff;border:none;border-radius:8px;font-size:14px;font-weight:600;cursor:pointer}
 </style></head><body>
-{{ nav|safe }}
+{{ shell|safe }}
 <div class="container">
 <form method="POST" action="/admin/seo/article/save?key={{ key }}">
   <input type="hidden" name="id" value="{{ a[0] if a else '' }}">
@@ -457,6 +479,7 @@ textarea{resize:vertical;line-height:1.7}
   <button class="btn" type="submit">儲存</button>
 </form>
 </div>
+""" + SHELL_CLOSE + """
 </body></html>"""
 
 TRACKING_HTML = """<!DOCTYPE html>
@@ -466,7 +489,7 @@ TRACKING_HTML = """<!DOCTYPE html>
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
 body{font-family:-apple-system,sans-serif;background:#f5f5f5;color:#333}
-""" + NAV_CSS + """
+""" + SIDEBAR_CSS + """
 .container{max-width:900px;margin:24px auto;padding:0 16px}
 .section{background:#fff;border-radius:14px;padding:20px;margin-bottom:16px;box-shadow:0 1px 4px rgba(0,0,0,.08)}
 table{width:100%;border-collapse:collapse;font-size:13px}
@@ -477,7 +500,7 @@ th{color:#888;font-weight:600;font-size:11px;text-transform:uppercase}
 .btn{padding:7px 14px;background:#0d6efd;color:#fff;border:none;border-radius:6px;font-size:12px;font-weight:600;cursor:pointer}
 .yes{color:#2e7d32;font-weight:700}.no{color:#bbb}
 </style></head><body>
-{{ nav|safe }}
+{{ shell|safe }}
 <div class="container">
   <div class="section">
     <table>
@@ -507,6 +530,7 @@ th{color:#888;font-weight:600;font-size:11px;text-transform:uppercase}
     </form>
   </div>
 </div>
+""" + SHELL_CLOSE + """
 </body></html>"""
 
 GENERATOR_HTML = """<!DOCTYPE html>
@@ -516,7 +540,7 @@ GENERATOR_HTML = """<!DOCTYPE html>
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
 body{font-family:-apple-system,sans-serif;background:#f5f5f5;color:#333}
-""" + NAV_CSS + """
+""" + SIDEBAR_CSS + """
 .container{max-width:780px;margin:24px auto;padding:0 16px 80px}
 .section{background:#fff;border-radius:14px;padding:20px;margin-bottom:16px;box-shadow:0 1px 4px rgba(0,0,0,.08)}
 label{font-size:12px;color:#888;font-weight:700;display:block;margin-bottom:5px;margin-top:14px}
@@ -533,7 +557,7 @@ pre{white-space:pre-wrap;font-family:inherit;font-size:13px;line-height:1.7;back
 .err{color:#c62828;font-size:13px;margin-top:8px}
 .banner{background:#fdecea;color:#c62828;border-radius:10px;padding:12px 16px;margin-bottom:16px;font-size:13px;font-weight:600}
 </style></head><body>
-{{ nav|safe }}
+{{ shell|safe }}
 <div class="container">
 
   {% if not ai_key_set %}
@@ -655,6 +679,7 @@ async function pollGenerateJob(jobId){
   document.getElementById('loading-generate').style.display = 'none';
 }
 </script>
+""" + SHELL_CLOSE + """
 </body></html>"""
 
 # ── Routes ───────────────────────────────────────────────────────
@@ -667,8 +692,8 @@ def seo_dashboard():
     titles = _q("SELECT id,topic,title,status,slug FROM seo_titles ORDER BY id DESC", fetch="all") or []
     articles = _q("SELECT id,title,status,slug,updated_at FROM seo_articles ORDER BY id DESC", fetch="all") or []
     articles = [(a[0], a[1], a[2], a[3], time.strftime("%Y-%m-%d %H:%M", time.localtime(a[4])) if a[4] else "") for a in articles]
-    nav = _nav_bar(key, "seo", [("文章管理", None)])
-    return render_template_string(LIST_HTML, key=key, nav=nav, titles=titles, articles=articles, title_status=TITLE_STATUS)
+    shell = _shell_open(key, "seo", [("文章管理", None)])
+    return render_template_string(LIST_HTML, key=key, shell=shell, titles=titles, articles=articles, title_status=TITLE_STATUS)
 
 @seo_bp.route("/admin/seo/title/add", methods=["POST"])
 def seo_title_add():
@@ -706,8 +731,8 @@ def seo_article_new():
         row = _q("SELECT title FROM seo_titles WHERE id=%s", (title_id,), fetch="one")
         if row:
             default_title = row[0]
-    nav = _nav_bar(key, "seo", [("文章管理", "/admin/seo"), ("新增文章", None)])
-    return render_template_string(ARTICLE_HTML, key=key, nav=nav, a=None, default_title=default_title, article_status=ARTICLE_STATUS)
+    shell = _shell_open(key, "seo", [("文章管理", "/admin/seo"), ("新增文章", None)])
+    return render_template_string(ARTICLE_HTML, key=key, shell=shell, a=None, default_title=default_title, article_status=ARTICLE_STATUS)
 
 @seo_bp.route("/admin/seo/article/<int:aid>")
 def seo_article_edit(aid):
@@ -718,8 +743,8 @@ def seo_article_edit(aid):
               FROM seo_articles WHERE id=%s""", (aid,), fetch="one")
     if not a:
         abort(404)
-    nav = _nav_bar(key, "seo", [("文章管理", "/admin/seo"), ("編輯文章", None)])
-    return render_template_string(ARTICLE_HTML, key=key, nav=nav, a=a, default_title="", article_status=ARTICLE_STATUS)
+    shell = _shell_open(key, "seo", [("文章管理", "/admin/seo"), ("編輯文章", None)])
+    return render_template_string(ARTICLE_HTML, key=key, shell=shell, a=a, default_title="", article_status=ARTICLE_STATUS)
 
 @seo_bp.route("/admin/seo/article/save", methods=["POST"])
 def seo_article_save():
@@ -767,8 +792,8 @@ def seo_tracking_view(aid):
     records = _q("""SELECT id,article_id,record_date,ranking,clicks,impressions,
                      ai_overview_cited,chatgpt_cited,notes,line_inquiries,orders,revenue
                      FROM seo_tracking WHERE article_id=%s ORDER BY record_date DESC""", (aid,), fetch="all") or []
-    nav = _nav_bar(key, "seo", [("文章管理", "/admin/seo"), (f"成效記錄 — {art[0]}", None)])
-    return render_template_string(TRACKING_HTML, key=key, nav=nav, article_id=aid, article_title=art[0], records=records)
+    shell = _shell_open(key, "seo", [("文章管理", "/admin/seo"), (f"成效記錄 — {art[0]}", None)])
+    return render_template_string(TRACKING_HTML, key=key, shell=shell, article_id=aid, article_title=art[0], records=records)
 
 @seo_bp.route("/admin/seo/article/<int:aid>/tracking/add", methods=["POST"])
 def seo_tracking_add(aid):
@@ -794,8 +819,8 @@ def seo_generator_page():
     if not ok:
         return render_template_string(LOGIN_HTML, error=None)
     brands = _list_brands()
-    nav = _nav_bar(key, "seo-generator", [("AI 生成文章", None)])
-    return render_template_string(GENERATOR_HTML, key=key, nav=nav, brands=brands, ai_key_set=bool(ANTHROPIC_API_KEY))
+    shell = _shell_open(key, "seo-generator", [("AI 生成文章", None)])
+    return render_template_string(GENERATOR_HTML, key=key, shell=shell, brands=brands, ai_key_set=bool(ANTHROPIC_API_KEY))
 
 @seo_bp.route("/admin/seo-generator/analyze", methods=["POST"])
 def seo_generator_analyze():
@@ -897,9 +922,16 @@ def api_seo_articles():
 
 # ── Dashboard ──────────────────────────────────────────────────
 
-def _articles_with_latest_tracking():
-    """每篇文章 + 該文章最新一筆 seo_tracking 記錄（用 article_id 分組取最大 id）"""
-    rows = _q("""
+def _articles_with_latest_tracking(brand_key="", category=""):
+    """每篇文章 + 該文章最新一筆 seo_tracking 記錄（用 article_id 分組取最大 id），可選擇依品牌/品類篩選"""
+    where = []
+    params = []
+    if brand_key:
+        where.append("a.brand_key=%s"); params.append(brand_key)
+    if category:
+        where.append("a.category=%s"); params.append(category)
+    where_sql = (" WHERE " + " AND ".join(where)) if where else ""
+    rows = _q(f"""
         SELECT a.id, a.title, a.brand_key, a.category, a.published_at,
                t.record_date, t.ranking, t.clicks, t.impressions,
                t.line_inquiries, t.orders, t.revenue
@@ -909,8 +941,9 @@ def _articles_with_latest_tracking():
             INNER JOIN (SELECT article_id, MAX(id) AS max_id FROM seo_tracking GROUP BY article_id) t2
               ON t1.article_id = t2.article_id AND t1.id = t2.max_id
         ) t ON t.article_id = a.id
+        {where_sql}
         ORDER BY a.id DESC
-    """, fetch="all") or []
+    """, tuple(params), fetch="all") or []
     out = []
     for r in rows:
         clicks = r[7] or 0
@@ -927,6 +960,66 @@ def _articles_with_latest_tracking():
 
 def _top_n(items, key, n=5):
     return sorted(items, key=lambda x: x.get(key, 0), reverse=True)[:n]
+
+def _month_bounds(year, month):
+    start = f"{year:04d}-{month:02d}-01"
+    ny, nm = (year + 1, 1) if month == 12 else (year, month + 1)
+    return start, f"{ny:04d}-{nm:02d}-01"
+
+def _prev_month(year, month):
+    return (year - 1, 12) if month == 1 else (year, month - 1)
+
+def _sum_tracking(brand_key, category, date_from, date_to_exclusive):
+    where = ["t.record_date >= %s", "t.record_date < %s"]
+    params = [date_from, date_to_exclusive]
+    if brand_key:
+        where.append("a.brand_key=%s"); params.append(brand_key)
+    if category:
+        where.append("a.category=%s"); params.append(category)
+    row = _q(f"""
+        SELECT COALESCE(SUM(t.clicks),0), COALESCE(SUM(t.impressions),0),
+               COALESCE(SUM(t.line_inquiries),0), COALESCE(SUM(t.orders),0), COALESCE(SUM(t.revenue),0)
+        FROM seo_tracking t JOIN seo_articles a ON a.id = t.article_id
+        WHERE {" AND ".join(where)}
+    """, tuple(params), fetch="one") or (0, 0, 0, 0, 0)
+    clicks, impressions, inquiries, orders, revenue = row
+    return {"clicks": clicks, "impressions": impressions, "line_inquiries": inquiries,
+            "orders": orders, "revenue": float(revenue)}
+
+def _pct_change(curr, prev):
+    if not prev:
+        return None
+    return round((curr - prev) / prev * 100, 1)
+
+def _dashboard_stats(brand_key, category):
+    """統計卡片：待產出主題／草稿文章／已發布文章（依品牌品類篩選）＋本月成效（含較上月百分比變化）"""
+    pending_titles = (_q("SELECT COUNT(*) FROM seo_titles WHERE status='待寫'", fetch="one") or (0,))[0]
+    where = []
+    params = []
+    if brand_key:
+        where.append("brand_key=%s"); params.append(brand_key)
+    if category:
+        where.append("category=%s"); params.append(category)
+    where_sql = (" AND " + " AND ".join(where)) if where else ""
+    draft_count = (_q(f"SELECT COUNT(*) FROM seo_articles WHERE status='draft'{where_sql}", tuple(params), fetch="one") or (0,))[0]
+    published_count = (_q(f"SELECT COUNT(*) FROM seo_articles WHERE status='published'{where_sql}", tuple(params), fetch="one") or (0,))[0]
+
+    now = time.localtime()
+    cur_start, cur_end = _month_bounds(now.tm_year, now.tm_mon)
+    py, pm = _prev_month(now.tm_year, now.tm_mon)
+    prev_start, prev_end = _month_bounds(py, pm)
+    cur = _sum_tracking(brand_key, category, cur_start, cur_end)
+    prev = _sum_tracking(brand_key, category, prev_start, prev_end)
+
+    return {
+        "pending_titles": pending_titles, "draft_count": draft_count, "published_count": published_count,
+        "cur": cur, "prev": prev,
+        "pct": {k: _pct_change(cur[k], prev[k]) for k in ("clicks", "impressions", "line_inquiries", "orders", "revenue")},
+    }
+
+def _list_categories():
+    rows = _q("SELECT DISTINCT category FROM seo_articles WHERE category != '' ORDER BY category", fetch="all") or []
+    return [r[0] for r in rows]
 
 def _get_ai_suggestion(force=False):
     """絕不丟例外給呼叫端——任何失敗都回傳一句友善訊息，確保 Dashboard 一定能正常開啟。"""
@@ -982,7 +1075,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
 body{font-family:-apple-system,sans-serif;background:#f5f5f5;color:#333}
-""" + NAV_CSS + """
+""" + SIDEBAR_CSS + """
 .container{max-width:1100px;margin:24px auto;padding:0 16px}
 .section{background:#fff;border-radius:14px;padding:20px;margin-bottom:20px;box-shadow:0 1px 4px rgba(0,0,0,.08)}
 .section h3{font-size:15px;margin-bottom:12px}
@@ -1000,9 +1093,57 @@ th{color:#888;font-weight:600;font-size:11px;text-transform:uppercase}
 .ai-meta{font-size:11px;color:#aaa;margin-top:8px}
 .btn{padding:6px 14px;background:#0d6efd;color:#fff;border:none;border-radius:6px;font-size:12px;font-weight:600;cursor:pointer}
 .scroll-x{overflow-x:auto}
+.filter-bar{display:flex;gap:10px;align-items:center;margin-bottom:18px;flex-wrap:wrap}
+.filter-bar select{border:1px solid #ddd;border-radius:8px;padding:7px 10px;font-size:13px;background:#fff}
+.stat-grid{display:grid;grid-template-columns:repeat(8,1fr);gap:12px;margin-bottom:20px}
+@media(max-width:1100px){.stat-grid{grid-template-columns:repeat(4,1fr)}}
+@media(max-width:600px){.stat-grid{grid-template-columns:repeat(2,1fr)}}
+.stat-card{background:#fff;border-radius:14px;padding:14px;box-shadow:0 1px 4px rgba(0,0,0,.08)}
+.stat-card .label{font-size:11px;color:#999;font-weight:600;margin-bottom:6px;white-space:nowrap}
+.stat-card .value{font-size:20px;font-weight:800;color:#1a1a1a}
+.stat-card .delta{font-size:11px;font-weight:700;margin-top:4px}
+.delta-up{color:#2e7d32}.delta-down{color:#c62828}.delta-flat{color:#999}
+.rank-tabs{display:flex;gap:6px;margin-bottom:12px;flex-wrap:wrap}
+.rank-tab{font-size:12px;font-weight:600;padding:6px 14px;border-radius:20px;border:1.5px solid #ddd;background:#fff;color:#555;cursor:pointer}
+.rank-tab.active{background:#0d6efd;border-color:#0d6efd;color:#fff}
+.rank-panel{display:none}
+.rank-panel.active{display:block}
 </style></head><body>
-{{ nav|safe }}
+{{ shell|safe }}
 <div class="container">
+
+  <form class="filter-bar" method="GET" action="/admin/seo-dashboard">
+    <input type="hidden" name="key" value="{{ key }}">
+    <select name="brand" onchange="this.form.submit()">
+      <option value="">全部品牌</option>
+      {% for b in brands %}<option value="{{ b.key }}" {{ 'selected' if b.key==brand_key else '' }}>{{ b.name }}</option>{% endfor %}
+    </select>
+    <select name="category" onchange="this.form.submit()">
+      <option value="">全部品類</option>
+      {% for c in categories %}<option value="{{ c }}" {{ 'selected' if c==category else '' }}>{{ c }}</option>{% endfor %}
+    </select>
+  </form>
+
+  <div class="stat-grid">
+    <div class="stat-card"><div class="label">待產出主題</div><div class="value">{{ stats.pending_titles }}</div></div>
+    <div class="stat-card"><div class="label">草稿文章</div><div class="value">{{ stats.draft_count }}</div></div>
+    <div class="stat-card"><div class="label">已發布文章</div><div class="value">{{ stats.published_count }}</div></div>
+    <div class="stat-card"><div class="label">本月曝光數</div><div class="value">{{ stats.cur.impressions }}</div>
+      {% if stats.pct.impressions is not none %}<div class="delta {{ 'delta-up' if stats.pct.impressions>=0 else 'delta-down' }}">{{ '↑' if stats.pct.impressions>=0 else '↓' }} {{ stats.pct.impressions|abs }}% 較上月</div>{% endif %}
+    </div>
+    <div class="stat-card"><div class="label">本月點擊數</div><div class="value">{{ stats.cur.clicks }}</div>
+      {% if stats.pct.clicks is not none %}<div class="delta {{ 'delta-up' if stats.pct.clicks>=0 else 'delta-down' }}">{{ '↑' if stats.pct.clicks>=0 else '↓' }} {{ stats.pct.clicks|abs }}% 較上月</div>{% endif %}
+    </div>
+    <div class="stat-card"><div class="label">本月詢價數</div><div class="value">{{ stats.cur.line_inquiries }}</div>
+      {% if stats.pct.line_inquiries is not none %}<div class="delta {{ 'delta-up' if stats.pct.line_inquiries>=0 else 'delta-down' }}">{{ '↑' if stats.pct.line_inquiries>=0 else '↓' }} {{ stats.pct.line_inquiries|abs }}% 較上月</div>{% endif %}
+    </div>
+    <div class="stat-card"><div class="label">本月成交數</div><div class="value">{{ stats.cur.orders }}</div>
+      {% if stats.pct.orders is not none %}<div class="delta {{ 'delta-up' if stats.pct.orders>=0 else 'delta-down' }}">{{ '↑' if stats.pct.orders>=0 else '↓' }} {{ stats.pct.orders|abs }}% 較上月</div>{% endif %}
+    </div>
+    <div class="stat-card"><div class="label">本月成交金額</div><div class="value">${{ stats.cur.revenue }}</div>
+      {% if stats.pct.revenue is not none %}<div class="delta {{ 'delta-up' if stats.pct.revenue>=0 else 'delta-down' }}">{{ '↑' if stats.pct.revenue>=0 else '↓' }} {{ stats.pct.revenue|abs }}% 較上月</div>{% endif %}
+    </div>
+  </div>
 
   <div class="section">
     <h3>所有SEO文章（{{ items|length }}）</h3>
@@ -1021,21 +1162,37 @@ th{color:#888;font-weight:600;font-size:11px;text-transform:uppercase}
   </div>
 
   <div class="section">
-    <h3>排行榜</h3>
-    <div class="grid4">
-      <div class="lb-card"><h4>點擊最高</h4>
-        {% for i in top_clicks %}<div class="lb-item"><span>{{ i.title }}</span><span class="v">{{ i.clicks }}</span></div>{% endfor %}
-      </div>
-      <div class="lb-card"><h4>CTR最高</h4>
-        {% for i in top_ctr %}<div class="lb-item"><span>{{ i.title }}</span><span class="v">{{ i.ctr }}%</span></div>{% endfor %}
-      </div>
-      <div class="lb-card"><h4>詢價最高</h4>
-        {% for i in top_inquiries %}<div class="lb-item"><span>{{ i.title }}</span><span class="v">{{ i.line_inquiries }}</span></div>{% endfor %}
-      </div>
-      <div class="lb-card"><h4>成交最高</h4>
-        {% for i in top_orders %}<div class="lb-item"><span>{{ i.title }}</span><span class="v">{{ i.orders }}</span></div>{% endfor %}
-      </div>
+    <h3>排行榜 TOP5</h3>
+    <div class="rank-tabs">
+      <div class="rank-tab active" data-panel="rk-clicks" onclick="showRank(this)">點擊最高</div>
+      <div class="rank-tab" data-panel="rk-ctr" onclick="showRank(this)">CTR最高</div>
+      <div class="rank-tab" data-panel="rk-inquiries" onclick="showRank(this)">詢價最高</div>
+      <div class="rank-tab" data-panel="rk-orders" onclick="showRank(this)">成交最高</div>
+      <div class="rank-tab" data-panel="rk-revenue" onclick="showRank(this)">營收最高</div>
     </div>
+    <div class="lb-card rank-panel active" id="rk-clicks">
+      {% for i in top_clicks %}<div class="lb-item"><span>{{ i.title }}</span><span class="v">{{ i.clicks }}</span></div>{% endfor %}
+    </div>
+    <div class="lb-card rank-panel" id="rk-ctr">
+      {% for i in top_ctr %}<div class="lb-item"><span>{{ i.title }}</span><span class="v">{{ i.ctr }}%</span></div>{% endfor %}
+    </div>
+    <div class="lb-card rank-panel" id="rk-inquiries">
+      {% for i in top_inquiries %}<div class="lb-item"><span>{{ i.title }}</span><span class="v">{{ i.line_inquiries }}</span></div>{% endfor %}
+    </div>
+    <div class="lb-card rank-panel" id="rk-orders">
+      {% for i in top_orders %}<div class="lb-item"><span>{{ i.title }}</span><span class="v">{{ i.orders }}</span></div>{% endfor %}
+    </div>
+    <div class="lb-card rank-panel" id="rk-revenue">
+      {% for i in top_revenue %}<div class="lb-item"><span>{{ i.title }}</span><span class="v">${{ i.revenue }}</span></div>{% endfor %}
+    </div>
+    <script>
+    function showRank(el){
+      document.querySelectorAll('.rank-tab').forEach(t=>t.classList.remove('active'));
+      document.querySelectorAll('.rank-panel').forEach(p=>p.classList.remove('active'));
+      el.classList.add('active');
+      document.getElementById(el.dataset.panel).classList.add('active');
+    }
+    </script>
   </div>
 
   <div class="section">
@@ -1048,6 +1205,7 @@ th{color:#888;font-weight:600;font-size:11px;text-transform:uppercase}
   </div>
 
 </div>
+""" + SHELL_CLOSE + """
 </body></html>"""
 
 @seo_bp.route("/admin/seo-dashboard")
@@ -1055,16 +1213,32 @@ def seo_dashboard_page():
     ok, key = check_auth()
     if not ok:
         return render_template_string(LOGIN_HTML, error=None)
+    brand_key = request.args.get("brand", "")
+    category = request.args.get("category", "")
     try:
-        items = _articles_with_latest_tracking()
+        items = _articles_with_latest_tracking(brand_key, category)
     except Exception as e:
         import sys; print(f"[SEO Dashboard] 讀取文章數據失敗：{e}", file=sys.stderr)
         items = []
+    try:
+        stats = _dashboard_stats(brand_key, category)
+    except Exception as e:
+        import sys; print(f"[SEO Dashboard] 統計計算失敗：{e}", file=sys.stderr)
+        empty = {"clicks": 0, "impressions": 0, "line_inquiries": 0, "orders": 0, "revenue": 0}
+        stats = {"pending_titles": 0, "draft_count": 0, "published_count": 0, "cur": empty, "prev": empty,
+                 "pct": {k: None for k in empty}}
+    try:
+        brands = _list_brands()
+        categories = _list_categories()
+    except Exception:
+        brands, categories = [], []
     suggestion, gen_at = _get_ai_suggestion()
-    nav = _nav_bar(key, "seo-dashboard", [("數據儀表板", None)])
-    return render_template_string(DASHBOARD_HTML, key=key, nav=nav, items=items,
+    shell = _shell_open(key, "seo-dashboard", [("SEO 營運中心", None)])
+    return render_template_string(DASHBOARD_HTML, key=key, shell=shell, items=items,
+        brand_key=brand_key, category=category, brands=brands, categories=categories, stats=stats,
         top_clicks=_top_n(items, "clicks"), top_ctr=_top_n(items, "ctr"),
         top_inquiries=_top_n(items, "line_inquiries"), top_orders=_top_n(items, "orders"),
+        top_revenue=_top_n(items, "revenue"),
         suggestion=suggestion,
         suggestion_time=time.strftime("%Y-%m-%d %H:%M", time.localtime(gen_at)) if gen_at else "尚未生成")
 
