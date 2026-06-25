@@ -781,9 +781,33 @@ def scrape_taobao(page, url):
         sku_data = page.evaluate("""() => {
             const out = { props: [], sku_prices: [] };
             try {
+                // 新版淘寶（ICE 框架，2025+）：window.__ICE_APP_CONTEXT__.loaderData.home.data.res
+                const ctx = window.__ICE_APP_CONTEXT__;
+                const res = ctx?.loaderData?.home?.data?.res;
+                if (res && res.skuBase) {
+                    const sku2info = res.skuCore?.sku2info || {};
+                    const skus = res.skuBase?.skus || [];
+                    const propsRaw = res.skuBase?.props || [];
+                    const vidName = {};
+                    propsRaw.forEach(p => (p.values || []).forEach(v => { vidName[v.vid] = v.name || ''; }));
+                    out.props = propsRaw.map(p => ({
+                        name: p.name || '',
+                        values: (p.values || []).map(v => ({ name: v.name || '', image: v.image || '' }))
+                    })).filter(p => p.name && p.values.length);
+                    skus.forEach(sk => {
+                        const info = sku2info[sk.skuId];
+                        if (!info || !info.price) return;
+                        const vids = (sk.propPath || '').split(';').map(seg => seg.split(':')[1]).filter(Boolean);
+                        const label = vids.map(vid => vidName[vid] || vid).join(' / ');
+                        const pm = info.price.priceMoney;
+                        const price = pm ? (parseInt(pm, 10) / 100).toFixed(2) : (info.price.priceText || '');
+                        if (price) out.sku_prices.push({ sku_id: sk.skuId, label, price, stock: info.quantity || 0 });
+                    });
+                    return out;
+                }
+                // 舊版淘寶 fallback：__INIT_DATA__ / __GLOBAL_DATA__
                 const d = window.__INIT_DATA__ || window.__GLOBAL_DATA__ || {};
                 const item = d.item || d.data?.item || {};
-                // SKU 屬性
                 const props = item.props?.props || item.skuCore?.props || [];
                 out.props = props.map(p => ({
                     name: p.name || p.propName || '',
@@ -792,15 +816,10 @@ def scrape_taobao(page, url):
                         image: v.imageUrl || v.picUrl || ''
                     }))
                 })).filter(p => p.name && p.values.length);
-                // 多規格價格
                 const sku2 = item.skuCore?.sku2info || {};
                 Object.entries(sku2).forEach(([k, v]) => {
                     if(v?.price?.priceText) {
-                        out.sku_prices.push({
-                            sku_id: k,
-                            price: v.price.priceText,
-                            stock: v.quantity || 0
-                        });
+                        out.sku_prices.push({ sku_id: k, price: v.price.priceText, stock: v.quantity || 0 });
                     }
                 });
             } catch(e) {}
@@ -808,63 +827,18 @@ def scrape_taobao(page, url):
         }""")
         if sku_data:
             if sku_data.get("props"):
-                result["raw_extra"]["sku_props"] = sku_data["props"]
+                result["raw_extra"]["specs"] = [
+                    {"name": p["name"], "value": "、".join(v["name"] for v in p["values"])}
+                    for p in sku_data["props"]
+                ]
                 print(f"    [Taobao SKU props] {len(sku_data['props'])} 組規格")
             if sku_data.get("sku_prices"):
                 result["raw_extra"]["sku_prices"] = sku_data["sku_prices"]
-                # 取最低/最高價
                 prices = [float(p["price"]) for p in sku_data["sku_prices"] if p.get("price")]
                 if prices and not result["raw_price"]:
                     mn, mx = min(prices), max(prices)
                     result["raw_price"] = f"{mn}~{mx}" if mn != mx else str(mn)
-                    print(f"    [Taobao SKU price range] {result['raw_price']}")
-        if not (sku_data and (sku_data.get("props") or sku_data.get("sku_prices"))):
-            try:
-                diag = page.evaluate("""() => {
-                    const keys = (o) => (o && typeof o === 'object') ? Object.keys(o) : [];
-                    const g = window.__GLOBAL_DATA__ || null;
-                    const i = window.__INIT_DATA__ || null;
-                    const gi = g && (g.item || g.data?.item) || null;
-                    const ii = i && (i.item || i.data?.item) || null;
-                    const safeStr = (o) => { try { return JSON.stringify(o); } catch(e) { return String(e); } };
-                    const cache = window.__general_skupanel_cache_data || null;
-                    const initPanel = window.__general_skupanel_initPanel || null;
-                    return {
-                        hasGlobal: !!g, hasInit: !!i,
-                        globalTopKeys: keys(g),
-                        initTopKeys: keys(i),
-                        globalItemKeys: keys(gi),
-                        initItemKeys: keys(ii),
-                        globalSkuCoreKeys: keys(gi && gi.skuCore),
-                        initSkuCoreKeys: keys(ii && ii.skuCore),
-                        windowKeysWithSku: Object.keys(window).filter(k => /sku|Sku|GLOBAL|INIT|PAGE/i.test(k)),
-                        skupanelCacheKeys: keys(cache),
-                        skupanelCacheDump: safeStr(cache).slice(0, 4000),
-                        skupanelInitPanelKeys: keys(initPanel),
-                        skupanelInitPanelDump: safeStr(initPanel).slice(0, 4000),
-                        scriptHits: (() => {
-                            const hits = [];
-                            const scripts = document.querySelectorAll('script');
-                            for (const s of scripts) {
-                                const t = s.textContent || '';
-                                if (!t) continue;
-                                if (/skuId|priceText|"price"\s*:/i.test(t)) {
-                                    const idx = t.search(/skuId|priceText|"price"\s*:/i);
-                                    hits.push({
-                                        scriptId: s.id || s.getAttribute('type') || '(no id)',
-                                        len: t.length,
-                                        snippet: t.slice(Math.max(0, idx - 150), idx + 600)
-                                    });
-                                }
-                                if (hits.length >= 5) break;
-                            }
-                            return hits;
-                        })(),
-                    };
-                }""")
-                print(f"    [淘寶診斷] {json.dumps(diag, ensure_ascii=False)}")
-            except Exception as e:
-                print(f"    [淘寶診斷 err] {e}")
+                    print(f"    [Taobao SKU price range] {result['raw_price']}（{len(prices)} 組）")
     except Exception as e:
         print(f"    [Taobao SKU data err] {e}")
     # 淘寶評價圖片（買家秀）— 多策略掃描
