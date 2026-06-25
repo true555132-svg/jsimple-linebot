@@ -842,6 +842,24 @@ def scrape_taobao(page, url):
                         skupanelCacheDump: safeStr(cache).slice(0, 4000),
                         skupanelInitPanelKeys: keys(initPanel),
                         skupanelInitPanelDump: safeStr(initPanel).slice(0, 4000),
+                        scriptHits: (() => {
+                            const hits = [];
+                            const scripts = document.querySelectorAll('script');
+                            for (const s of scripts) {
+                                const t = s.textContent || '';
+                                if (!t) continue;
+                                if (/skuId|priceText|"price"\s*:/i.test(t)) {
+                                    const idx = t.search(/skuId|priceText|"price"\s*:/i);
+                                    hits.push({
+                                        scriptId: s.id || s.getAttribute('type') || '(no id)',
+                                        len: t.length,
+                                        snippet: t.slice(Math.max(0, idx - 150), idx + 600)
+                                    });
+                                }
+                                if (hits.length >= 5) break;
+                            }
+                            return hits;
+                        })(),
                     };
                 }""")
                 print(f"    [淘寶診斷] {json.dumps(diag, ensure_ascii=False)}")
