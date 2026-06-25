@@ -125,6 +125,16 @@ def init_seo_db():
                 )
             """)
             cur.execute("CREATE INDEX IF NOT EXISTS idx_seo_knowledge_filter ON seo_knowledge(brand, category, type)")
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS seo_knowledge_import_jobs (
+                    id           SERIAL PRIMARY KEY,
+                    status       TEXT DEFAULT 'pending',
+                    result       TEXT DEFAULT '',
+                    error_msg    TEXT DEFAULT '',
+                    created_at   FLOAT DEFAULT 0,
+                    updated_at   FLOAT DEFAULT 0
+                )
+            """)
             conn.commit()
             cur.close()
             conn.close()
@@ -234,6 +244,60 @@ def _knowledge_block(items):
         lines.append(f"{i}. [{label}] {it['title']}：{it['content']}")
     return "\n".join(lines)
 
+def _knowledge_import_prompt(raw_text):
+    return f"""你是品牌知識庫整理專家。以下是使用者貼上的原始資料（可能是商品介紹、FAQ、客服對話紀錄、案例內容等，格式可能很亂）：
+
+━━━ 原始資料 ━━━
+{raw_text[:12000]}
+━━━ 原始資料結束 ━━━
+
+請仔細閱讀，把裡面有價值的資訊拆成多筆「知識庫條目」，每筆歸類成以下4種類型之一：
+- spec（商品規格）：具體規格數據，例如尺寸、承重、材質、保固、價格
+- faq（FAQ）：常見問題與回答
+- brand_feature（品牌特色）：品牌優勢、設計理念、服務特色
+- case（案例）：實際客戶案例、使用情境、施工/安裝紀錄
+
+規則：
+1. 只整理原始資料裡「真實存在」的資訊，絕對不要新增、推論、誇大或虛構原文沒有的內容
+2. 每筆條目要獨立完整，標題簡短（15字以內、具體），內容具體（30~150字）
+3. 同一主題不要拆成太多筆瑣碎條目，但不相關的資訊也不要硬塞在一起
+4. 如果原始資料裡沒有某種類型的內容，就不要硬生出那個類型，該類型可以完全沒有
+5. 標籤（tags）用2~4個關鍵字，逗號分隔
+
+輸出格式（只輸出JSON陣列，不要其他文字，不要markdown code block）：
+[
+  {{"type": "spec", "title": "標題", "content": "內容", "tags": "標籤1,標籤2"}}
+]
+
+如果原始資料完全沒有可用資訊，輸出空陣列 []"""
+
+def _knowledge_upsert(brand, category, items):
+    """依 brand+category+title（去頭尾空白、不分大小寫）比對，重複就更新、沒有就新增。回傳 (inserted, updated) 數量。"""
+    inserted = 0
+    updated = 0
+    now = time.time()
+    for it in items:
+        title = (it.get("title") or "").strip()
+        if not title:
+            continue
+        ktype = it.get("type") if it.get("type") in KNOWLEDGE_TYPE_LABELS else "spec"
+        content = it.get("content") or ""
+        tags = it.get("tags") or ""
+        allow_ai = bool(it.get("allow_ai", True))
+        existing = _q("""SELECT id FROM seo_knowledge
+                          WHERE brand=%s AND category=%s AND LOWER(TRIM(title))=LOWER(TRIM(%s))""",
+                       (brand, category, title), fetch="one")
+        if existing:
+            _q("""UPDATE seo_knowledge SET type=%s, title=%s, content=%s, tags=%s, allow_ai=%s, updated_at=%s
+                  WHERE id=%s""", (ktype, title, content, tags, allow_ai, now, existing[0]))
+            updated += 1
+        else:
+            _q("""INSERT INTO seo_knowledge (brand,category,type,title,content,tags,allow_ai,created_at,updated_at)
+                  VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+               (brand, category, ktype, title, content, tags, allow_ai, now, now))
+            inserted += 1
+    return inserted, updated
+
 # ── Claude AI 呼叫 ──────────────────────────────────────────────
 
 def _ai_call(prompt, model="claude-haiku-4-5-20251001", max_tokens=2000):
@@ -266,6 +330,18 @@ def _ai_call_json(prompt, model="claude-sonnet-4-6", max_tokens=8000):
     if err:
         return None, err
     m = re.search(r'\{[\s\S]*\}', text)
+    if not m:
+        return None, f"AI 回傳格式錯誤：{text[:300]}"
+    try:
+        return json.loads(m.group()), ""
+    except Exception as e:
+        return None, f"JSON 解析失敗：{e}；原文：{text[:300]}"
+
+def _ai_call_json_array(prompt, model="claude-sonnet-4-6", max_tokens=6000):
+    text, err = _ai_call(prompt, model=model, max_tokens=max_tokens)
+    if err:
+        return None, err
+    m = re.search(r'\[[\s\S]*\]', text)
     if not m:
         return None, f"AI 回傳格式錯誤：{text[:300]}"
     try:
@@ -743,6 +819,7 @@ form.inline{display:inline}
         {% for tk, tl in knowledge_types %}<option value="{{ tk }}" {{ 'selected' if tk==ktype else '' }}>{{ tl }}</option>{% endfor %}
       </select>
       <a class="btn" href="/admin/seo-knowledge/item/new?key={{ key }}">+ 新增資料</a>
+      <a class="btn" style="background:#2e7d32" href="/admin/seo-knowledge/import?key={{ key }}">📥 批次匯入（貼上資料讓AI拆分）</a>
     </form>
 
     <table>
@@ -821,6 +898,187 @@ textarea{resize:vertical;line-height:1.7}
   <button class="btn" type="submit">儲存</button>
 </form>
 </div>
+""" + SHELL_CLOSE + """
+</body></html>"""
+
+IMPORT_HTML = """<!DOCTYPE html>
+<html lang="zh-TW"><head><meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>知識庫批次匯入</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:-apple-system,sans-serif;background:#f5f5f5;color:#333}
+""" + SIDEBAR_CSS + """
+.container{max-width:900px;margin:24px auto;padding:0 16px 80px}
+.section{background:#fff;border-radius:14px;padding:20px;margin-bottom:16px;box-shadow:0 1px 4px rgba(0,0,0,.08)}
+.section h3{font-size:15px;margin-bottom:6px}
+.hint{font-size:12px;color:#999;margin-bottom:12px;line-height:1.6}
+label{font-size:12px;color:#888;font-weight:700;display:block;margin-bottom:5px;margin-top:14px}
+label:first-child{margin-top:0}
+input[type=text],select,textarea{width:100%;border:1px solid #ddd;border-radius:8px;padding:9px 11px;font-size:14px;font-family:inherit}
+textarea{resize:vertical;line-height:1.6}
+.btn{padding:10px 22px;background:#0d6efd;color:#fff;border:none;border-radius:8px;font-size:14px;font-weight:600;cursor:pointer}
+.btn:disabled{background:#ccc;cursor:not-allowed}
+.btn-outline{background:#fff;color:#666;border:1.5px solid #ddd}
+.banner{background:#fdecea;color:#c62828;border-radius:10px;padding:12px 16px;margin-bottom:16px;font-size:13px;font-weight:600}
+.loading{font-size:13px;color:#888;margin-top:8px}
+.err{color:#c62828;font-size:13px;margin-top:8px}
+.step{display:none}
+.step.active{display:block}
+.preview-row{border:1px solid #eee;border-radius:10px;padding:12px;margin-bottom:10px;background:#fafafa}
+.preview-row .row-top{display:flex;gap:8px;align-items:center;margin-bottom:8px}
+.preview-row select{width:auto;font-size:12px;padding:5px 8px}
+.preview-row input[type=text]{font-size:13px;font-weight:700}
+.preview-row textarea{font-size:13px;min-height:60px}
+.preview-row .tags-row{display:flex;gap:8px;margin-top:8px;align-items:center}
+.preview-row .tags-row input{font-size:12px}
+.skip-label{font-size:12px;color:#c62828;font-weight:600;white-space:nowrap;display:flex;align-items:center;gap:4px}
+.result-box{font-size:14px;font-weight:700;color:#2e7d32;background:#e8f5e9;border-radius:10px;padding:14px;margin-top:10px}
+</style></head><body>
+{{ shell|safe }}
+<div class="container">
+
+  {% if not ai_key_set %}
+  <div class="banner">⚠️ 尚未設定 ANTHROPIC_API_KEY，AI分析功能目前無法使用。請在 Render → Environment 加上這個環境變數後再試。</div>
+  {% endif %}
+
+  <div class="section" id="step-input">
+    <h3>① 貼上原始資料</h3>
+    <div class="hint">可以貼上商品介紹、FAQ、客服對話紀錄、案例內容等，AI會自動拆成「商品規格／FAQ／品牌特色／案例」4種類型的知識庫條目。只會整理原文真實存在的資訊，不會新增或誇大內容。</div>
+    <label>品牌</label>
+    <select id="brand">
+      <option value="">（不限品牌）</option>
+      {% for b in brands %}<option value="{{ b.key }}">{{ b.name }}</option>{% endfor %}
+    </select>
+    <label>品類</label>
+    <input type="text" id="category" placeholder="例如：高架床">
+    <label>原始資料</label>
+    <textarea id="raw_text" rows="14" placeholder="貼上商品介紹、FAQ、客服對話、案例內容..."></textarea>
+    <button class="btn" id="btn-analyze" onclick="doAnalyze()" {{ 'disabled' if not ai_key_set else '' }} style="margin-top:14px">AI 自動分析拆分</button>
+    <div class="loading" id="loading-analyze" style="display:none">AI分析中，可能需要1分鐘，請稍候...</div>
+    <div class="err" id="err-analyze"></div>
+  </div>
+
+  <div class="section step" id="step-preview">
+    <h3>② 預覽並確認</h3>
+    <div class="hint">可以修改每一筆內容、類型、標籤，或勾選「排除」不匯入這一筆。確認後按下方「確認匯入」會批次寫入知識庫——同品牌/品類下標題相同的資料會直接更新覆蓋，不會重複新增。</div>
+    <div id="preview-list"></div>
+    <button class="btn" id="btn-confirm" onclick="doConfirm()">確認匯入</button>
+    <button class="btn btn-outline" onclick="location.reload()">重新開始</button>
+    <div class="err" id="err-confirm"></div>
+  </div>
+
+  <div class="section step" id="step-done">
+    <h3>✅ 匯入完成</h3>
+    <div class="result-box" id="result-text"></div>
+    <a class="btn" style="display:inline-block;margin-top:14px;text-decoration:none" href="/admin/seo-knowledge?key={{ key }}">前往知識庫列表查看</a>
+  </div>
+
+</div>
+<script>
+const KEY = {{ key|tojson }};
+const TYPE_LABELS = {spec:"商品規格", faq:"FAQ", brand_feature:"品牌特色", case:"案例"};
+
+async function safeJson(res){
+  const text = await res.text();
+  try { return JSON.parse(text); }
+  catch(e) { throw new Error('伺服器回應異常（可能是逾時或部署中），請稍後再試。HTTP ' + res.status); }
+}
+
+async function doAnalyze(){
+  const raw_text = document.getElementById('raw_text').value;
+  if (!raw_text.trim()) { alert('請貼上要分析的內容'); return; }
+  document.getElementById('btn-analyze').disabled = true;
+  document.getElementById('loading-analyze').style.display = 'block';
+  document.getElementById('err-analyze').textContent = '';
+  try {
+    const res = await fetch('/admin/seo-knowledge/import/analyze?key=' + encodeURIComponent(KEY), {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({raw_text})
+    });
+    const data = await safeJson(res);
+    if (data.error) { document.getElementById('err-analyze').textContent = data.error; document.getElementById('btn-analyze').disabled = false; document.getElementById('loading-analyze').style.display = 'none'; return; }
+    await pollImportJob(data.job_id);
+  } catch(e) {
+    document.getElementById('err-analyze').textContent = String(e.message || e);
+    document.getElementById('btn-analyze').disabled = false;
+    document.getElementById('loading-analyze').style.display = 'none';
+  }
+}
+
+async function pollImportJob(jobId){
+  while (true) {
+    await new Promise(r => setTimeout(r, 3000));
+    const res = await fetch('/admin/seo-knowledge/import/status/' + jobId + '?key=' + encodeURIComponent(KEY));
+    const data = await safeJson(res);
+    if (data.status === 'pending' || data.status === 'running') continue;
+    if (data.status === 'error') {
+      document.getElementById('err-analyze').textContent = data.error || '分析失敗';
+      break;
+    }
+    if (data.status === 'done') {
+      renderPreview(data.items || []);
+      document.getElementById('step-input').style.display = 'none';
+      document.getElementById('step-preview').classList.add('active');
+      break;
+    }
+  }
+  document.getElementById('btn-analyze').disabled = false;
+  document.getElementById('loading-analyze').style.display = 'none';
+}
+
+function renderPreview(items){
+  const list = document.getElementById('preview-list');
+  if (!items.length) { list.innerHTML = '<p style="color:#999;font-size:13px">AI沒有從這段內容中找到可整理的資訊。</p>'; return; }
+  list.innerHTML = items.map((it, i) => `
+    <div class="preview-row" data-idx="${i}">
+      <div class="row-top">
+        <select class="f-type">
+          ${Object.keys(TYPE_LABELS).map(k => `<option value="${k}" ${k===it.type?'selected':''}>${TYPE_LABELS[k]}</option>`).join('')}
+        </select>
+        <input type="text" class="f-title" value="${(it.title||'').replace(/"/g,'&quot;')}" style="flex:1">
+        <label class="skip-label"><input type="checkbox" class="f-skip"> 排除</label>
+      </div>
+      <textarea class="f-content">${it.content||''}</textarea>
+      <div class="tags-row">
+        <span style="font-size:12px;color:#999">標籤</span>
+        <input type="text" class="f-tags" value="${(it.tags||'').replace(/"/g,'&quot;')}">
+      </div>
+    </div>
+  `).join('');
+}
+
+async function doConfirm(){
+  const brand = document.getElementById('brand').value;
+  const category = document.getElementById('category').value.trim();
+  const rows = document.querySelectorAll('#preview-list .preview-row');
+  const items = Array.from(rows).map(row => ({
+    type: row.querySelector('.f-type').value,
+    title: row.querySelector('.f-title').value,
+    content: row.querySelector('.f-content').value,
+    tags: row.querySelector('.f-tags').value,
+    skip: row.querySelector('.f-skip').checked,
+    allow_ai: true,
+  }));
+  document.getElementById('btn-confirm').disabled = true;
+  document.getElementById('err-confirm').textContent = '';
+  try {
+    const res = await fetch('/admin/seo-knowledge/import/confirm?key=' + encodeURIComponent(KEY), {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({brand, category, items})
+    });
+    const data = await safeJson(res);
+    if (data.error) { document.getElementById('err-confirm').textContent = data.error; document.getElementById('btn-confirm').disabled = false; return; }
+    document.getElementById('result-text').textContent =
+      `新增 ${data.inserted} 筆，更新 ${data.updated} 筆（同品牌/品類下標題相同的資料視為更新，不會重複）`;
+    document.getElementById('step-preview').classList.remove('active');
+    document.getElementById('step-done').classList.add('active');
+  } catch(e) {
+    document.getElementById('err-confirm').textContent = String(e.message || e);
+    document.getElementById('btn-confirm').disabled = false;
+  }
+}
+</script>
 """ + SHELL_CLOSE + """
 </body></html>"""
 
@@ -1236,6 +1494,90 @@ def seo_knowledge_item_delete(item_id):
         abort(403)
     _q("DELETE FROM seo_knowledge WHERE id=%s", (item_id,))
     return redirect(f"/admin/seo-knowledge?key={key}")
+
+# ── Knowledge Import：貼上原始資料 → AI拆分 → 預覽確認 → 批次寫入 ──
+
+def _run_knowledge_import_job(job_id, raw_text):
+    try:
+        _q("UPDATE seo_knowledge_import_jobs SET status='running', updated_at=%s WHERE id=%s", (time.time(), job_id))
+        prompt = _knowledge_import_prompt(raw_text)
+        items, err = _ai_call_json_array(prompt, model="claude-sonnet-4-6", max_tokens=6000)
+        if err:
+            _q("UPDATE seo_knowledge_import_jobs SET status='error', error_msg=%s, updated_at=%s WHERE id=%s",
+               (f"AI分析失敗：{err}", time.time(), job_id))
+            return
+        _q("UPDATE seo_knowledge_import_jobs SET status='done', result=%s, updated_at=%s WHERE id=%s",
+           (json.dumps(items, ensure_ascii=False), time.time(), job_id))
+    except Exception as e:
+        import sys; print(f"[SEO Knowledge Import Job Error] {e}", file=sys.stderr)
+        try:
+            _q("UPDATE seo_knowledge_import_jobs SET status='error', error_msg=%s, updated_at=%s WHERE id=%s",
+               (str(e), time.time(), job_id))
+        except Exception:
+            pass
+
+@seo_bp.route("/admin/seo-knowledge/import")
+def seo_knowledge_import_page():
+    ok, key = check_auth()
+    if not ok:
+        return render_template_string(LOGIN_HTML, error=None)
+    brands = _list_brands()
+    shell = _shell_open(key, "seo-knowledge", [("知識庫管理", "/admin/seo-knowledge"), ("批次匯入", None)])
+    return render_template_string(IMPORT_HTML, key=key, shell=shell, brands=brands,
+        knowledge_types=KNOWLEDGE_TYPES, ai_key_set=bool(ANTHROPIC_API_KEY))
+
+@seo_bp.route("/admin/seo-knowledge/import/analyze", methods=["POST"])
+def seo_knowledge_import_analyze():
+    ok, _ = auth_required()
+    if not ok:
+        return jsonify({"error": "unauthorized"}), 403
+    data = request.get_json(silent=True) or {}
+    raw_text = data.get("raw_text", "")
+    if not raw_text.strip():
+        return jsonify({"error": "請貼上要分析的內容"}), 400
+    if not ANTHROPIC_API_KEY:
+        return jsonify({"error": "尚未設定 ANTHROPIC_API_KEY，請在 Render → Environment 加上這個環境變數才能使用AI功能"}), 200
+    now = time.time()
+    job_id = _q("INSERT INTO seo_knowledge_import_jobs (status,created_at,updated_at) VALUES (%s,%s,%s) RETURNING id",
+                ("pending", now, now), fetch="id")
+    threading.Thread(target=_run_knowledge_import_job, args=(job_id, raw_text), daemon=True).start()
+    return jsonify({"job_id": job_id})
+
+@seo_bp.route("/admin/seo-knowledge/import/status/<int:job_id>")
+def seo_knowledge_import_status(job_id):
+    ok, _ = auth_required()
+    if not ok:
+        return jsonify({"error": "unauthorized"}), 403
+    row = _q("SELECT status,result,error_msg FROM seo_knowledge_import_jobs WHERE id=%s", (job_id,), fetch="one")
+    if not row:
+        return jsonify({"status": "error", "error": "找不到這個匯入任務"})
+    status, result, error_msg = row
+    out = {"status": status}
+    if status == "error":
+        out["error"] = error_msg
+    elif status == "done":
+        try:
+            out["items"] = json.loads(result or "[]")
+        except Exception:
+            out["items"] = []
+    return jsonify(out)
+
+@seo_bp.route("/admin/seo-knowledge/import/confirm", methods=["POST"])
+def seo_knowledge_import_confirm():
+    ok, _ = auth_required()
+    if not ok:
+        return jsonify({"error": "unauthorized"}), 403
+    data = request.get_json(silent=True) or {}
+    brand = data.get("brand", "")
+    category = data.get("category", "")
+    items = [it for it in (data.get("items") or []) if not it.get("skip")]
+    if not items:
+        return jsonify({"error": "沒有要匯入的項目"}), 400
+    try:
+        inserted, updated = _knowledge_upsert(brand, category, items)
+    except Exception as e:
+        return jsonify({"error": f"寫入失敗：{e}"}), 200
+    return jsonify({"inserted": inserted, "updated": updated})
 
 @seo_bp.route("/admin/seo-settings")
 def seo_settings_page():
