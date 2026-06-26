@@ -198,14 +198,25 @@ def init_seo_db():
                     updated_at       FLOAT DEFAULT 0
                 )
             """)
-            cur.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_seo_brand_rules_unique ON seo_brand_rules(brand, category)")
+            # 通用規則比對升級：article_type 讓同一品牌+品類可以針對不同文章類型設不同規則；
+            # priority 讓比對分數打平時可以人工決定優先順序，兩者都留空/預設即可保留舊行為
+            for col_sql in [
+                "ALTER TABLE seo_brand_rules ADD COLUMN IF NOT EXISTS article_type TEXT DEFAULT ''",
+                "ALTER TABLE seo_brand_rules ADD COLUMN IF NOT EXISTS priority INTEGER DEFAULT 100",
+            ]:
+                try: cur.execute(col_sql)
+                except Exception: pass
+            try:
+                cur.execute("DROP INDEX IF EXISTS idx_seo_brand_rules_unique")
+            except Exception: pass
+            cur.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_seo_brand_rules_unique ON seo_brand_rules(brand, category, article_type)")
             cur.execute("SELECT COUNT(*) FROM seo_brand_rules")
             if cur.fetchone()[0] == 0:
                 now0 = time.time()
                 cur.execute("""INSERT INTO seo_brand_rules
-                    (brand,category,positioning,target_audience,key_products,avoid_directions,tone,cta_direction,keywords,negative_keywords,created_at,updated_at)
-                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
-                    ("jsimple", "辦公家具",
+                    (brand,category,article_type,priority,positioning,target_audience,key_products,avoid_directions,tone,cta_direction,keywords,negative_keywords,created_at,updated_at)
+                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+                    ("jsimple", "辦公家具", "", 100,
                      "中價位／中高質感辦公家具，不走低價路線。主打現代工業風、木質搭配黑鐵件、實用且有質感的辦公室配置。",
                      "中小企業、工作室、公司採購、設計公司、辦公室搬遷、新設立辦公室的客戶。",
                      "員工桌、主管桌、經理桌、會議桌、洽談桌、辦公椅、培訓椅、資料櫃、展示櫃、辦公室整體配置。",
@@ -396,7 +407,29 @@ OPPORTUNITY_STATUS_LABELS = {
     "published": "已發布", "paused": "暫停",
     "selected": "已確認", "generated": "已生成草稿",  # 舊資料相容（badge顯示用，下拉選單不會出現這兩個值）
 }
-ARTICLE_TYPES = ["導購文", "比較文", "尺寸指南", "案例文", "FAQ文", "採購指南", "問題解決文", "品牌介紹文"]
+ARTICLE_TYPES = ["資訊型", "教學型", "比較型", "商業導購", "FAQ", "案例分享", "價格分析", "尺寸指南", "其他"]
+ARTICLE_TYPE_GUIDE_MAP = {
+    "資訊型": "以知識性說明為核心，完整解答讀者疑問，給出明確結論與依據。",
+    "教學型": "以step-by-step教學流程為核心，列出操作或選購步驟，每個步驟給出具體做法。",
+    "比較型": "以對比表為核心，列出比較維度，語氣中立，最後給出明確結論建議。",
+    "商業導購": "以商品特色與適用情境為核心，自然導向詢價與購買行動。",
+    "FAQ": "以常見問題集為主體，每題直接給答案，避免空泛鋪陳。",
+    "案例分享": "以情境描述、解決方案、實際成果為核心，呈現真實使用情境。",
+    "價格分析": "以價格區間、影響價格的因素、成本對照為核心，給讀者明確的價格判斷依據。",
+    "尺寸指南": "以規格數據、空間或人數對照表為核心，幫助讀者快速對照選擇。",
+    "其他": "依主題內容彈性規劃架構重點，但仍須保留下列GEO結構元素。",
+}
+
+def _article_type_guide(article_type):
+    """不寫死任何品牌或品類，只依「文章類型」這個通用維度決定架構指引；
+    沒指定類型（AI自動判斷）時，交給AI自己依搜尋意圖判斷。"""
+    article_type = (article_type or "").strip()
+    if not article_type:
+        return ("文章類型：請先依下面的「搜尋意圖分析」自行判斷最適合的文章類型"
+                f"（從以下類型挑一個最貼切的：{ '、'.join(ARTICLE_TYPES) }），"
+                "並依該類型決定文章架構重點與語氣，不需要在最終輸出內容中標註你判斷的類型名稱。")
+    guide = ARTICLE_TYPE_GUIDE_MAP.get(article_type, ARTICLE_TYPE_GUIDE_MAP["其他"])
+    return f"文章類型：{article_type} → {guide}"
 
 def _opportunity_prompt(brand, category, knowledge_items, brand_rule=None):
     return f"""你是台灣SEO/GEO/AEO內容策略專家。請根據以下品牌資訊，產生20個有價值的SEO文章主題。
@@ -540,54 +573,100 @@ def _update_article_extra(article_id, patch):
 
 # ── 品牌 SEO 規則 ───────────────────────────────────────────────
 
-def _list_brand_rules():
+def _list_brand_rules(brand=""):
+    """brand 留空＝列出所有品牌的規則（管理頁用）；指定brand＝只列出該品牌可用的規則（手動選擇下拉選單用）"""
     if not DATABASE_URL:
         return []
     try:
-        rows = _q("""SELECT id,brand,category,positioning,target_audience,key_products,avoid_directions,
-                     tone,cta_direction,keywords,negative_keywords,updated_at
-                     FROM seo_brand_rules ORDER BY brand,category""", fetch="all") or []
+        where_sql = " WHERE brand=%s" if brand else ""
+        params = (brand,) if brand else ()
+        rows = _q(f"""SELECT id,brand,category,article_type,priority,positioning,target_audience,key_products,
+                     avoid_directions,tone,cta_direction,keywords,negative_keywords,updated_at
+                     FROM seo_brand_rules{where_sql} ORDER BY brand,category,priority DESC""", params, fetch="all") or []
         return [{
-            "id": r[0], "brand": r[1], "category": r[2], "positioning": r[3], "target_audience": r[4],
-            "key_products": r[5], "avoid_directions": r[6], "tone": r[7], "cta_direction": r[8],
-            "keywords": r[9], "negative_keywords": r[10],
-            "updated_at": time.strftime("%Y-%m-%d %H:%M", time.localtime(r[11])) if r[11] else "",
+            "id": r[0], "brand": r[1], "category": r[2], "article_type": r[3], "priority": r[4],
+            "positioning": r[5], "target_audience": r[6],
+            "key_products": r[7], "avoid_directions": r[8], "tone": r[9], "cta_direction": r[10],
+            "keywords": r[11], "negative_keywords": r[12],
+            "updated_at": time.strftime("%Y-%m-%d %H:%M", time.localtime(r[13])) if r[13] else "",
         } for r in rows]
     except Exception as e:
         import sys; print(f"[SEO Brand Rules] 讀取清單失敗：{e}", file=sys.stderr)
         return []
 
-def _get_brand_rule(brand, category):
+def _get_brand_rule_by_id(rule_id):
+    if not DATABASE_URL or not rule_id:
+        return {}
+    try:
+        row = _q("""SELECT id,brand,category,article_type,priority,positioning,target_audience,key_products,
+                    avoid_directions,tone,cta_direction,keywords,negative_keywords
+                    FROM seo_brand_rules WHERE id=%s""", (int(rule_id),), fetch="one")
+        if not row:
+            return {}
+        return {"id": row[0], "brand": row[1], "category": row[2], "article_type": row[3], "priority": row[4],
+                "positioning": row[5], "target_audience": row[6], "key_products": row[7], "avoid_directions": row[8],
+                "tone": row[9], "cta_direction": row[10], "keywords": row[11], "negative_keywords": row[12]}
+    except Exception:
+        return {}
+
+def _match_brand_rule(brand, category, article_type=""):
+    """通用比對：不寫死任何品牌/品類/文章類型名稱，全部從 seo_brand_rules 動態比對。
+    比對規則：brand/category/article_type 三個欄位，規則裡留空＝該欄位萬用（適用所有值）；
+    填了值就必須完全相符才算候選。候選裡比對分數最高的勝出（brand相符+1000、category相符+100、
+    article_type相符+10），分數打平時用 priority（數字越大越優先）做最終決定。
+    這個分數機制天然就會做到「精確比對→品牌預設規則→系統預設規則」三層退回，
+    不需要另外寫三段if/else，未來新增品牌或規則也不用改這支邏輯。"""
     if not DATABASE_URL or not brand:
         return {}
     try:
-        row = _q("""SELECT brand,category,positioning,target_audience,key_products,avoid_directions,
-                    tone,cta_direction,keywords,negative_keywords
-                    FROM seo_brand_rules WHERE brand=%s AND category=%s""", (brand, category), fetch="one")
-        if not row:
-            return {}
-        return {"brand": row[0], "category": row[1], "positioning": row[2], "target_audience": row[3],
-                "key_products": row[4], "avoid_directions": row[5], "tone": row[6],
-                "cta_direction": row[7], "keywords": row[8], "negative_keywords": row[9]}
-    except Exception:
+        rows = _q("""SELECT id,brand,category,article_type,priority,positioning,target_audience,key_products,
+                     avoid_directions,tone,cta_direction,keywords,negative_keywords
+                     FROM seo_brand_rules""", fetch="all") or []
+    except Exception as e:
+        import sys; print(f"[SEO Brand Rules] 比對規則失敗：{e}", file=sys.stderr)
         return {}
+    best, best_score = None, None
+    for r in rows:
+        r_brand, r_category, r_atype = r[1] or "", r[2] or "", r[3] or ""
+        r_priority = r[4] if r[4] is not None else 100
+        if r_brand and r_brand != brand:
+            continue
+        if r_category and r_category != category:
+            continue
+        if r_atype and r_atype != article_type:
+            continue
+        score = (1000 if r_brand else 0) + (100 if r_category else 0) + (10 if r_atype else 0)
+        total = score * 100000 + r_priority
+        if best_score is None or total > best_score:
+            best_score = total
+            best = r
+    if not best:
+        return {}
+    return {"id": best[0], "brand": best[1], "category": best[2], "article_type": best[3], "priority": best[4],
+            "positioning": best[5], "target_audience": best[6], "key_products": best[7],
+            "avoid_directions": best[8], "tone": best[9], "cta_direction": best[10],
+            "keywords": best[11], "negative_keywords": best[12]}
 
 def _save_brand_rule(form):
     rule_id = form.get("id", "")
     now = time.time()
-    fields = (form.get("brand", ""), form.get("category", ""), form.get("positioning", ""),
-              form.get("target_audience", ""), form.get("key_products", ""), form.get("avoid_directions", ""),
-              form.get("tone", ""), form.get("cta_direction", ""), form.get("keywords", ""),
-              form.get("negative_keywords", ""))
+    try:
+        priority = int(form.get("priority", "") or 100)
+    except (TypeError, ValueError):
+        priority = 100
+    fields = (form.get("brand", ""), form.get("category", ""), form.get("article_type", ""), priority,
+              form.get("positioning", ""), form.get("target_audience", ""), form.get("key_products", ""),
+              form.get("avoid_directions", ""), form.get("tone", ""), form.get("cta_direction", ""),
+              form.get("keywords", ""), form.get("negative_keywords", ""))
     if rule_id:
-        _q("""UPDATE seo_brand_rules SET brand=%s,category=%s,positioning=%s,target_audience=%s,
-              key_products=%s,avoid_directions=%s,tone=%s,cta_direction=%s,keywords=%s,negative_keywords=%s,
-              updated_at=%s WHERE id=%s""", fields + (now, rule_id))
+        _q("""UPDATE seo_brand_rules SET brand=%s,category=%s,article_type=%s,priority=%s,positioning=%s,
+              target_audience=%s,key_products=%s,avoid_directions=%s,tone=%s,cta_direction=%s,keywords=%s,
+              negative_keywords=%s,updated_at=%s WHERE id=%s""", fields + (now, rule_id))
     else:
         _q("""INSERT INTO seo_brand_rules
-              (brand,category,positioning,target_audience,key_products,avoid_directions,tone,cta_direction,
-               keywords,negative_keywords,created_at,updated_at)
-              VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""", fields + (now, now))
+              (brand,category,article_type,priority,positioning,target_audience,key_products,avoid_directions,
+               tone,cta_direction,keywords,negative_keywords,created_at,updated_at)
+              VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""", fields + (now, now))
 
 def _brand_rule_block(rule):
     """把品牌SEO規則轉成丟進Prompt的文字區塊"""
@@ -660,7 +739,7 @@ def _run_quality_check_job(job_id, article_id):
         article = {"title": row[0], "meta_title": row[1], "meta_description": row[2], "content": row[3]}
         brand_key, category = row[4], row[5]
         extra = _parse_extra(row[6])
-        brand_rule = _get_brand_rule(brand_key, category)
+        brand_rule = _match_brand_rule(brand_key, category)
         prompt = _quality_check_prompt(article, brand_rule, extra)
         result, err = _ai_call_json(prompt, model="claude-sonnet-4-6", max_tokens=2000)
         if err:
@@ -770,7 +849,6 @@ DEFAULT_GENERATE_PROMPT = """你是台灣SEO/GEO/AEO內容策略專家與文案�
 對應商品（文章必須導向這些商品，自然提及並建議）：[[RELATED_PRODUCTS]]
 禁止偏離方向（絕對不要寫到這些主題或方向）：[[AVOID_DIRECTIONS]]
 CTA方向：[[CTA_DIRECTION]]
-文章類型：[[ARTICLE_TYPE]]
 
 搜尋意圖分析參考：
 [[ANALYSIS]]
@@ -794,15 +872,7 @@ CTA方向：[[CTA_DIRECTION]]
 - CTA要呼應「CTA方向」，自然引導但不要太硬銷
 
 ━━━ 第一步：依文章類型規劃架構 ━━━
-文章類型：[[ARTICLE_TYPE]]
-- 導購文 → 商品特色＋適用情境為核心，引導詢價
-- 比較文 → 對比表為核心，語氣中立有結論
-- 尺寸指南 → 規格數據＋空間/人數對照表
-- 案例文 → 情境描述＋解決方案＋成果
-- FAQ文 → 以常見問題集為主體
-- 採購指南 → 採購流程、評估要點、配置建議
-- 問題解決文 → 問題診斷＋解決步驟
-- 品牌介紹文 → 品牌定位、優勢、適合對象
+[[ARTICLE_TYPE_GUIDE]]
 文章類型只影響語氣與架構重點，下面的GEO結構元素仍然每篇必要。
 
 ━━━ 第二步：規劃架構並寫完整文章 ━━━
@@ -905,6 +975,7 @@ def _generate_article_prompt(brand, category, topic, intent_analysis, knowledge_
         AVOID_DIRECTIONS=fields.get('avoid_directions', ''),
         CTA_DIRECTION=fields.get('cta_direction', ''),
         ARTICLE_TYPE=fields.get('article_type', ''),
+        ARTICLE_TYPE_GUIDE=_article_type_guide(fields.get('article_type', '')),
         BRAND_RULE=_brand_rule_block(brand_rule))
 
 # ── Auth（複製自 app.py，避免 circular import，與既有後台共用同一支密碼）──
@@ -1865,10 +1936,11 @@ td.excerpt{max-width:260px;color:#666;font-size:12px}
   <div class="section">
     <h3 style="font-size:15px;margin-bottom:12px">品牌SEO規則（{{ rules|length }}）</h3>
     <table>
-      <tr><th>品牌</th><th>品類</th><th>品牌定位</th><th>目標客群</th><th>禁止偏離方向</th><th>更新時間</th><th>操作</th></tr>
+      <tr><th>品牌</th><th>品類</th><th>文章類型</th><th>優先權</th><th>品牌定位</th><th>目標客群</th><th>禁止偏離方向</th><th>更新時間</th><th>操作</th></tr>
       {% for r in rules %}
       <tr>
-        <td>{{ r.brand }}</td><td>{{ r.category }}</td>
+        <td>{{ r.brand or '（全部品牌）' }}</td><td>{{ r.category or '（全部品類）' }}</td>
+        <td>{{ r.article_type or '（全部類型）' }}</td><td>{{ r.priority }}</td>
         <td class="excerpt">{{ r.positioning }}</td>
         <td class="excerpt">{{ r.target_audience }}</td>
         <td class="excerpt">{{ r.avoid_directions }}</td>
@@ -1904,10 +1976,17 @@ textarea{resize:vertical;line-height:1.6}
 <form method="POST" action="/admin/seo-brand-rules/item/save?key={{ key }}">
   <input type="hidden" name="id" value="{{ r.id if r else '' }}">
   <div class="section">
-    <label>品牌（建議用跟AI生成文章一致的品牌Key，例如 jsimple）</label>
-    <input type="text" name="brand" value="{{ r.brand if r else '' }}" required>
-    <label>品類</label>
-    <input type="text" name="category" value="{{ r.category if r else '' }}" required placeholder="例如：辦公家具">
+    <label>品牌（建議用跟AI生成文章一致的品牌Key，例如 jsimple；留空＝適用所有品牌的系統預設規則）</label>
+    <input type="text" name="brand" value="{{ r.brand if r else '' }}">
+    <label>品類（留空＝適用該品牌所有品類，當作品牌預設規則）</label>
+    <input type="text" name="category" value="{{ r.category if r else '' }}" placeholder="例如：辦公家具">
+    <label>文章類型（留空＝適用所有文章類型）</label>
+    <select name="article_type">
+      <option value="">（全部類型）</option>
+      {% for t in article_types %}<option value="{{ t }}" {{ 'selected' if r and r.article_type==t else '' }}>{{ t }}</option>{% endfor %}
+    </select>
+    <label>優先權（數字越大越優先比對，平分時用來決勝負；一般規則建議100，越具體的規則建議設越高，例如200、300）</label>
+    <input type="text" name="priority" value="{{ r.priority if r else 100 }}">
     <label>品牌定位</label>
     <textarea name="positioning" rows="3">{{ r.positioning if r else '' }}</textarea>
     <label>目標客群</label>
@@ -1971,7 +2050,7 @@ textarea{width:100%;border:1px solid #ddd;border-radius:8px;padding:10px;font-si
 
   <div class="section">
     <h3>② AI 生成文章 Prompt</h3>
-    <div class="hint">可用變數：<code>[[BRAND_NAME]]</code> <code>[[BRAND_CATEGORY]]</code> <code>[[BRAND_STYLE]]</code> <code>[[BRAND_TONE]]</code> <code>[[CATEGORY]]</code> <code>[[TOPIC]]</code> <code>[[ANALYSIS]]</code>（搜尋意圖分析結果）<code>[[KNOWLEDGE]]</code>（<a href="/admin/seo-knowledge?key={{ key }}">知識庫</a>引用資料）— 結尾的JSON輸出格式請保留，否則文章會存不進去</div>
+    <div class="hint">可用變數：<code>[[BRAND_NAME]]</code> <code>[[BRAND_CATEGORY]]</code> <code>[[BRAND_STYLE]]</code> <code>[[BRAND_TONE]]</code> <code>[[CATEGORY]]</code> <code>[[TOPIC]]</code> <code>[[ANALYSIS]]</code>（搜尋意圖分析結果）<code>[[KNOWLEDGE]]</code>（<a href="/admin/seo-knowledge?key={{ key }}">知識庫</a>引用資料）<code>[[BRAND_RULE]]</code>（依「自動／不套用／手動」選出的<a href="/admin/seo-brand-rules?key={{ key }}">品牌SEO規則</a>）<code>[[ARTICLE_TYPE_GUIDE]]</code>（依文章類型給的架構指引，未指定類型時會請AI自行判斷）— 結尾的JSON輸出格式請保留，否則文章會存不進去</div>
     <form method="POST" action="/admin/seo-settings/save?key={{ key }}">
       <input type="hidden" name="prompt_key" value="generate">
       <textarea name="content" rows="32">{{ generate_prompt }}</textarea>
@@ -2020,6 +2099,12 @@ pre{white-space:pre-wrap;font-family:inherit;font-size:13px;line-height:1.7;back
 .checkbox-row input{width:auto}
 .checkbox-row label{margin:0}
 .hint{font-size:11px;color:#999;margin-top:4px}
+.radio-group{margin-top:14px;border:1px solid #eee;border-radius:8px;padding:10px 12px}
+.radio-row{display:flex;align-items:flex-start;gap:8px;padding:6px 0}
+.radio-row input{width:auto;margin-top:2px}
+.radio-row label{margin:0;font-size:13px;color:#333;font-weight:600}
+.radio-row .desc{font-size:11px;color:#999;font-weight:400;margin-top:2px}
+#manual-rule-wrap{margin-top:10px;padding-left:24px}
 </style></head><body>
 {{ shell|safe }}
 <div class="container">
@@ -2056,6 +2141,7 @@ pre{white-space:pre-wrap;font-family:inherit;font-size:13px;line-height:1.7;back
       <div>
         <label>文章類型</label>
         <select id="article_type">
+          <option value="">AI自動判斷（預設）</option>
           {% for t in article_types %}<option value="{{ t }}">{{ t }}</option>{% endfor %}
         </select>
       </div>
@@ -2076,9 +2162,24 @@ pre{white-space:pre-wrap;font-family:inherit;font-size:13px;line-height:1.7;back
     <label>CTA方向</label>
     <input type="text" id="cta_direction" placeholder="例如：提供空間尺寸、人數與預算，可協助配置與報價">
 
-    <div class="checkbox-row">
-      <input type="checkbox" id="apply_brand_rules" checked>
-      <label for="apply_brand_rules">套用品牌SEO規則（選好品牌+品類後自動帶入定位/客群/禁區/CTA，可手動覆寫上面欄位）</label>
+    <label>品牌SEO規則</label>
+    <div class="radio-group">
+      <div class="radio-row">
+        <input type="radio" name="brand_rule_mode" id="mode-auto" value="auto" checked>
+        <div><label for="mode-auto">自動（預設）</label><div class="desc">依品牌＋品類＋文章類型自動選出最符合的SEO規則；找不到符合的就退回品牌預設規則，品牌也沒有就用系統預設規則。</div></div>
+      </div>
+      <div class="radio-row">
+        <input type="radio" name="brand_rule_mode" id="mode-none" value="none">
+        <div><label for="mode-none">不套用</label><div class="desc">完全不套用品牌SEO規則，只用搜尋意圖＋知識庫＋Prompt生成文章。</div></div>
+      </div>
+      <div class="radio-row">
+        <input type="radio" name="brand_rule_mode" id="mode-manual" value="manual">
+        <div><label for="mode-manual">手動選擇</label><div class="desc">自己指定一筆SEO規則。</div></div>
+      </div>
+    </div>
+    <div id="manual-rule-wrap" style="display:none">
+      <label>SEO規則</label>
+      <select id="manual_rule_id"></select>
     </div>
     <div class="hint" id="brand-rule-hint"></div>
 
@@ -2106,20 +2207,79 @@ pre{white-space:pre-wrap;font-family:inherit;font-size:13px;line-height:1.7;back
 const KEY = {{ key|tojson }};
 const BRAND_RULES = {{ brand_rules_json|safe }};
 
-function applyBrandRule(){
-  if (!document.getElementById('apply_brand_rules').checked) {
-    document.getElementById('brand-rule-hint').textContent = '';
-    return;
+// 跟後端 _match_brand_rule 同一套比分邏輯：規則欄位留空＝萬用，填了就要完全相符；
+// 分數最高的勝出，平手用 priority 決定。不寫死任何品牌/品類/文章類型名稱。
+function matchBrandRule(brand, category, articleType){
+  let best = null, bestScore = -1;
+  for (const r of BRAND_RULES) {
+    if (r.brand && r.brand !== brand) continue;
+    if (r.category && r.category !== category) continue;
+    if (r.article_type && r.article_type !== articleType) continue;
+    const score = (r.brand ? 1000 : 0) + (r.category ? 100 : 0) + (r.article_type ? 10 : 0);
+    const total = score * 100000 + (r.priority || 100);
+    if (total > bestScore) { bestScore = total; best = r; }
   }
-  const brand = document.getElementById('brand').value;
-  const category = document.getElementById('category').value.trim();
-  const rule = BRAND_RULES[brand + '|' + category];
-  if (!rule) { document.getElementById('brand-rule-hint').textContent = '（這個品牌+品類目前沒有設定品牌SEO規則，可去左側「品牌SEO規則」新增）'; return; }
+  return best;
+}
+
+function ruleLabel(r){
+  return (r.category || '（全部品類）') + ' / ' + (r.article_type || '全部類型') + '（優先權 ' + (r.priority || 100) + '）';
+}
+
+function currentMode(){
+  return document.querySelector('input[name="brand_rule_mode"]:checked').value;
+}
+
+function fillFromRule(rule){
   if (!document.getElementById('target_audience').value) document.getElementById('target_audience').value = rule.target_audience || '';
   if (!document.getElementById('related_products').value) document.getElementById('related_products').value = rule.key_products || '';
   if (!document.getElementById('avoid_directions').value) document.getElementById('avoid_directions').value = rule.avoid_directions || '';
   if (!document.getElementById('cta_direction').value) document.getElementById('cta_direction').value = rule.cta_direction || '';
-  document.getElementById('brand-rule-hint').textContent = '✓ 已套用品牌SEO規則（' + brand + ' / ' + category + '）';
+}
+
+function refreshManualOptions(){
+  const brand = document.getElementById('brand').value;
+  const select = document.getElementById('manual_rule_id');
+  const brandRules = BRAND_RULES.filter(r => r.brand === brand);
+  select.innerHTML = '';
+  if (!brandRules.length) {
+    const opt = document.createElement('option');
+    opt.value = ''; opt.textContent = '此品牌目前尚未建立SEO規則';
+    select.appendChild(opt);
+    return;
+  }
+  for (const r of brandRules) {
+    const opt = document.createElement('option');
+    opt.value = r.id; opt.textContent = ruleLabel(r);
+    select.appendChild(opt);
+  }
+}
+
+function applyBrandRule(){
+  const mode = currentMode();
+  document.getElementById('manual-rule-wrap').style.display = (mode === 'manual') ? 'block' : 'none';
+  const hint = document.getElementById('brand-rule-hint');
+  const brand = document.getElementById('brand').value;
+  const category = document.getElementById('category').value.trim();
+  const articleType = document.getElementById('article_type').value;
+
+  if (mode === 'none') { hint.textContent = '（不套用品牌SEO規則，僅用搜尋意圖＋知識庫＋Prompt生成）'; return; }
+
+  if (mode === 'manual') {
+    refreshManualOptions();
+    const select = document.getElementById('manual_rule_id');
+    const rule = BRAND_RULES.find(r => String(r.id) === String(select.value));
+    if (!rule) { hint.textContent = '（此品牌目前尚未建立SEO規則，將不套用品牌規則）'; return; }
+    fillFromRule(rule);
+    hint.textContent = '✓ 已套用所選SEO規則（' + ruleLabel(rule) + '）';
+    return;
+  }
+
+  // auto
+  const rule = matchBrandRule(brand, category, articleType);
+  if (!rule) { hint.textContent = '（找不到任何符合的SEO規則，本篇將不套用品牌規則）'; return; }
+  fillFromRule(rule);
+  hint.textContent = '✓ 自動套用SEO規則（' + ruleLabel(rule) + '）';
 }
 
 document.getElementById('brand').addEventListener('change', function(){
@@ -2127,7 +2287,9 @@ document.getElementById('brand').addEventListener('change', function(){
   applyBrandRule();
 });
 document.getElementById('category').addEventListener('blur', applyBrandRule);
-document.getElementById('apply_brand_rules').addEventListener('change', applyBrandRule);
+document.getElementById('article_type').addEventListener('change', applyBrandRule);
+document.getElementById('manual_rule_id').addEventListener('change', applyBrandRule);
+document.querySelectorAll('input[name="brand_rule_mode"]').forEach(el => el.addEventListener('change', applyBrandRule));
 if (document.getElementById('brand').options.length && !document.getElementById('category').value) {
   document.getElementById('category').value = document.getElementById('brand').selectedOptions[0].dataset.category || '';
 }
@@ -2183,7 +2345,8 @@ async function doGenerate(){
         avoid_directions: document.getElementById('avoid_directions').value,
         cta_direction: document.getElementById('cta_direction').value,
         article_type: document.getElementById('article_type').value,
-        apply_brand_rules: document.getElementById('apply_brand_rules').checked,
+        brand_rule_mode: currentMode(),
+        manual_rule_id: document.getElementById('manual_rule_id').value,
       })
     });
     const data = await safeJson(res);
@@ -2406,7 +2569,7 @@ def _run_opportunity_job(job_id, brand_key, category):
         _q("UPDATE seo_opportunity_jobs SET status='running', updated_at=%s WHERE id=%s", (time.time(), job_id))
         brand = _get_brand(brand_key)
         knowledge_items = _get_knowledge_for_prompt(brand_key, category, limit=15)
-        brand_rule = _get_brand_rule(brand_key, category)
+        brand_rule = _match_brand_rule(brand_key, category)
         prompt = _opportunity_prompt(brand, category, knowledge_items, brand_rule)
         items, err = _ai_call_json_array(prompt, model="claude-sonnet-4-6", max_tokens=6000)
         if err:
@@ -2681,23 +2844,23 @@ def seo_brand_rule_new():
     if not ok:
         return render_template_string(LOGIN_HTML, error=None)
     shell = _shell_open(key, "seo-brand-rules", [("品牌SEO規則", "/admin/seo-brand-rules"), ("新增規則", None)])
-    return render_template_string(BRAND_RULE_ITEM_HTML, key=key, shell=shell, r=None)
+    return render_template_string(BRAND_RULE_ITEM_HTML, key=key, shell=shell, r=None, article_types=ARTICLE_TYPES)
 
 @seo_bp.route("/admin/seo-brand-rules/item/<int:rule_id>")
 def seo_brand_rule_edit(rule_id):
     ok, key = check_auth()
     if not ok:
         return render_template_string(LOGIN_HTML, error=None)
-    row = _q("""SELECT id,brand,category,positioning,target_audience,key_products,avoid_directions,
-                tone,cta_direction,keywords,negative_keywords FROM seo_brand_rules WHERE id=%s""",
+    row = _q("""SELECT id,brand,category,article_type,priority,positioning,target_audience,key_products,
+                avoid_directions,tone,cta_direction,keywords,negative_keywords FROM seo_brand_rules WHERE id=%s""",
               (rule_id,), fetch="one")
     if not row:
         abort(404)
-    r = {"id": row[0], "brand": row[1], "category": row[2], "positioning": row[3], "target_audience": row[4],
-         "key_products": row[5], "avoid_directions": row[6], "tone": row[7], "cta_direction": row[8],
-         "keywords": row[9], "negative_keywords": row[10]}
+    r = {"id": row[0], "brand": row[1], "category": row[2], "article_type": row[3], "priority": row[4],
+         "positioning": row[5], "target_audience": row[6], "key_products": row[7], "avoid_directions": row[8],
+         "tone": row[9], "cta_direction": row[10], "keywords": row[11], "negative_keywords": row[12]}
     shell = _shell_open(key, "seo-brand-rules", [("品牌SEO規則", "/admin/seo-brand-rules"), ("編輯規則", None)])
-    return render_template_string(BRAND_RULE_ITEM_HTML, key=key, shell=shell, r=r)
+    return render_template_string(BRAND_RULE_ITEM_HTML, key=key, shell=shell, r=r, article_types=ARTICLE_TYPES)
 
 @seo_bp.route("/admin/seo-brand-rules/item/save", methods=["POST"])
 def seo_brand_rule_save():
@@ -2752,10 +2915,9 @@ def seo_generator_page():
         rules = _list_brand_rules()
     except Exception:
         rules = []
-    brand_rules_map = {f"{r['brand']}|{r['category']}": r for r in rules}
     shell = _shell_open(key, "seo-generator", [("AI 生成文章", None)])
     return render_template_string(GENERATOR_HTML, key=key, shell=shell, brands=brands, ai_key_set=bool(ANTHROPIC_API_KEY),
-        article_types=ARTICLE_TYPES, brand_rules_json=json.dumps(brand_rules_map, ensure_ascii=False),
+        article_types=ARTICLE_TYPES, brand_rules_json=json.dumps(rules, ensure_ascii=False),
         prefill_brand=request.args.get("brand", ""), prefill_category=request.args.get("category", ""),
         prefill_topic=request.args.get("topic", ""), prefill_opp_id=request.args.get("opp_id", ""),
         prefill_main_keyword=request.args.get("main_keyword", ""),
@@ -2789,8 +2951,14 @@ def _run_generate_job(job_id, brand_key, category, topic, analysis, opp_id=None,
         _q("UPDATE seo_generate_jobs SET status='running', updated_at=%s WHERE id=%s", (time.time(), job_id))
         brand = _get_brand(brand_key)
         knowledge_items = _get_knowledge_for_prompt(brand_key, category, limit=10)
-        apply_brand_rules = fields.get("apply_brand_rules", True)
-        brand_rule = _get_brand_rule(brand_key, category) if apply_brand_rules else {}
+        brand_rule_mode = fields.get("brand_rule_mode", "auto")
+        if brand_rule_mode == "none":
+            brand_rule = {}
+        elif brand_rule_mode == "manual":
+            brand_rule = _get_brand_rule_by_id(fields.get("manual_rule_id"))
+        else:
+            brand_rule_mode = "auto"
+            brand_rule = _match_brand_rule(brand_key, category, fields.get("article_type", ""))
         prompt = _generate_article_prompt(brand, category, topic, analysis, knowledge_items, fields, brand_rule)
         result, err = _ai_call_json(prompt, model="claude-sonnet-4-6", max_tokens=8000)
         if err:
@@ -2808,7 +2976,9 @@ def _run_generate_job(job_id, brand_key, category, topic, analysis, opp_id=None,
             "long_tail_keywords": result.get("long_tail_keywords", ""),
             "ai_score": 0,
             "quality_check": {},
-            "brand_rule_applied": bool(apply_brand_rules and brand_rule),
+            "brand_rule_mode": brand_rule_mode,
+            "brand_rule_applied": bool(brand_rule),
+            "brand_rule_id": brand_rule.get("id") if brand_rule else None,
             "next_action": "AI檢查",
         })
         new_id = _q("""INSERT INTO seo_articles
@@ -2852,7 +3022,8 @@ def seo_generator_generate():
         "avoid_directions": data.get("avoid_directions", ""),
         "cta_direction": data.get("cta_direction", ""),
         "article_type": data.get("article_type", ""),
-        "apply_brand_rules": bool(data.get("apply_brand_rules", True)),
+        "brand_rule_mode": data.get("brand_rule_mode") if data.get("brand_rule_mode") in ("auto", "none", "manual") else "auto",
+        "manual_rule_id": data.get("manual_rule_id", ""),
     }
     if not topic.strip():
         return jsonify({"error": "請輸入主題"}), 400
