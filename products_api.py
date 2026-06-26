@@ -1930,16 +1930,27 @@ function tab2Html(j){
   _lbImgs = [];
   const _addLb = (srcs, labels, cat) => srcs.forEach((s,i) => _lbImgs.push({src:s, label:labels&&labels[i]?labels[i]:cat, cat}));
 
-  // ── 1. 原圖：main/sku/detail/review 全部合併成單一區，標籤保留原分類 ──
-  const origSrcs = [], origLabels = [];
+  // ── 1. 原圖：依分類分區顯示（主圖/SKU/詳情/評價），各自可全選/取消 ──
   const mainSrcs = mainImgs.length ? mainImgs.map(i=>typeof i==='object'?i.src:i) : (j.raw_images||[]);
-  mainSrcs.forEach(s=>{origSrcs.push(s);origLabels.push('主圖');});
-  skuImgs.forEach(i=>{const s=typeof i==='object'?i.src:i;origSrcs.push(s);origLabels.push((typeof i==='object'&&i.label)?'SKU:'+i.label:'SKU');});
-  detailImgs.forEach(i=>{const s=typeof i==='object'?i.src:i;origSrcs.push(s);origLabels.push('詳情');});
-  reviewImgs.forEach(i=>{const s=typeof i==='object'?i.src:i;origSrcs.push(s);origLabels.push('評價');});
-  _addLb(origSrcs, origLabels, "原圖");
-  h += `<div class="compare-col-hd">原圖（${origSrcs.length} 張）</div>`;
-  h += imgCatHtml("orig","原圖",origSrcs,origLabels);
+  const origCount = mainSrcs.length + skuImgs.length + detailImgs.length + reviewImgs.length;
+  h += `<div class="compare-col-hd">原圖（${origCount} 張）</div>`;
+  if(mainSrcs.length){_addLb(mainSrcs,[],"主圖");h+=imgCatHtml("main","主圖",mainSrcs,[]);}
+  if(skuImgs.length){
+    const srcs=skuImgs.map(i=>typeof i==='object'?i.src:i);
+    const labels=skuImgs.map(i=>typeof i==='object'?(i.label||''):'');
+    _addLb(srcs,labels,"SKU");
+    h+=imgCatHtml("sku","SKU 規格圖",srcs,labels);
+  }
+  if(detailImgs.length){
+    const srcs=detailImgs.map(i=>typeof i==='object'?i.src:i);
+    _addLb(srcs,[],"詳情");
+    h+=imgCatHtml("detail","詳情圖",srcs,[]);
+  }
+  if(reviewImgs.length){
+    const srcs=reviewImgs.map(i=>typeof i==='object'?i.src:i);
+    _addLb(srcs,[],"評價圖");
+    h+=imgCatHtml("review","買家評價圖",srcs,[]);
+  }
   if(videoUrls.length){
     h+=`<div class="section"><div class="slabel">影片（${videoUrls.length} 個）</div><div>${videoUrls.map(v=>`<a href="${esc(v)}" target="_blank" style="font-size:12px;display:block;margin:2px 0;color:#1a73e8;word-break:break-all">${esc(v.slice(0,80))}</a>`).join("")}</div></div>`;
   }
@@ -1992,12 +2003,18 @@ function tab2Html(j){
 
   h+=`<div class="sel-action-bar">
     <span class="sel-count" id="selCount">已選 ${_selImgs.size} 張</span>
+    <button class="sel-btn" onclick="toggleAllCats(true)">全選全部</button>
+    <button class="sel-btn" onclick="toggleAllCats(false)">取消全部</button>
     <button class="btn-translate" id="btnTr_${j.id}" onclick="translateSelected(${j.id})">文A 翻譯選取</button>
     <button class="sel-btn sel-btn-white" onclick="whitebgSelected(${j.id})">⬜ 生成白底圖</button>
     <button class="btn-zip" onclick="downloadZipSelected(${j.id})">⬇ ZIP 下載</button>
     <button class="btn-confirm" onclick="confirmSelect(${j.id})">確認選圖</button>
   </div>`;
   return h;
+}
+
+function toggleAllCats(checked){
+  ['main','sku','detail','review'].forEach(catId=>toggleAllInCat(catId,checked));
 }
 
 async function whitebgSelected(id){
@@ -2273,7 +2290,7 @@ async function confirmSelect(id){
 async function downloadZipSelected(id){
   const items=[];
   const cc={};
-  ['orig'].forEach(catId=>{
+  ['main','sku','detail','review'].forEach(catId=>{
     const el=document.getElementById('cat_'+catId);
     if(!el) return;
     el.querySelectorAll('.img-thumb input[type=checkbox]:checked').forEach(cb=>{
