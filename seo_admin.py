@@ -647,6 +647,27 @@ def _match_brand_rule(brand, category, article_type=""):
             "avoid_directions": best[8], "tone": best[9], "cta_direction": best[10],
             "keywords": best[11], "negative_keywords": best[12]}
 
+def _resolve_brand_rule(brand_key, category, fields):
+    """三種模式（自動／不套用／手動）共用的決定邏輯，Preview跟正式生成都呼叫這支，確保預覽看到的跟實際送出的一致。"""
+    mode = fields.get("brand_rule_mode", "auto")
+    if mode == "none":
+        return "none", {}
+    if mode == "manual":
+        return "manual", _get_brand_rule_by_id(fields.get("manual_rule_id"))
+    return "auto", _match_brand_rule(brand_key, category, fields.get("article_type", ""))
+
+def _brand_rule_label(brand_rule):
+    if not brand_rule:
+        return "未套用品牌SEO規則"
+    return "{} / {} / {}（優先權 {}）".format(
+        brand_rule.get("brand") or "（全部品牌）",
+        brand_rule.get("category") or "（全部品類）",
+        brand_rule.get("article_type") or "全部類型",
+        brand_rule.get("priority", 100))
+
+def _article_type_label(article_type):
+    return article_type or "AI自動判斷（依搜尋意圖決定，正式生成後才會知道實際結果）"
+
 def _save_brand_rule(form):
     rule_id = form.get("id", "")
     now = time.time()
@@ -2191,9 +2212,25 @@ pre{white-space:pre-wrap;font-family:inherit;font-size:13px;line-height:1.7;back
   <div class="section step" id="step-analysis">
     <label>搜尋意圖分析結果</label>
     <pre id="analysis-text"></pre>
-    <button class="btn" id="btn-generate" onclick="doGenerate()" style="margin-top:14px">5. AI 生成文章</button>
+    <div style="display:flex;gap:10px;margin-top:14px;flex-wrap:wrap">
+      <button class="btn btn-outline" id="btn-preview" onclick="doPreview()">👁 預覽 Prompt</button>
+      <button class="btn" id="btn-generate" onclick="doGenerate()">AI 生成文章</button>
+    </div>
+    <div class="loading" id="loading-preview" style="display:none">組裝 Prompt 中...</div>
+    <div class="err" id="err-preview"></div>
     <div class="loading" id="loading-generate" style="display:none">生成文章中，可能需要1分鐘，請稍候...</div>
     <div class="err" id="err-generate"></div>
+  </div>
+
+  <div class="section step" id="step-preview">
+    <label>套用的品牌SEO規則</label>
+    <div id="preview-brand-rule" style="font-size:13px;margin-bottom:14px"></div>
+    <label>知識庫引用</label>
+    <div id="preview-knowledge" style="font-size:13px;line-height:1.7;margin-bottom:14px"></div>
+    <label>文章類型判定</label>
+    <div id="preview-article-type" style="font-size:13px;margin-bottom:14px"></div>
+    <label>完整 Prompt（唯讀，實際會送給 Claude 的內容）</label>
+    <textarea id="preview-prompt" rows="20" readonly style="font-size:12px;background:#fafafa;line-height:1.6"></textarea>
   </div>
 
   <div class="section step" id="step-done">
@@ -2327,6 +2364,48 @@ async function safeJson(res){
   catch(e) { throw new Error('伺服器回應異常（可能是逾時或部署中），請稍後再試。HTTP ' + res.status); }
 }
 
+function buildGeneratePayload(){
+  return {
+    brand: window._lastBrand, category: window._lastCategory,
+    topic: window._lastTopic, analysis: window._lastAnalysis,
+    opp_id: document.getElementById('opp_id').value,
+    main_keyword: document.getElementById('main_keyword').value,
+    search_intent: document.getElementById('search_intent').value,
+    target_audience: document.getElementById('target_audience').value,
+    related_products: document.getElementById('related_products').value,
+    avoid_directions: document.getElementById('avoid_directions').value,
+    cta_direction: document.getElementById('cta_direction').value,
+    article_type: document.getElementById('article_type').value,
+    brand_rule_mode: currentMode(),
+    manual_rule_id: document.getElementById('manual_rule_id').value,
+  };
+}
+
+async function doPreview(){
+  document.getElementById('btn-preview').disabled = true;
+  document.getElementById('loading-preview').style.display = 'block';
+  document.getElementById('err-preview').textContent = '';
+  try {
+    const res = await fetch('/admin/seo-generator/preview?key=' + encodeURIComponent(KEY), {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify(buildGeneratePayload())
+    });
+    const data = await safeJson(res);
+    if (data.error) { document.getElementById('err-preview').textContent = data.error; }
+    else {
+      document.getElementById('preview-brand-rule').textContent = data.brand_rule_label;
+      document.getElementById('preview-knowledge').innerHTML = data.knowledge_items.length
+        ? data.knowledge_items.map(k => '・[' + k.type + '] ' + k.title).join('<br>')
+        : '（沒有符合此品牌/品類的知識庫資料可引用）';
+      document.getElementById('preview-article-type').textContent = data.article_type_label;
+      document.getElementById('preview-prompt').value = data.prompt;
+      document.getElementById('step-preview').classList.add('active');
+    }
+  } catch(e) { document.getElementById('err-preview').textContent = String(e.message || e); }
+  document.getElementById('btn-preview').disabled = false;
+  document.getElementById('loading-preview').style.display = 'none';
+}
+
 async function doGenerate(){
   document.getElementById('btn-generate').disabled = true;
   document.getElementById('loading-generate').style.display = 'block';
@@ -2334,20 +2413,7 @@ async function doGenerate(){
   try {
     const res = await fetch('/admin/seo-generator/generate?key=' + encodeURIComponent(KEY), {
       method: 'POST', headers: {'Content-Type':'application/json'},
-      body: JSON.stringify({
-        brand: window._lastBrand, category: window._lastCategory,
-        topic: window._lastTopic, analysis: window._lastAnalysis,
-        opp_id: document.getElementById('opp_id').value,
-        main_keyword: document.getElementById('main_keyword').value,
-        search_intent: document.getElementById('search_intent').value,
-        target_audience: document.getElementById('target_audience').value,
-        related_products: document.getElementById('related_products').value,
-        avoid_directions: document.getElementById('avoid_directions').value,
-        cta_direction: document.getElementById('cta_direction').value,
-        article_type: document.getElementById('article_type').value,
-        brand_rule_mode: currentMode(),
-        manual_rule_id: document.getElementById('manual_rule_id').value,
-      })
+      body: JSON.stringify(buildGeneratePayload())
     });
     const data = await safeJson(res);
     if (data.error) { document.getElementById('err-generate').textContent = data.error; document.getElementById('btn-generate').disabled = false; document.getElementById('loading-generate').style.display = 'none'; return; }
@@ -2951,14 +3017,7 @@ def _run_generate_job(job_id, brand_key, category, topic, analysis, opp_id=None,
         _q("UPDATE seo_generate_jobs SET status='running', updated_at=%s WHERE id=%s", (time.time(), job_id))
         brand = _get_brand(brand_key)
         knowledge_items = _get_knowledge_for_prompt(brand_key, category, limit=10)
-        brand_rule_mode = fields.get("brand_rule_mode", "auto")
-        if brand_rule_mode == "none":
-            brand_rule = {}
-        elif brand_rule_mode == "manual":
-            brand_rule = _get_brand_rule_by_id(fields.get("manual_rule_id"))
-        else:
-            brand_rule_mode = "auto"
-            brand_rule = _match_brand_rule(brand_key, category, fields.get("article_type", ""))
+        brand_rule_mode, brand_rule = _resolve_brand_rule(brand_key, category, fields)
         prompt = _generate_article_prompt(brand, category, topic, analysis, knowledge_items, fields, brand_rule)
         result, err = _ai_call_json(prompt, model="claude-sonnet-4-6", max_tokens=8000)
         if err:
@@ -3003,17 +3062,8 @@ def _run_generate_job(job_id, brand_key, category, topic, analysis, opp_id=None,
         except Exception:
             pass
 
-@seo_bp.route("/admin/seo-generator/generate", methods=["POST"])
-def seo_generator_generate():
-    ok, _ = auth_required()
-    if not ok:
-        return jsonify({"error": "unauthorized"}), 403
-    data = request.get_json(silent=True) or {}
-    brand_key = data.get("brand", "")
-    category = data.get("category", "")
-    topic = data.get("topic", "")
-    analysis = data.get("analysis", "")
-    opp_id = data.get("opp_id") or None
+def _parse_generate_request(data):
+    """/generate 跟 /preview 共用的欄位解析，確保Preview看到的跟實際送出生成的欄位完全一致。"""
     fields = {
         "main_keyword": data.get("main_keyword", ""),
         "search_intent": data.get("search_intent", ""),
@@ -3025,6 +3075,37 @@ def seo_generator_generate():
         "brand_rule_mode": data.get("brand_rule_mode") if data.get("brand_rule_mode") in ("auto", "none", "manual") else "auto",
         "manual_rule_id": data.get("manual_rule_id", ""),
     }
+    return data.get("brand", ""), data.get("category", ""), data.get("topic", ""), data.get("analysis", ""), fields
+
+@seo_bp.route("/admin/seo-generator/preview", methods=["POST"])
+def seo_generator_preview():
+    ok, _ = auth_required()
+    if not ok:
+        return jsonify({"error": "unauthorized"}), 403
+    data = request.get_json(silent=True) or {}
+    brand_key, category, topic, analysis, fields = _parse_generate_request(data)
+    if not topic.strip():
+        return jsonify({"error": "請輸入主題"}), 400
+    brand = _get_brand(brand_key)
+    knowledge_items = _get_knowledge_for_prompt(brand_key, category, limit=10)
+    brand_rule_mode, brand_rule = _resolve_brand_rule(brand_key, category, fields)
+    prompt = _generate_article_prompt(brand, category, topic, analysis, knowledge_items, fields, brand_rule)
+    return jsonify({
+        "brand_rule_mode": brand_rule_mode,
+        "brand_rule_label": _brand_rule_label(brand_rule),
+        "knowledge_items": [{"type": KNOWLEDGE_TYPE_LABELS.get(it["type"], it["type"]), "title": it["title"]} for it in knowledge_items],
+        "article_type_label": _article_type_label(fields.get("article_type", "")),
+        "prompt": prompt,
+    })
+
+@seo_bp.route("/admin/seo-generator/generate", methods=["POST"])
+def seo_generator_generate():
+    ok, _ = auth_required()
+    if not ok:
+        return jsonify({"error": "unauthorized"}), 403
+    data = request.get_json(silent=True) or {}
+    brand_key, category, topic, analysis, fields = _parse_generate_request(data)
+    opp_id = data.get("opp_id") or None
     if not topic.strip():
         return jsonify({"error": "請輸入主題"}), 400
     if not ANTHROPIC_API_KEY:
