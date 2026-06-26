@@ -621,7 +621,7 @@ def _match_brand_rule(brand, category, article_type=""):
     try:
         rows = _q("""SELECT id,brand,category,article_type,priority,positioning,target_audience,key_products,
                      avoid_directions,tone,cta_direction,keywords,negative_keywords
-                     FROM seo_brand_rules""", fetch="all") or []
+                     FROM seo_brand_rules ORDER BY id""", fetch="all") or []
     except Exception as e:
         import sys; print(f"[SEO Brand Rules] 比對規則失敗：{e}", file=sys.stderr)
         return {}
@@ -856,7 +856,10 @@ DEFAULT_ANALYZE_PROMPT = """你是台灣SEO/GEO/AEO內容策略專家。
 
 再列出「客群 × 場景 × 問題」矩陣，各至少5項。
 
-直接輸出分析內容，不要加開頭結尾的客套話。"""
+直接輸出分析內容，不要加開頭結尾的客套話。
+
+分析內容結束後，另起一行，輸出你判斷這個主題最適合的文章類型，格式固定為：
+建議文章類型：（從[[ARTICLE_TYPE_OPTIONS]]裡面選一個最貼切的，只能輸出類型名稱，不要其他文字）"""
 
 DEFAULT_GENERATE_PROMPT = """你是台灣SEO/GEO/AEO內容策略專家與文案編輯，為「[[BRAND_NAME]]」（[[BRAND_CATEGORY]]）撰寫一篇繁體中文SEO文章。
 
@@ -977,7 +980,19 @@ def _analyze_intent_prompt(brand, category, topic):
     tmpl = _get_prompt_template("analyze", DEFAULT_ANALYZE_PROMPT)
     return _fill_tokens(tmpl,
         BRAND_NAME=brand.get('name', ''), BRAND_CATEGORY=brand.get('category', ''),
-        BRAND_STYLE=brand.get('style', ''), CATEGORY=category, TOPIC=topic)
+        BRAND_STYLE=brand.get('style', ''), CATEGORY=category, TOPIC=topic,
+        ARTICLE_TYPE_OPTIONS='、'.join(ARTICLE_TYPES))
+
+def _extract_suggested_article_type(text):
+    """從AI分析結果裡拆出「建議文章類型：XXX」這一行，回傳(清理後的分析文字, 判定到的類型)。
+    判定不到（AI沒輸出、格式跑掉、自訂Prompt沒有這一行）就回傳原文跟空字串，不影響既有「AI自動判斷」的容錯行為。"""
+    m = re.search(r'建議文章類型[：:]\s*([^\n]+)', text)
+    if not m:
+        return text, ""
+    raw = m.group(1).strip()
+    suggested = next((t for t in ARTICLE_TYPES if t in raw), "")
+    cleaned = (text[:m.start()] + text[m.end():]).strip()
+    return cleaned, suggested
 
 def _generate_article_prompt(brand, category, topic, intent_analysis, knowledge_items=None, fields=None, brand_rule=None):
     """fields: 結構化表單欄位 dict（main_keyword/search_intent/target_audience/related_products/
@@ -2055,7 +2070,7 @@ textarea{width:100%;border:1px solid #ddd;border-radius:8px;padding:10px;font-si
 
   <div class="section">
     <h3>① 搜尋意圖分析 Prompt</h3>
-    <div class="hint">可用變數：<code>[[BRAND_NAME]]</code> <code>[[BRAND_CATEGORY]]</code> <code>[[BRAND_STYLE]]</code> <code>[[CATEGORY]]</code> <code>[[TOPIC]]</code> — 存檔後立即生效，不需重新部署</div>
+    <div class="hint">可用變數：<code>[[BRAND_NAME]]</code> <code>[[BRAND_CATEGORY]]</code> <code>[[BRAND_STYLE]]</code> <code>[[CATEGORY]]</code> <code>[[TOPIC]]</code> <code>[[ARTICLE_TYPE_OPTIONS]]</code>（文章類型選項清單）— 結尾的「建議文章類型：」那一行請保留，系統會用它自動帶入文章類型欄位並讓品牌SEO規則比對更準；存檔後立即生效，不需重新部署</div>
     <form method="POST" action="/admin/seo-settings/save?key={{ key }}" onsubmit="return true">
       <input type="hidden" name="prompt_key" value="analyze">
       <textarea name="content" rows="14">{{ analyze_prompt }}</textarea>
@@ -2352,6 +2367,11 @@ async function doAnalyze(){
       document.getElementById('step-analysis').classList.add('active');
       window._lastBrand = brand; window._lastCategory = category; window._lastTopic = topic;
       window._lastAnalysis = data.analysis;
+      const typeSelect = document.getElementById('article_type');
+      if (data.suggested_article_type && [...typeSelect.options].some(o => o.value === data.suggested_article_type)) {
+        typeSelect.value = data.suggested_article_type;
+        applyBrandRule();
+      }
     }
   } catch(e) { document.getElementById('err-analyze').textContent = String(e); }
   document.getElementById('btn-analyze').disabled = false;
@@ -3009,7 +3029,8 @@ def seo_generator_analyze():
     text, err = _ai_call(prompt, model="claude-haiku-4-5-20251001", max_tokens=1500)
     if err:
         return jsonify({"error": f"AI分析失敗：{err}"}), 200
-    return jsonify({"analysis": text})
+    analysis, suggested_article_type = _extract_suggested_article_type(text)
+    return jsonify({"analysis": analysis, "suggested_article_type": suggested_article_type})
 
 def _run_generate_job(job_id, brand_key, category, topic, analysis, opp_id=None, fields=None):
     fields = fields or {}
