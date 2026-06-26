@@ -738,8 +738,15 @@ def scrape_taobao(page, url):
         seen.add(src);
         imgs.push({src: src.startsWith('//')?'https:'+src:src, label:lbl||''});
     };
-    // 路徑1: __GLOBAL_DATA__
+    // 路徑0: 新版淘寶 ICE 框架（2025+）
     try {
+        const ctx = window.__ICE_APP_CONTEXT__;
+        const res = ctx?.loaderData?.home?.data?.res;
+        const props = res?.skuBase?.props || [];
+        props.forEach(p => (p.values||[]).forEach(v => add(v.image||'', (p.name||'')+'：'+(v.name||''))));
+    } catch(e){}
+    // 路徑1: __GLOBAL_DATA__
+    if(imgs.length===0) try {
         const d = window.__GLOBAL_DATA__ || {};
         const props = (d.item&&d.item.props&&d.item.props.props)
                    || (d.initData&&d.initData.item&&d.initData.item.props&&d.initData.item.props.props)
