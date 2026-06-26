@@ -556,7 +556,9 @@ def _knowledge_import_prompt(raw_text):
 如果原始資料完全沒有可用資訊，輸出空陣列 []"""
 
 def _knowledge_upsert(brand, category, items):
-    """依 brand+category+title（去頭尾空白、不分大小寫）比對，重複就更新、沒有就新增。回傳 (inserted, updated) 數量。"""
+    """依 brand+category+title（去頭尾空白、不分大小寫）比對，重複就更新、沒有就新增。
+    brand/category 作為預設值，item 裡若有 brand/category 欄位則以 item 為準（JSON 批量匯入時各筆可帶自己的品牌/品類）。
+    回傳 (inserted, updated) 數量。"""
     inserted = 0
     updated = 0
     now = time.time()
@@ -564,13 +566,15 @@ def _knowledge_upsert(brand, category, items):
         title = (it.get("title") or "").strip()
         if not title:
             continue
-        ktype = it.get("type") if it.get("type") in KNOWLEDGE_TYPE_LABELS else "spec"
-        content = it.get("content") or ""
-        tags = it.get("tags") or ""
-        allow_ai = bool(it.get("allow_ai", True))
+        item_brand    = (it.get("brand") or brand or "").strip()
+        item_category = (it.get("category") or category or "").strip()
+        ktype    = it.get("type") if it.get("type") in KNOWLEDGE_TYPE_LABELS else "spec"
+        content  = it.get("content") or ""
+        tags     = it.get("tags") or ""
+        allow_ai = bool(it.get("allow_ai", it.get("ai_citable", True)))
         existing = _q("""SELECT id FROM seo_knowledge
                           WHERE brand=%s AND category=%s AND LOWER(TRIM(title))=LOWER(TRIM(%s))""",
-                       (brand, category, title), fetch="one")
+                       (item_brand, item_category, title), fetch="one")
         if existing:
             _q("""UPDATE seo_knowledge SET type=%s, title=%s, content=%s, tags=%s, allow_ai=%s, updated_at=%s
                   WHERE id=%s""", (ktype, title, content, tags, allow_ai, now, existing[0]))
@@ -578,7 +582,7 @@ def _knowledge_upsert(brand, category, items):
         else:
             _q("""INSERT INTO seo_knowledge (brand,category,type,title,content,tags,allow_ai,created_at,updated_at)
                   VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
-               (brand, category, ktype, title, content, tags, allow_ai, now, now))
+               (item_brand, item_category, ktype, title, content, tags, allow_ai, now, now))
             inserted += 1
     return inserted, updated
 
@@ -873,6 +877,49 @@ def _save_brand_rule(form):
               (brand,category,article_type,priority,positioning,target_audience,key_products,avoid_directions,
                tone,cta_direction,keywords,negative_keywords,created_at,updated_at)
               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""", fields + (now, now))
+
+def _brand_rule_upsert(items):
+    """依 brand+category+article_type 做 upsert，回傳 (inserted, updated, failed, errors)。"""
+    inserted = updated = failed = 0
+    errors = []
+    now = time.time()
+    for i, it in enumerate(items):
+        brand        = (it.get("brand") or "").strip()
+        category     = (it.get("category") or "").strip()
+        article_type = (it.get("article_type") or "").strip()
+        try:
+            priority = int(it.get("priority") or 100)
+        except (TypeError, ValueError):
+            priority = 100
+        tone     = (it.get("tone_style") or it.get("tone") or "").strip()
+        keywords = (it.get("common_keywords") or it.get("keywords") or "").strip()
+        neg_kw   = (it.get("forbidden_keywords") or it.get("negative_keywords") or "").strip()
+        try:
+            existing = _q("SELECT id FROM seo_brand_rules WHERE brand=%s AND category=%s AND article_type=%s",
+                          (brand, category, article_type), fetch="one")
+            if existing:
+                _q("""UPDATE seo_brand_rules SET priority=%s,positioning=%s,target_audience=%s,
+                      key_products=%s,avoid_directions=%s,tone=%s,cta_direction=%s,
+                      keywords=%s,negative_keywords=%s,updated_at=%s WHERE id=%s""",
+                   (priority, it.get("positioning",""), it.get("target_audience",""),
+                    it.get("key_products",""), it.get("avoid_directions",""),
+                    tone, it.get("cta_direction",""), keywords, neg_kw, now, existing[0]))
+                updated += 1
+            else:
+                _q("""INSERT INTO seo_brand_rules
+                      (brand,category,article_type,priority,positioning,target_audience,
+                       key_products,avoid_directions,tone,cta_direction,keywords,negative_keywords,
+                       created_at,updated_at)
+                      VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+                   (brand, category, article_type, priority,
+                    it.get("positioning",""), it.get("target_audience",""),
+                    it.get("key_products",""), it.get("avoid_directions",""),
+                    tone, it.get("cta_direction",""), keywords, neg_kw, now, now))
+                inserted += 1
+        except Exception as e:
+            failed += 1
+            errors.append(f"第{i+1}筆（{brand}/{category}/{article_type}）：{_safe_job_error_msg(e)}")
+    return inserted, updated, failed, errors
 
 def _brand_rule_block(rule):
     """把品牌SEO規則轉成丟進Prompt的文字區塊"""
@@ -2148,7 +2195,7 @@ IMPORT_HTML = """<!DOCTYPE html>
 *{box-sizing:border-box;margin:0;padding:0}
 body{font-family:-apple-system,sans-serif;background:#f5f5f5;color:#333}
 """ + SIDEBAR_CSS + """
-.container{max-width:900px;margin:24px auto;padding:0 16px 80px}
+.container{max-width:960px;margin:24px auto;padding:0 16px 80px}
 .section{background:#fff;border-radius:14px;padding:20px;margin-bottom:16px;box-shadow:0 1px 4px rgba(0,0,0,.08)}
 .section h3{font-size:15px;margin-bottom:6px}
 .hint{font-size:12px;color:#999;margin-bottom:12px;line-height:1.6}
@@ -2158,12 +2205,19 @@ input[type=text],select,textarea{width:100%;border:1px solid #ddd;border-radius:
 textarea{resize:vertical;line-height:1.6}
 .btn{padding:10px 22px;background:#0d6efd;color:#fff;border:none;border-radius:8px;font-size:14px;font-weight:600;cursor:pointer}
 .btn:disabled{background:#ccc;cursor:not-allowed}
+.btn-sm{padding:6px 14px;font-size:12px}
+.btn-green{background:#2e7d32}
+.btn-gray{background:#fff;color:#555;border:1.5px solid #ccc}
 .btn-outline{background:#fff;color:#666;border:1.5px solid #ddd}
 .banner{background:#fdecea;color:#c62828;border-radius:10px;padding:12px 16px;margin-bottom:16px;font-size:13px;font-weight:600}
 .loading{font-size:13px;color:#888;margin-top:8px}
 .err{color:#c62828;font-size:13px;margin-top:8px}
 .step{display:none}
 .step.active{display:block}
+.tab-bar{display:flex;gap:0;margin-bottom:18px;border-bottom:2px solid #e8eaed}
+.tab-btn{padding:10px 22px;font-size:13px;font-weight:700;background:none;border:none;cursor:pointer;color:#888;border-bottom:3px solid transparent;margin-bottom:-2px}
+.tab-btn.active{color:#0d6efd;border-bottom-color:#0d6efd}
+.tab-panel{display:none}.tab-panel.active{display:block}
 .preview-row{border:1px solid #eee;border-radius:10px;padding:12px;margin-bottom:10px;background:#fafafa}
 .preview-row .row-top{display:flex;gap:8px;align-items:center;margin-bottom:8px}
 .preview-row select{width:auto;font-size:12px;padding:5px 8px}
@@ -2173,6 +2227,12 @@ textarea{resize:vertical;line-height:1.6}
 .preview-row .tags-row input{font-size:12px}
 .skip-label{font-size:12px;color:#c62828;font-weight:600;white-space:nowrap;display:flex;align-items:center;gap:4px}
 .result-box{font-size:14px;font-weight:700;color:#2e7d32;background:#e8f5e9;border-radius:10px;padding:14px;margin-top:10px}
+.tpl-code{background:#f8f9fa;border:1px solid #e0e0e0;border-radius:8px;padding:12px;font-size:11px;font-family:monospace;white-space:pre;overflow-x:auto;margin-top:8px;line-height:1.5}
+.preview-table{width:100%;border-collapse:collapse;font-size:12px;margin-top:12px}
+.preview-table th,.preview-table td{padding:6px 8px;border-bottom:1px solid #f0f0f0;text-align:left;vertical-align:top}
+.preview-table th{color:#888;font-weight:700;font-size:11px;text-transform:uppercase}
+.badge-new{background:#e8f5e9;color:#2e7d32;padding:2px 8px;border-radius:8px;font-size:11px;font-weight:700}
+.badge-upd{background:#fff8e1;color:#f57f17;padding:2px 8px;border-radius:8px;font-size:11px;font-weight:700}
 </style></head><body>
 {{ shell|safe }}
 <div class="container">
@@ -2181,42 +2241,119 @@ textarea{resize:vertical;line-height:1.6}
   <div class="banner">⚠️ 尚未設定 ANTHROPIC_API_KEY，AI分析功能目前無法使用。請在 Render → Environment 加上這個環境變數後再試。</div>
   {% endif %}
 
-  <div class="section" id="step-input">
-    <h3>① 貼上原始資料</h3>
-    <div class="hint">可以貼上商品介紹、FAQ、客服對話紀錄、案例內容等，AI會自動拆成「商品規格／FAQ／品牌特色／案例」4種類型的知識庫條目。只會整理原文真實存在的資訊，不會新增或誇大內容。</div>
-    <label>品牌</label>
-    <select id="brand">
-      <option value="">（不限品牌）</option>
-      {% for b in brands %}<option value="{{ b.key }}">{{ b.name }}</option>{% endfor %}
-    </select>
-    <label>品類</label>
-    <input type="text" id="category" placeholder="例如：高架床">
-    <label>原始資料</label>
-    <textarea id="raw_text" rows="14" placeholder="貼上商品介紹、FAQ、客服對話、案例內容..."></textarea>
-    <button class="btn" id="btn-analyze" onclick="doAnalyze()" {{ 'disabled' if not ai_key_set else '' }} style="margin-top:14px">AI 自動分析拆分</button>
-    <div class="loading" id="loading-analyze" style="display:none">AI分析中，可能需要1分鐘，請稍候...</div>
-    <div class="err" id="err-analyze"></div>
+  <div class="tab-bar">
+    <button class="tab-btn active" onclick="switchTab('ai')">🤖 AI自動分析（貼原始文字）</button>
+    <button class="tab-btn" onclick="switchTab('json')">📋 直接貼JSON匯入</button>
   </div>
 
-  <div class="section step" id="step-preview">
-    <h3>② 預覽並確認</h3>
-    <div class="hint">可以修改每一筆內容、類型、標籤，或勾選「排除」不匯入這一筆。確認後按下方「確認匯入」會批次寫入知識庫——同品牌/品類下標題相同的資料會直接更新覆蓋，不會重複新增。</div>
-    <div id="preview-list"></div>
-    <button class="btn" id="btn-confirm" onclick="doConfirm()">確認匯入</button>
-    <button class="btn btn-outline" onclick="location.reload()">重新開始</button>
-    <div class="err" id="err-confirm"></div>
+  <!-- ===== AI 分析模式 ===== -->
+  <div class="tab-panel active" id="panel-ai">
+    <div class="section" id="step-input">
+      <h3>① 貼上原始資料（AI自動拆分）</h3>
+      <div class="hint">可以貼上商品介紹、FAQ、客服對話紀錄、案例內容等，AI會自動拆成「商品規格／FAQ／品牌特色／案例」4種類型的知識庫條目。只會整理原文真實存在的資訊，不會新增或誇大內容。</div>
+      <label>品牌</label>
+      <select id="brand">
+        <option value="">（不限品牌）</option>
+        {% for b in brands %}<option value="{{ b.key }}">{{ b.name }}</option>{% endfor %}
+      </select>
+      <label>品類</label>
+      <input type="text" id="category" placeholder="例如：高架床">
+      <label>原始資料</label>
+      <textarea id="raw_text" rows="14" placeholder="貼上商品介紹、FAQ、客服對話、案例內容..."></textarea>
+      <button class="btn" id="btn-analyze" onclick="doAnalyze()" {{ 'disabled' if not ai_key_set else '' }} style="margin-top:14px">AI 自動分析拆分</button>
+      <div class="loading" id="loading-analyze" style="display:none">AI分析中，可能需要1分鐘，請稍候...</div>
+      <div class="err" id="err-analyze"></div>
+    </div>
+
+    <div class="section step" id="step-preview">
+      <h3>② 預覽並確認（AI分析結果）</h3>
+      <div class="hint">可以修改每一筆內容、類型、標籤，或勾選「排除」不匯入這一筆。確認後按下方「確認匯入」會批次寫入知識庫——同品牌/品類下標題相同的資料會直接更新覆蓋，不會重複新增。</div>
+      <div id="preview-list"></div>
+      <button class="btn" id="btn-confirm" onclick="doConfirm()">確認匯入</button>
+      <button class="btn btn-outline" onclick="location.reload()">重新開始</button>
+      <div class="err" id="err-confirm"></div>
+    </div>
+
+    <div class="section step" id="step-done">
+      <h3>✅ 匯入完成</h3>
+      <div class="result-box" id="result-text"></div>
+      <a class="btn" style="display:inline-block;margin-top:14px;text-decoration:none" href="/admin/seo-knowledge?key={{ key }}">前往知識庫列表查看</a>
+    </div>
   </div>
 
-  <div class="section step" id="step-done">
-    <h3>✅ 匯入完成</h3>
-    <div class="result-box" id="result-text"></div>
-    <a class="btn" style="display:inline-block;margin-top:14px;text-decoration:none" href="/admin/seo-knowledge?key={{ key }}">前往知識庫列表查看</a>
+  <!-- ===== JSON 直接貼入模式 ===== -->
+  <div class="tab-panel" id="panel-json">
+    <div class="section">
+      <h3>直接貼 JSON 批量匯入知識庫</h3>
+      <div class="hint">把整理好的 JSON 陣列直接貼進來，不需要 AI 分析。每筆資料用 brand+category+title 判斷是新增還是更新，重複執行也不會產生重複資料。</div>
+
+      <div style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:14px">
+        <button class="btn btn-sm btn-gray" onclick="copyJsonTemplate()">複製 JSON 範例</button>
+        <button class="btn btn-sm btn-gray" onclick="downloadCsvTemplate()">下載 CSV 範例</button>
+      </div>
+
+      <div class="tpl-code" id="json-tpl" style="max-height:120px;overflow:auto">[
+  {
+    "brand": "jsimple",
+    "category": "辦公家具",
+    "type": "spec",
+    "title": "Hessen 辦公家具系列材質規格",
+    "content": "Hessen 系列主要包含主管桌、經理桌、員工桌、會議桌、文件櫃與辦公收納櫃。常見材質為 E1 等級板材搭配鐵件結構。",
+    "tags": "辦公家具,Hessen,主管桌",
+    "ai_citable": true
+  }
+]</div>
+
+      <label style="margin-top:16px">品牌（JSON 裡如果已有 brand 欄位，以 JSON 為準；這裡留空即可）</label>
+      <select id="jbrand">
+        <option value="">（由 JSON 各筆自帶品牌）</option>
+        {% for b in brands %}<option value="{{ b.key }}">{{ b.name }} ({{ b.key }})</option>{% endfor %}
+      </select>
+      <label>品類（同上，JSON 裡有就以 JSON 為準）</label>
+      <input type="text" id="jcategory" placeholder="（由 JSON 各筆自帶品類）">
+
+      <label style="margin-top:16px">貼上 JSON</label>
+      <textarea id="json-input" rows="14" placeholder='[{"brand":"jsimple","category":"辦公家具","type":"spec","title":"標題","content":"內容","tags":"標籤1,標籤2","ai_citable":true}]'></textarea>
+
+      <div style="display:flex;gap:10px;margin-top:14px;flex-wrap:wrap">
+        <button class="btn" onclick="doJsonPreview()">預覽匯入資料</button>
+      </div>
+      <div class="err" id="err-json"></div>
+    </div>
+
+    <div class="section" id="json-preview-section" style="display:none">
+      <h3>預覽（確認後才會真的寫入）</h3>
+      <div class="hint" id="json-preview-hint"></div>
+      <div style="overflow-x:auto">
+        <table class="preview-table" id="json-preview-table">
+          <thead><tr><th>品牌</th><th>品類</th><th>類型</th><th>標題</th><th>標籤</th><th>AI可引用</th><th>動作</th></tr></thead>
+          <tbody id="json-preview-body"></tbody>
+        </table>
+      </div>
+      <div style="display:flex;gap:10px;margin-top:14px;flex-wrap:wrap">
+        <button class="btn btn-green" onclick="doJsonConfirm()">確認全部匯入</button>
+        <button class="btn btn-outline" onclick="document.getElementById('json-preview-section').style.display='none'">回去修改</button>
+      </div>
+      <div class="err" id="err-json-confirm"></div>
+    </div>
+
+    <div class="section" id="json-done-section" style="display:none">
+      <h3>✅ 匯入完成</h3>
+      <div class="result-box" id="json-result-text"></div>
+      <a class="btn" style="display:inline-block;margin-top:14px;text-decoration:none" href="/admin/seo-knowledge?key={{ key }}">前往知識庫列表查看</a>
+    </div>
   </div>
 
 </div>
 <script>
 const KEY = {{ key|tojson }};
 const TYPE_LABELS = {spec:"商品規格", faq:"FAQ", brand_feature:"品牌特色", case:"案例"};
+
+function switchTab(tab){
+  document.querySelectorAll('.tab-btn').forEach((b,i)=>b.classList.toggle('active', (tab==='ai'&&i===0)||(tab==='json'&&i===1)));
+  document.getElementById('panel-ai').classList.toggle('active', tab==='ai');
+  document.getElementById('panel-json').classList.toggle('active', tab==='json');
+}
 
 async function safeJson(res){
   const text = await res.text();
@@ -2317,6 +2454,72 @@ async function doConfirm(){
     document.getElementById('btn-confirm').disabled = false;
   }
 }
+
+// ── JSON direct import mode ──────────────────────────────
+let _jsonItems = [];
+
+function doJsonPreview(){
+  const raw = document.getElementById('json-input').value.trim();
+  document.getElementById('err-json').textContent = '';
+  if (!raw) { document.getElementById('err-json').textContent = '請貼上 JSON 內容'; return; }
+  let items;
+  try { items = JSON.parse(raw); } catch(e) { document.getElementById('err-json').textContent = 'JSON 格式錯誤：' + e.message; return; }
+  if (!Array.isArray(items)) { document.getElementById('err-json').textContent = '必須是 JSON 陣列 [...]'; return; }
+  const fallbackBrand = document.getElementById('jbrand').value;
+  const fallbackCat   = document.getElementById('jcategory').value.trim();
+  // apply fallbacks
+  items = items.map(it => ({...it, brand: it.brand || fallbackBrand, category: it.category || fallbackCat,
+    type: it.type || 'spec', allow_ai: it.ai_citable !== false && it.allow_ai !== false}));
+  _jsonItems = items;
+  // render preview table
+  const tbody = document.getElementById('json-preview-body');
+  const TYPE_MAP = {spec:'商品規格',faq:'FAQ',brand_feature:'品牌特色',case:'案例'};
+  tbody.innerHTML = items.map((it,i) => `<tr>
+    <td>${it.brand||'—'}</td><td>${it.category||'—'}</td>
+    <td>${TYPE_MAP[it.type]||it.type}</td>
+    <td style="max-width:200px;word-break:break-all">${(it.title||'').substring(0,60)}</td>
+    <td style="color:#666">${(it.tags||'').substring(0,40)}</td>
+    <td style="text-align:center">${it.allow_ai!==false?'✓':'—'}</td>
+    <td><span class="badge-new">新增或更新</span></td>
+  </tr>`).join('');
+  document.getElementById('json-preview-hint').textContent = `共 ${items.length} 筆，確認後開始匯入（brand+category+title 相同就更新，不存在就新增）`;
+  document.getElementById('json-preview-section').style.display = 'block';
+  document.getElementById('json-preview-section').scrollIntoView({behavior:'smooth'});
+}
+
+async function doJsonConfirm(){
+  document.getElementById('err-json-confirm').textContent = '';
+  if (!_jsonItems.length) return;
+  try {
+    const res = await fetch('/admin/seo-knowledge/import/confirm?key=' + encodeURIComponent(KEY), {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({brand:'', category:'', items: _jsonItems.map(it=>({...it, skip:false}))})
+    });
+    const data = await safeJson(res);
+    if (data.error) { document.getElementById('err-json-confirm').textContent = data.error; return; }
+    document.getElementById('json-result-text').textContent =
+      `新增 ${data.inserted} 筆，更新 ${data.updated} 筆（同品牌/品類下標題相同視為更新，不會重複）`;
+    document.getElementById('json-preview-section').style.display = 'none';
+    document.getElementById('json-done-section').style.display = 'block';
+  } catch(e) {
+    document.getElementById('err-json-confirm').textContent = String(e.message || e);
+  }
+}
+
+function copyJsonTemplate(){
+  const tpl = document.getElementById('json-tpl').textContent;
+  navigator.clipboard.writeText(tpl).then(()=>alert('已複製 JSON 範例')).catch(()=>{
+    const ta = document.createElement('textarea'); ta.value = tpl;
+    document.body.appendChild(ta); ta.select(); document.execCommand('copy'); ta.remove(); alert('已複製');
+  });
+}
+
+function downloadCsvTemplate(){
+  const csv = 'brand,category,type,title,content,tags,ai_citable\\njsimple,辦公家具,spec,Hessen 辦公家具材質規格,"Hessen 系列包含主管桌、員工桌...",辦公家具 Hessen 主管桌,true';
+  const blob = new Blob(['﻿'+csv], {type:'text/csv;charset=utf-8'});
+  const a = document.createElement('a'); a.href = URL.createObjectURL(blob);
+  a.download = 'seo_knowledge_template.csv'; a.click();
+}
 </script>
 """ + SHELL_CLOSE + """
 </body></html>"""
@@ -2378,9 +2581,175 @@ textarea{width:100%;border:1px solid #ddd;border-radius:8px;padding:8px 10px;fon
       </tr>
       {% endfor %}
     </table>
-    <a class="btn" style="margin-top:14px" href="/admin/seo-brand-rules/item/new?key={{ key }}">+ 新增品牌規則</a>
+    <div style="display:flex;gap:10px;margin-top:14px;flex-wrap:wrap">
+      <a class="btn" href="/admin/seo-brand-rules/item/new?key={{ key }}">+ 新增品牌規則</a>
+      <a class="btn" style="background:#2e7d32" href="/admin/seo-brand-rules/import?key={{ key }}">📥 批量匯入SEO規則(JSON)</a>
+    </div>
   </div>
 </div>
+""" + SHELL_CLOSE + """
+</body></html>"""
+
+BRAND_RULES_IMPORT_HTML = """<!DOCTYPE html>
+<html lang="zh-TW"><head><meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>批量匯入品牌SEO規則</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:-apple-system,sans-serif;background:#f5f5f5;color:#333}
+""" + SIDEBAR_CSS + """
+.container{max-width:960px;margin:24px auto;padding:0 16px 80px}
+.section{background:#fff;border-radius:14px;padding:20px;margin-bottom:16px;box-shadow:0 1px 4px rgba(0,0,0,.08)}
+.section h3{font-size:15px;margin-bottom:6px}
+.hint{font-size:12px;color:#999;margin-bottom:12px;line-height:1.6}
+label{font-size:12px;color:#888;font-weight:700;display:block;margin-bottom:5px;margin-top:14px}
+label:first-child{margin-top:0}
+input[type=text],select,textarea{width:100%;border:1px solid #ddd;border-radius:8px;padding:9px 11px;font-size:14px;font-family:inherit}
+textarea{resize:vertical;line-height:1.6}
+.btn{padding:10px 22px;background:#0d6efd;color:#fff;border:none;border-radius:8px;font-size:14px;font-weight:600;cursor:pointer;text-decoration:none;display:inline-block}
+.btn-sm{padding:6px 14px;font-size:12px}
+.btn-green{background:#2e7d32}
+.btn-gray{background:#fff;color:#555;border:1.5px solid #ccc}
+.btn-outline{background:#fff;color:#666;border:1.5px solid #ddd}
+.err{color:#c62828;font-size:13px;margin-top:8px}
+.result-box{font-size:14px;font-weight:700;color:#2e7d32;background:#e8f5e9;border-radius:10px;padding:14px;margin-top:10px}
+.result-err{background:#fdecea;color:#c62828}
+.tpl-code{background:#f8f9fa;border:1px solid #e0e0e0;border-radius:8px;padding:12px;font-size:11px;font-family:monospace;white-space:pre;overflow-x:auto;margin-top:8px;line-height:1.5;max-height:160px;overflow-y:auto}
+.preview-table{width:100%;border-collapse:collapse;font-size:12px;margin-top:12px}
+.preview-table th,.preview-table td{padding:6px 8px;border-bottom:1px solid #f0f0f0;text-align:left;vertical-align:top}
+.preview-table th{color:#888;font-weight:700;font-size:11px;text-transform:uppercase;background:#fafafa}
+.badge-new{background:#e8f5e9;color:#2e7d32;padding:2px 8px;border-radius:8px;font-size:11px;font-weight:700}
+.badge-upd{background:#fff8e1;color:#f57f17;padding:2px 8px;border-radius:8px;font-size:11px;font-weight:700}
+</style></head><body>
+{{ shell|safe }}
+<div class="container">
+
+  <div class="section">
+    <h3>批量匯入品牌 SEO 規則（JSON）</h3>
+    <div class="hint">
+      用 <b>brand + category + article_type</b> 判斷是新增還是更新。重複執行同一份資料只會更新，不會產生重複筆數。不會刪除已有的規則。
+    </div>
+
+    <div style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:14px">
+      <button class="btn btn-sm btn-gray" onclick="copyTpl()">複製 JSON 範例</button>
+      <button class="btn btn-sm btn-gray" onclick="downloadCsv()">下載 CSV 範例</button>
+    </div>
+
+    <div class="tpl-code" id="json-tpl">[
+  {
+    "brand": "jsimple",
+    "category": "辦公家具",
+    "article_type": "",
+    "priority": 100,
+    "positioning": "JSIMPLE 辦公家具主打中小企業採購需求，提供辦公桌、主管桌、會議桌、文件櫃與整體辦公空間配置。",
+    "target_audience": "中小企業主、新創公司、辦公室採購、設計公司",
+    "key_products": "Hessen主管桌、Hessen辦公桌、Hessen會議桌、Hessen文件櫃、辦公收納櫃",
+    "avoid_directions": "不要推薦高架床、穀倉門、居家床架；不要把辦公家具寫成居家家具。",
+    "tone_style": "專業、實用、偏辦公空間規劃顧問語氣。",
+    "cta_direction": "引導使用者提供辦公室坪數、人數、預算，由 JSIMPLE 協助規劃配置。",
+    "common_keywords": "辦公家具,辦公桌,主管桌,會議桌,辦公室規劃",
+    "forbidden_keywords": "高架床,穀倉門,床架"
+  }
+]</div>
+
+    <label style="margin-top:16px">貼上 JSON</label>
+    <textarea id="json-input" rows="16" placeholder='[{"brand":"jsimple","category":"辦公家具","article_type":"","priority":100,"positioning":"...","target_audience":"...","key_products":"...","avoid_directions":"...","tone_style":"...","cta_direction":"...","common_keywords":"...","forbidden_keywords":"..."}]'></textarea>
+
+    <div style="display:flex;gap:10px;margin-top:14px;flex-wrap:wrap">
+      <button class="btn" onclick="doPreview()">預覽匯入資料</button>
+    </div>
+    <div class="err" id="err-json"></div>
+  </div>
+
+  <div class="section" id="preview-section" style="display:none">
+    <h3>預覽確認</h3>
+    <div class="hint" id="preview-hint"></div>
+    <div style="overflow-x:auto">
+      <table class="preview-table">
+        <thead><tr><th>品牌</th><th>品類</th><th>文章類型</th><th>優先權</th><th>品牌定位（前50字）</th><th>主打商品（前50字）</th><th>動作</th></tr></thead>
+        <tbody id="preview-body"></tbody>
+      </table>
+    </div>
+    <div style="display:flex;gap:10px;margin-top:14px;flex-wrap:wrap">
+      <button class="btn btn-green" onclick="doConfirm()">確認全部匯入</button>
+      <button class="btn btn-outline" onclick="document.getElementById('preview-section').style.display='none'">回去修改</button>
+    </div>
+    <div class="err" id="err-confirm"></div>
+  </div>
+
+  <div class="section" id="done-section" style="display:none">
+    <h3>✅ 匯入完成</h3>
+    <div class="result-box" id="result-text"></div>
+    <a class="btn" style="margin-top:14px" href="/admin/seo-brand-rules?key={{ key }}">前往品牌SEO規則列表</a>
+  </div>
+
+</div>
+<script>
+const KEY = {{ key|tojson }};
+let _items = [];
+
+function doPreview(){
+  const raw = document.getElementById('json-input').value.trim();
+  document.getElementById('err-json').textContent = '';
+  if (!raw) { document.getElementById('err-json').textContent = '請貼上 JSON'; return; }
+  let items;
+  try { items = JSON.parse(raw); } catch(e) { document.getElementById('err-json').textContent = 'JSON 格式錯誤：' + e.message; return; }
+  if (!Array.isArray(items)) { document.getElementById('err-json').textContent = '必須是 JSON 陣列 [...]'; return; }
+  _items = items;
+  const tbody = document.getElementById('preview-body');
+  tbody.innerHTML = items.map(it => `<tr>
+    <td><b>${it.brand||'—'}</b></td>
+    <td>${it.category||'（全部）'}</td>
+    <td>${it.article_type||'（全部）'}</td>
+    <td>${it.priority||100}</td>
+    <td style="color:#555;max-width:180px;word-break:break-all">${((it.positioning||'')).substring(0,50)}${(it.positioning||'').length>50?'…':''}</td>
+    <td style="color:#555;max-width:180px;word-break:break-all">${((it.key_products||'')).substring(0,50)}${(it.key_products||'').length>50?'…':''}</td>
+    <td><span class="badge-new">新增或更新</span></td>
+  </tr>`).join('');
+  document.getElementById('preview-hint').textContent = `共 ${items.length} 筆，確認後開始匯入（brand+category+article_type 相同就更新，不存在就新增）`;
+  document.getElementById('preview-section').style.display = 'block';
+  document.getElementById('preview-section').scrollIntoView({behavior:'smooth'});
+}
+
+async function doConfirm(){
+  document.getElementById('err-confirm').textContent = '';
+  if (!_items.length) return;
+  try {
+    const res = await fetch('/admin/seo-brand-rules/import/confirm?key=' + encodeURIComponent(KEY), {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({items: _items})
+    });
+    const text = await res.text();
+    let data;
+    try { data = JSON.parse(text); } catch(e) { document.getElementById('err-confirm').textContent = '伺服器回應異常'; return; }
+    if (data.error) { document.getElementById('err-confirm').textContent = data.error; return; }
+    let msg = `新增 ${data.inserted} 筆，更新 ${data.updated} 筆`;
+    if (data.failed) msg += `，失敗 ${data.failed} 筆`;
+    if (data.errors && data.errors.length) msg += '\\n\\n失敗明細：\\n' + data.errors.join('\\n');
+    const box = document.getElementById('result-text');
+    box.textContent = msg;
+    if (data.failed) box.classList.add('result-err');
+    document.getElementById('preview-section').style.display = 'none';
+    document.getElementById('done-section').style.display = 'block';
+  } catch(e) {
+    document.getElementById('err-confirm').textContent = String(e.message || e);
+  }
+}
+
+function copyTpl(){
+  const t = document.getElementById('json-tpl').textContent;
+  navigator.clipboard.writeText(t).then(()=>alert('已複製')).catch(()=>{
+    const ta=document.createElement('textarea');ta.value=t;document.body.appendChild(ta);ta.select();document.execCommand('copy');ta.remove();alert('已複製');
+  });
+}
+
+function downloadCsv(){
+  const csv = 'brand,category,article_type,priority,positioning,target_audience,key_products,avoid_directions,tone_style,cta_direction,common_keywords,forbidden_keywords\\njsimple,辦公家具,,100,品牌定位文字,目標客群,主打商品,禁止偏離,語氣風格,CTA方向,常用關鍵字,禁用關鍵字';
+  const blob = new Blob(['﻿'+csv],{type:'text/csv;charset=utf-8'});
+  const a=document.createElement('a');a.href=URL.createObjectURL(blob);
+  a.download='seo_brand_rules_template.csv';a.click();
+}
+</script>
 """ + SHELL_CLOSE + """
 </body></html>"""
 
@@ -3518,6 +3887,30 @@ def seo_brand_rule_save():
         abort(403)
     _save_brand_rule(request.form)
     return redirect(f"/admin/seo-brand-rules?key={key}")
+
+@seo_bp.route("/admin/seo-brand-rules/import")
+def seo_brand_rules_import_page():
+    ok, key = check_auth()
+    if not ok:
+        return render_template_string(LOGIN_HTML, error=None)
+    shell = _shell_open(key, "seo-brand-rules", [("品牌SEO規則", "/admin/seo-brand-rules"), ("批量匯入", None)])
+    return render_template_string(BRAND_RULES_IMPORT_HTML, key=key, shell=shell)
+
+@seo_bp.route("/admin/seo-brand-rules/import/confirm", methods=["POST"])
+def seo_brand_rules_import_confirm():
+    ok, _ = auth_required()
+    if not ok:
+        return jsonify({"error": "unauthorized"}), 403
+    data = request.get_json(silent=True) or {}
+    items = data.get("items") or []
+    if not items:
+        return jsonify({"error": "沒有要匯入的項目"}), 400
+    try:
+        inserted, updated, failed, errors = _brand_rule_upsert(items)
+    except Exception as e:
+        import sys; print(f"[SEO Brand Rules Import Error] {e}", file=sys.stderr)
+        return jsonify({"error": f"寫入失敗：{_safe_job_error_msg(e)}"}), 200
+    return jsonify({"inserted": inserted, "updated": updated, "failed": failed, "errors": errors})
 
 @seo_bp.route("/admin/seo-settings")
 def seo_settings_page():
