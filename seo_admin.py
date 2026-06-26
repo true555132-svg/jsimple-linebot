@@ -107,6 +107,8 @@ def init_seo_db():
                 "ALTER TABLE seo_tracking ADD COLUMN IF NOT EXISTS active_users INTEGER DEFAULT 0",
                 "ALTER TABLE seo_tracking ADD COLUMN IF NOT EXISTS engagement_rate NUMERIC DEFAULT 0",
                 "ALTER TABLE seo_tracking ADD COLUMN IF NOT EXISTS avg_duration NUMERIC DEFAULT 0",
+                "ALTER TABLE seo_tracking ADD COLUMN IF NOT EXISTS sessions INTEGER DEFAULT 0",
+                "ALTER TABLE seo_tracking ADD COLUMN IF NOT EXISTS bounce_rate NUMERIC DEFAULT 0",
             ]:
                 try: cur.execute(col_sql)
                 except Exception: pass
@@ -326,10 +328,12 @@ def _ga4_client():
         raise RuntimeError("未設定 GA4 憑證：請在 Render 設定 GA4_CREDENTIALS_JSON 環境變數")
     return BetaAnalyticsDataClient(credentials=creds)
 
-def _ga4_fetch_page(page_title, days=28):
-    """依頁面標題從 GA4 取得指定期間的指標。
-    page_title 用 CONTAINS 比對（不區分大小寫）。
-    回傳 dict(page_views, active_users, engagement_rate, avg_duration, matched_title) 或 None。"""
+def _ga4_fetch_page(identifier, match_by="slug", days=28):
+    """從 GA4 取得指定頁面的流量指標。
+    match_by='slug' → dimension=pagePath，CONTAINS identifier（slug）
+    match_by='title' → dimension=pageTitle，CONTAINS identifier（title 關鍵字）
+    回傳 dict 或 None（找不到時）。
+    """
     from google.analytics.data_v1beta.types import (
         DateRange, Dimension, Metric, RunReportRequest,
         FilterExpression, Filter
@@ -337,22 +341,26 @@ def _ga4_fetch_page(page_title, days=28):
     if not GA4_PROPERTY_ID:
         raise RuntimeError("未設定 GA4_PROPERTY_ID 環境變數")
     client = _ga4_client()
+    dim_name   = "pagePath"   if match_by == "slug"  else "pageTitle"
+    field_name = "pagePath"   if match_by == "slug"  else "pageTitle"
     req = RunReportRequest(
         property=f"properties/{GA4_PROPERTY_ID}",
-        dimensions=[Dimension(name="pageTitle")],
+        dimensions=[Dimension(name=dim_name)],
         metrics=[
             Metric(name="screenPageViews"),
             Metric(name="activeUsers"),
             Metric(name="engagementRate"),
             Metric(name="averageSessionDuration"),
+            Metric(name="sessions"),
+            Metric(name="bounceRate"),
         ],
         date_ranges=[DateRange(start_date=f"{days}daysAgo", end_date="today")],
         dimension_filter=FilterExpression(
             filter=Filter(
-                field_name="pageTitle",
+                field_name=field_name,
                 string_filter=Filter.StringFilter(
                     match_type=Filter.StringFilter.MatchType.CONTAINS,
-                    value=page_title,
+                    value=identifier,
                     case_sensitive=False,
                 )
             )
@@ -368,7 +376,10 @@ def _ga4_fetch_page(page_title, days=28):
         "active_users":    int(row.metric_values[1].value),
         "engagement_rate": round(float(row.metric_values[2].value), 4),
         "avg_duration":    round(float(row.metric_values[3].value), 1),
-        "matched_title":   row.dimension_values[0].value,
+        "sessions":        int(row.metric_values[4].value),
+        "bounce_rate":     round(float(row.metric_values[5].value), 4),
+        "matched_value":   row.dimension_values[0].value,
+        "match_by":        match_by,
     }
 
 def _resolve_allowed_products(brand, category):
@@ -1608,7 +1619,7 @@ TRACKING_HTML = """<!DOCTYPE html>
 *{box-sizing:border-box;margin:0;padding:0}
 body{font-family:-apple-system,sans-serif;background:#f5f5f5;color:#333}
 """ + SIDEBAR_CSS + """
-.container{max-width:1100px;margin:24px auto;padding:0 16px}
+.container{max-width:1200px;margin:24px auto;padding:0 16px 40px}
 .section{background:#fff;border-radius:14px;padding:20px;margin-bottom:16px;box-shadow:0 1px 4px rgba(0,0,0,.08)}
 .section h3{font-size:14px;font-weight:700;margin-bottom:14px;color:#333}
 .scroll-x{overflow-x:auto}
@@ -1618,41 +1629,56 @@ th{color:#888;font-weight:600;font-size:10px;text-transform:uppercase}
 .add-row{display:flex;gap:6px;margin-top:10px;flex-wrap:wrap;align-items:center}
 .add-row input{border:1px solid #ddd;border-radius:6px;padding:6px 8px;font-size:12px}
 .btn{padding:7px 14px;background:#0d6efd;color:#fff;border:none;border-radius:6px;font-size:12px;font-weight:600;cursor:pointer}
-.btn-green{background:#2e7d32}
+.btn-green{background:#2e7d32}.btn-orange{background:#e65100}
 .yes{color:#2e7d32;font-weight:700}.no{color:#bbb}
 .badge-ga4{font-size:10px;padding:1px 6px;background:#e8f5e9;color:#2e7d32;border-radius:8px;font-weight:700}
 .badge-manual{font-size:10px;padding:1px 6px;background:#e3f2fd;color:#1565c0;border-radius:8px;font-weight:700}
+.badge-slug{font-size:9px;padding:1px 5px;background:#e8f5e9;color:#1b5e20;border-radius:6px;margin-left:3px}
+.badge-title{font-size:9px;padding:1px 5px;background:#fff8e1;color:#e65100;border-radius:6px;margin-left:3px}
 .ga4-box{background:#f1f8e9;border:1px solid #c5e1a5;border-radius:10px;padding:14px 16px;margin-bottom:14px}
-.ga4-box label{font-size:12px;font-weight:700;color:#33691e;display:block;margin-bottom:6px}
 .ga4-row{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
 .ga4-row input{border:1px solid #aed581;border-radius:6px;padding:6px 10px;font-size:12px;background:#fff}
 .ga4-row select{border:1px solid #aed581;border-radius:6px;padding:6px 8px;font-size:12px;background:#fff}
+.slug-tag{font-size:11px;background:#e8f5e9;color:#2e7d32;padding:3px 8px;border-radius:6px;display:inline-block;margin-bottom:8px;font-weight:700}
 .msg-ok{color:#2e7d32;font-size:13px;font-weight:700;margin-bottom:10px}
 .msg-err{color:#c62828;font-size:13px;margin-bottom:10px}
-.ga4-stat{display:inline-block;text-align:center;background:#fff;border:1px solid #dcedc8;border-radius:8px;padding:8px 14px;margin:4px}
-.ga4-stat .num{font-size:20px;font-weight:800;color:#2e7d32}
-.ga4-stat .lbl{font-size:10px;color:#888;margin-top:2px}
+.diag-box{background:#fff9c4;border:1px solid #f9a825;border-radius:10px;padding:16px}
+.diag-score{font-size:32px;font-weight:900;color:#e65100;display:inline-block;vertical-align:middle;margin-right:10px}
+.diag-label{font-size:12px;color:#888;vertical-align:middle}
+.diag-list{margin:8px 0 0 0;padding-left:18px;font-size:13px;line-height:1.8}
+.diag-section{margin-top:10px}
+.diag-section b{font-size:12px;color:#555}
 </style></head><body>
 {{ shell|safe }}
 <div class="container">
-  <h2 style="font-size:16px;font-weight:700;margin-bottom:14px">{{ article_title }}</h2>
+  <h2 style="font-size:16px;font-weight:700;margin-bottom:4px">{{ article_title }}</h2>
+  {% if article_slug %}<div style="font-size:12px;color:#888;margin-bottom:14px">Slug：{{ article_slug }}</div>{% endif %}
 
   {% if ga4_ok %}
-  <div class="msg-ok">✓ GA4 數據同步成功</div>
+  <div class="msg-ok">✓ GA4 數據同步成功
+    {% if ga4_match == 'slug' %}<span class="badge-slug">以 Slug 比對</span>
+    {% elif ga4_match == 'title' %}<span class="badge-title">以 Title 比對</span>
+    {% elif ga4_match == 'title_fallback' %}<span class="badge-title">Slug 無結果，Fallback Title</span>
+    {% endif %}
+  </div>
   {% endif %}
-  {% if ga4_error %}
-  <div class="msg-err">⚠ {{ ga4_error }}</div>
-  {% endif %}
+  {% if ga4_error %}<div class="msg-err">⚠ {{ ga4_error }}</div>{% endif %}
+  {% if diag_ok %}<div class="msg-ok">✓ AI 診斷完成</div>{% endif %}
+  {% if diag_err %}<div class="msg-err">⚠ {{ diag_err }}</div>{% endif %}
 
   {% if ga4_available %}
   <div class="section">
-    <h3>從 GA4 自動同步</h3>
+    <h3>GA4 同步</h3>
     <form method="POST" action="/admin/seo/article/{{ article_id }}/tracking/ga4-sync?key={{ key }}">
       <div class="ga4-box">
-        <label>GA4 頁面標題關鍵字（用來比對 GA4 裡的頁面，例如：Forme步梯高架床｜KY-01）</label>
+        {% if article_slug %}
+        <div class="slug-tag">✓ 優先使用 Slug 比對：{{ article_slug }}</div>
+        {% endif %}
+        <div style="font-size:12px;font-weight:700;color:#33691e;margin-bottom:6px">
+          {% if article_slug %}Title 關鍵字（只有 Slug 找不到時才用，可留空）{% else %}Title 關鍵字（文章沒有 Slug，必填）{% endif %}
+        </div>
         <div class="ga4-row">
-          <input type="text" name="ga4_page_title" value="{{ ga4_page_title }}" placeholder="輸入頁面標題的一部分，系統用 CONTAINS 比對" style="flex:1;min-width:260px">
-          <label style="margin:0;font-size:12px;font-weight:600;color:#555">期間</label>
+          <input type="text" name="ga4_page_title" value="{{ ga4_page_title }}" placeholder="例：高架床系列" style="flex:1;min-width:200px">
           <select name="days">
             <option value="7">過去 7 天</option>
             <option value="28" selected>過去 28 天</option>
@@ -1660,8 +1686,41 @@ th{color:#888;font-weight:600;font-size:10px;text-transform:uppercase}
           </select>
           <button class="btn btn-green" type="submit">從 GA4 同步</button>
         </div>
-        <div style="font-size:11px;color:#888;margin-top:6px">同步後會自動新增一筆今日記錄，標題關鍵字會儲存供下次使用。</div>
+        <div style="font-size:11px;color:#888;margin-top:6px">同步後自動新增今日記錄；Slug 優先，找不到才 fallback title。</div>
       </div>
+    </form>
+  </div>
+  {% endif %}
+
+  {% if ai_diagnosis %}
+  <div class="section">
+    <h3>AI 診斷結果　<span style="font-size:12px;color:#999;font-weight:400">{{ ai_diag_at }}</span></h3>
+    <div class="diag-box">
+      <span class="diag-score">{{ ai_diagnosis.health_score }}</span>
+      <span class="diag-label">/ 100　SEO 健康分數</span>
+      {% if ai_diagnosis.strengths %}
+      <div class="diag-section"><b>✓ 優點</b>
+        <ul class="diag-list">{% for s in ai_diagnosis.strengths %}<li>{{ s }}</li>{% endfor %}</ul>
+      </div>{% endif %}
+      {% if ai_diagnosis.issues %}
+      <div class="diag-section"><b>⚠ 問題</b>
+        <ul class="diag-list">{% for s in ai_diagnosis.issues %}<li>{{ s }}</li>{% endfor %}</ul>
+      </div>{% endif %}
+      {% if ai_diagnosis.suggestions %}
+      <div class="diag-section"><b>→ 建議</b>
+        <ul class="diag-list">{% for s in ai_diagnosis.suggestions %}<li>{{ s }}</li>{% endfor %}</ul>
+      </div>{% endif %}
+    </div>
+    <form method="POST" action="/admin/seo/article/{{ article_id }}/tracking/ai-diagnose?key={{ key }}" style="margin-top:10px">
+      <button class="btn btn-orange" type="submit">重新 AI 診斷</button>
+    </form>
+  </div>
+  {% else %}
+  <div class="section">
+    <h3>AI 診斷</h3>
+    <p style="font-size:13px;color:#888;margin-bottom:12px">按下按鈕讀取文章內容 + GA4 數據，由 Claude 產生 SEO 健康診斷報告。</p>
+    <form method="POST" action="/admin/seo/article/{{ article_id }}/tracking/ai-diagnose?key={{ key }}">
+      <button class="btn btn-orange" type="submit">執行 AI 診斷</button>
     </form>
   </div>
   {% endif %}
@@ -1672,25 +1731,34 @@ th{color:#888;font-weight:600;font-size:10px;text-transform:uppercase}
     <table>
       <tr>
         <th>來源</th><th>日期</th>
-        <th>瀏覽數</th><th>使用者</th><th>互動率</th><th>停留時間</th>
+        <th>瀏覽數</th><th>使用者</th><th>Sessions</th><th>互動率</th><th>跳出率</th><th>停留時間</th>
         <th>排名</th><th>點擊</th><th>曝光</th>
         <th>詢價</th><th>成交</th><th>營收</th>
-        <th>AI Overview</th><th>ChatGPT</th><th>備註</th>
+        <th>AI OV</th><th>GPT</th><th>備註</th>
       </tr>
       {% for r in records %}
       {% set src = r[12] or 'manual' %}
+      {% set notes_lower = (r[8] or '') %}
       <tr>
-        <td><span class="{{ 'badge-ga4' if src == 'ga4' else 'badge-manual' }}">{{ 'GA4' if src == 'ga4' else '手動' }}</span></td>
+        <td>
+          <span class="{{ 'badge-ga4' if src == 'ga4' else 'badge-manual' }}">{{ 'GA4' if src == 'ga4' else '手動' }}</span>
+          {% if src == 'ga4' %}
+            {% if 'slug:' in notes_lower %}<span class="badge-slug">Slug</span>
+            {% elif 'title' in notes_lower %}<span class="badge-title">Title</span>{% endif %}
+          {% endif %}
+        </td>
         <td>{{ r[2] }}</td>
         <td>{{ r[13] if r[13] else '—' }}</td>
         <td>{{ r[14] if r[14] else '—' }}</td>
+        <td>{{ r[17] if r[17] else '—' }}</td>
         <td>{% if r[15] %}{{ "%.0f%%"|format(r[15]*100) }}{% else %}—{% endif %}</td>
-        <td>{% if r[16] %}{% set m = (r[16]//60)|int %}{% set s = (r[16]%60)|int %}{{ m }}分{{ '%02d'|format(s) }}秒{% else %}—{% endif %}</td>
+        <td>{% if r[18] %}{{ "%.0f%%"|format(r[18]*100) }}{% else %}—{% endif %}</td>
+        <td>{% if r[16] %}{% set m=(r[16]//60)|int %}{% set s=(r[16]%60)|int %}{{ m }}分{{ '%02d'|format(s) }}秒{% else %}—{% endif %}</td>
         <td>{{ r[3] or '—' }}</td><td>{{ r[4] if r[4] else '—' }}</td><td>{{ r[5] if r[5] else '—' }}</td>
         <td>{{ r[9] }}</td><td>{{ r[10] }}</td><td>{{ r[11] }}</td>
         <td class="{{ 'yes' if r[6] else 'no' }}">{{ '✓' if r[6] else '—' }}</td>
         <td class="{{ 'yes' if r[7] else 'no' }}">{{ '✓' if r[7] else '—' }}</td>
-        <td style="max-width:200px;white-space:normal;font-size:11px;color:#888">{{ r[8] }}</td>
+        <td style="max-width:180px;white-space:normal;font-size:11px;color:#888">{{ r[8] }}</td>
       </tr>
       {% endfor %}
     </table>
@@ -1699,14 +1767,14 @@ th{color:#888;font-weight:600;font-size:10px;text-transform:uppercase}
       <summary style="font-size:12px;color:#888;cursor:pointer">手動新增記錄（Search Console / 人工填寫）</summary>
       <form class="add-row" method="POST" action="/admin/seo/article/{{ article_id }}/tracking/add?key={{ key }}" style="margin-top:10px">
         <input type="text" name="record_date" placeholder="YYYY-MM-DD" required style="width:110px">
-        <input type="text" name="ranking" placeholder="排名" style="width:60px">
-        <input type="text" name="clicks" placeholder="點擊" style="width:60px">
-        <input type="text" name="impressions" placeholder="曝光" style="width:60px">
-        <input type="text" name="line_inquiries" placeholder="LINE詢價" style="width:70px">
-        <input type="text" name="orders" placeholder="成交數" style="width:60px">
-        <input type="text" name="revenue" placeholder="營收" style="width:70px">
-        <label style="margin:0;font-size:12px"><input type="checkbox" name="ai_overview_cited" style="width:auto"> AI Overview</label>
-        <label style="margin:0;font-size:12px"><input type="checkbox" name="chatgpt_cited" style="width:auto"> ChatGPT</label>
+        <input type="text" name="ranking" placeholder="排名" style="width:55px">
+        <input type="text" name="clicks" placeholder="點擊" style="width:55px">
+        <input type="text" name="impressions" placeholder="曝光" style="width:55px">
+        <input type="text" name="line_inquiries" placeholder="LINE詢價" style="width:65px">
+        <input type="text" name="orders" placeholder="成交" style="width:55px">
+        <input type="text" name="revenue" placeholder="營收" style="width:65px">
+        <label style="margin:0;font-size:12px"><input type="checkbox" name="ai_overview_cited" style="width:auto"> AI OV</label>
+        <label style="margin:0;font-size:12px"><input type="checkbox" name="chatgpt_cited" style="width:auto"> GPT</label>
         <input type="text" name="notes" placeholder="備註" style="flex:1;min-width:100px">
         <button class="btn" type="submit">新增</button>
       </form>
@@ -2925,21 +2993,31 @@ def seo_tracking_view(aid):
     ok, key = check_auth()
     if not ok:
         return render_template_string(LOGIN_HTML, error=None)
-    art = _q("SELECT title,extra FROM seo_articles WHERE id=%s", (aid,), fetch="one")
+    art = _q("SELECT title,slug,extra FROM seo_articles WHERE id=%s", (aid,), fetch="one")
     if not art:
         abort(404)
-    article_title, extra_raw = art[0], art[1]
-    ga4_page_title = _parse_extra(extra_raw).get("ga4_page_title", "")
+    article_title, article_slug, extra_raw = art[0], art[1] or "", art[2]
+    extra = _parse_extra(extra_raw)
+    ga4_page_title = extra.get("ga4_page_title", "")
+    ai_diagnosis   = extra.get("ai_tracking_diagnosis", {})
+    ai_diag_at     = extra.get("ai_tracking_diagnosis_at", 0)
     records = _q("""SELECT id,article_id,record_date,ranking,clicks,impressions,
                      ai_overview_cited,chatgpt_cited,notes,line_inquiries,orders,revenue,
-                     source,page_views,active_users,engagement_rate,avg_duration
+                     source,page_views,active_users,engagement_rate,avg_duration,
+                     sessions,bounce_rate
                      FROM seo_tracking WHERE article_id=%s ORDER BY record_date DESC""", (aid,), fetch="all") or []
     shell = _shell_open(key, "seo", [("文章管理", "/admin/seo"), (f"成效記錄 — {article_title}", None)])
-    ga4_ok = request.args.get("ga4_ok", "")
+    ga4_ok    = request.args.get("ga4_ok", "")
+    ga4_match = request.args.get("ga4_match", "")
     ga4_error = request.args.get("ga4_error", "")
+    diag_ok   = request.args.get("diag_ok", "")
+    diag_err  = request.args.get("diag_err", "")
     return render_template_string(TRACKING_HTML, key=key, shell=shell, article_id=aid,
-        article_title=article_title, records=records,
-        ga4_page_title=ga4_page_title, ga4_ok=ga4_ok, ga4_error=ga4_error,
+        article_title=article_title, article_slug=article_slug, records=records,
+        ga4_page_title=ga4_page_title, ga4_ok=ga4_ok, ga4_match=ga4_match, ga4_error=ga4_error,
+        diag_ok=diag_ok, diag_err=diag_err,
+        ai_diagnosis=ai_diagnosis,
+        ai_diag_at=time.strftime("%Y-%m-%d %H:%M", time.localtime(ai_diag_at)) if ai_diag_at else "",
         ga4_available=bool(GA4_CREDENTIALS_JSON or (GA4_CREDENTIALS_FILE and os.path.exists(GA4_CREDENTIALS_FILE))))
 
 @seo_bp.route("/admin/seo/article/<int:aid>/tracking/add", methods=["POST"])
@@ -2965,34 +3043,118 @@ def seo_tracking_ga4_sync(aid):
     ok, key = check_auth()
     if not ok:
         abort(403)
-    ga4_page_title = request.form.get("ga4_page_title", "").strip()
     days = int(request.form.get("days", 28) or 28)
-    # 儲存 ga4_page_title 到文章 extra（方便下次不用重填）
-    if ga4_page_title:
-        _update_article_extra(aid, {"ga4_page_title": ga4_page_title})
+    # 讀文章的 slug / title / extra
+    art_row = _q("SELECT slug,title,extra FROM seo_articles WHERE id=%s", (aid,), fetch="one")
+    if not art_row:
+        abort(404)
+    slug, article_title, extra_raw = art_row[0], art_row[1], art_row[2]
+    extra = _parse_extra(extra_raw)
+
+    # 使用者可以手動輸入 title 關鍵字覆蓋（只存 title 關鍵字，slug 直接從 DB 取）
+    manual_title_kw = request.form.get("ga4_page_title", "").strip()
+    if manual_title_kw:
+        _update_article_extra(aid, {"ga4_page_title": manual_title_kw})
+        extra["ga4_page_title"] = manual_title_kw
+
+    # 決定比對方式：slug 優先，沒有 slug 才用 title 關鍵字
+    slug = (slug or "").strip()
+    title_kw = extra.get("ga4_page_title", "") or article_title or ""
+
+    if slug:
+        identifier, match_by = slug, "slug"
+    elif title_kw:
+        identifier, match_by = title_kw, "title"
     else:
-        row = _q("SELECT extra FROM seo_articles WHERE id=%s", (aid,), fetch="one")
-        ga4_page_title = _parse_extra(row[0] if row else "").get("ga4_page_title", "")
-    if not ga4_page_title:
-        return redirect(f"/admin/seo/article/{aid}/tracking?key={key}&ga4_error=請先輸入GA4頁面標題關鍵字")
+        return redirect(f"/admin/seo/article/{aid}/tracking?key={key}&ga4_error=文章沒有slug，請先設定文章slug或輸入標題關鍵字")
+
     try:
-        data = _ga4_fetch_page(ga4_page_title, days=days)
+        data = _ga4_fetch_page(identifier, match_by=match_by, days=days)
         if not data:
-            return redirect(f"/admin/seo/article/{aid}/tracking?key={key}&ga4_error=GA4找不到符合的頁面，請確認標題關鍵字是否正確")
+            # slug 找不到時自動 fallback 到 title 關鍵字
+            if match_by == "slug" and title_kw:
+                data = _ga4_fetch_page(title_kw, match_by="title", days=days)
+                if data:
+                    match_by = "title_fallback"
+            if not data:
+                return redirect(f"/admin/seo/article/{aid}/tracking?key={key}&ga4_error=GA4找不到符合頁面（slug:{slug}，title:{title_kw[:30]}），請確認頁面是否已收錄或標題關鍵字是否正確")
+
         today = time.strftime("%Y-%m-%d")
+        match_label = {"slug": f"slug:{slug[:30]}", "title": f"title:{identifier[:30]}", "title_fallback": f"title fallback:{title_kw[:30]}"}.get(match_by, match_by)
         _q("""INSERT INTO seo_tracking
               (article_id,record_date,ranking,clicks,impressions,
-               page_views,active_users,engagement_rate,avg_duration,
+               page_views,active_users,engagement_rate,avg_duration,sessions,bounce_rate,
                ai_overview_cited,chatgpt_cited,notes,line_inquiries,orders,revenue,source,created_at)
-              VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+              VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
            (aid, today, "", 0, 0,
             data["page_views"], data["active_users"], data["engagement_rate"], data["avg_duration"],
-            False, False, f"GA4自動同步（過去{days}天，比對：{data['matched_title'][:40]}）",
+            data["sessions"], data["bounce_rate"],
+            False, False, f"GA4同步（過去{days}天｜{match_label}）",
             0, 0, 0, "ga4", time.time()))
-        return redirect(f"/admin/seo/article/{aid}/tracking?key={key}&ga4_ok=1")
+        return redirect(f"/admin/seo/article/{aid}/tracking?key={key}&ga4_ok=1&ga4_match={match_by}")
     except Exception as e:
         import sys; print(f"[GA4 Sync] {e}", file=sys.stderr)
         return redirect(f"/admin/seo/article/{aid}/tracking?key={key}&ga4_error={str(e)[:120]}")
+
+@seo_bp.route("/admin/seo/article/<int:aid>/tracking/ai-diagnose", methods=["POST"])
+def seo_tracking_ai_diagnose(aid):
+    """手動觸發 AI 診斷：讀取文章內容 + 最新 GA4 記錄 → Claude → 存回 article extra。"""
+    ok, key = check_auth()
+    if not ok:
+        abort(403)
+    if not ANTHROPIC_API_KEY:
+        return redirect(f"/admin/seo/article/{aid}/tracking?key={key}&diag_err=尚未設定ANTHROPIC_API_KEY")
+    try:
+        # 讀文章
+        art = _q("SELECT title,meta_title,meta_description,content,brand_key,category,extra FROM seo_articles WHERE id=%s",
+                  (aid,), fetch="one")
+        if not art:
+            abort(404)
+        title, meta_title, meta_desc, content, brand_key, category, extra_raw = art
+        extra = _parse_extra(extra_raw)
+        ai_score = extra.get("ai_score", 0)
+        # 讀最新 GA4 記錄
+        ga4_row = _q("""SELECT page_views,active_users,engagement_rate,avg_duration,sessions,bounce_rate,record_date
+                         FROM seo_tracking WHERE article_id=%s AND source='ga4'
+                         ORDER BY created_at DESC LIMIT 1""", (aid,), fetch="one")
+        ga4_block = ""
+        if ga4_row:
+            er = round((ga4_row[2] or 0) * 100, 1)
+            br = round((ga4_row[5] or 0) * 100, 1)
+            m, s = int((ga4_row[3] or 0) // 60), int((ga4_row[3] or 0) % 60)
+            ga4_block = f"""GA4數據（{ga4_row[6]}）：
+瀏覽數：{ga4_row[0]}　使用者：{ga4_row[1]}　Sessions：{ga4_row[4]}
+互動率：{er}%　跳出率：{br}%　平均停留：{m}分{s:02d}秒"""
+        prompt = f"""你是台灣SEO診斷專家，請根據以下資料對這篇文章做SEO健康度診斷。
+
+品牌：{brand_key}　品類：{category}
+文章標題：{title}
+Meta Title：{meta_title}
+Meta Description：{meta_desc}
+AI品質分數：{ai_score}/100
+{ga4_block}
+
+文章內容（前3000字）：
+{(content or '')[:3000]}
+
+請輸出繁體中文診斷報告（JSON格式，不要markdown code block）：
+{{
+  "health_score": 0到100整數,
+  "strengths": ["優點1","優點2"],
+  "issues": ["問題1","問題2"],
+  "suggestions": ["建議1","建議2","建議3"]
+}}"""
+        result, err = _ai_call_json(prompt, model="claude-haiku-4-5-20251001", max_tokens=800)
+        if err:
+            return redirect(f"/admin/seo/article/{aid}/tracking?key={key}&diag_err=AI診斷失敗：{err[:80]}")
+        _update_article_extra(aid, {
+            "ai_tracking_diagnosis": result,
+            "ai_tracking_diagnosis_at": time.time(),
+        })
+        return redirect(f"/admin/seo/article/{aid}/tracking?key={key}&diag_ok=1")
+    except Exception as e:
+        import sys; print(f"[AI Diagnose] {e}", file=sys.stderr)
+        return redirect(f"/admin/seo/article/{aid}/tracking?key={key}&diag_err={str(e)[:100]}")
 
 # ── SEO Opportunity 主題機會池 ──────────────────────────────────
 
@@ -3566,6 +3728,26 @@ def _articles_with_latest_tracking(brand_key="", category=""):
 def _top_n(items, key, n=5):
     return sorted(items, key=lambda x: x.get(key, 0), reverse=True)[:n]
 
+def _low_score_articles(limit=8):
+    """讀取 AI 品質分數最低的文章，用於 Dashboard 排行榜。只回傳有 ai_score 的文章。"""
+    if not DATABASE_URL:
+        return []
+    try:
+        rows = _q("""SELECT id,title,brand_key,category,extra,status FROM seo_articles
+                     WHERE extra IS NOT NULL AND extra != '{}' ORDER BY updated_at DESC LIMIT 100""",
+                  fetch="all") or []
+        scored = []
+        for r in rows:
+            score = _parse_extra(r[4]).get("ai_score", 0)
+            if score:
+                scored.append({"id": r[0], "title": r[1], "brand": r[2], "category": r[3],
+                                "ai_score": score, "status": r[5]})
+        scored.sort(key=lambda x: x["ai_score"])
+        return scored[:limit]
+    except Exception as e:
+        import sys; print(f"[Low Score] {e}", file=sys.stderr)
+        return []
+
 def _month_bounds(year, month):
     start = f"{year:04d}-{month:02d}-01"
     ny, nm = (year + 1, 1) if month == 12 else (year, month + 1)
@@ -3937,6 +4119,26 @@ th{color:#888;font-weight:600;font-size:11px;text-transform:uppercase}
   </div>
 
   <div class="section">
+    <h3>🔴 需優化文章（AI 分數最低）</h3>
+    {% if low_score_articles %}
+    <table>
+      <tr><th>AI分數</th><th>文章</th><th>品牌</th><th>品類</th><th></th></tr>
+      {% for a in low_score_articles %}
+      <tr>
+        <td><span class="score-badge {{ 'score-good' if a.ai_score>=80 else ('score-warn' if a.ai_score>=60 else 'score-bad') }}">{{ a.ai_score }}</span></td>
+        <td>{{ a.title }}</td>
+        <td>{{ a.brand }}</td>
+        <td>{{ a.category }}</td>
+        <td><a class="task-link" href="/admin/seo/article/{{ a.id }}/tracking?key={{ key }}">診斷 →</a></td>
+      </tr>
+      {% endfor %}
+    </table>
+    {% else %}
+    <p style="color:#999;font-size:13px">目前沒有已評分的文章，請先對文章執行 AI 品質檢查。</p>
+    {% endif %}
+  </div>
+
+  <div class="section">
     <h3>AI 下一批主題建議</h3>
     <div class="ai-box">{{ suggestion }}</div>
     <div class="ai-meta">上次生成：{{ suggestion_time }}（每天最多重新生成一次）</div>
@@ -3996,6 +4198,10 @@ def seo_dashboard_page():
         import sys; print(f"[SEO Dashboard] 高優先主題讀取失敗：{e}", file=sys.stderr)
         top_opps = []
     suggestion, gen_at = _get_ai_suggestion()
+    try:
+        low_score_articles = _low_score_articles(limit=8)
+    except Exception:
+        low_score_articles = []
     shell = _shell_open(key, "seo-dashboard", [("SEO 營運中心", None)])
     return render_template_string(DASHBOARD_HTML, key=key, shell=shell, items=items,
         brand_key=brand_key, category=category, brands=brands, categories=categories, stats=stats,
@@ -4003,6 +4209,7 @@ def seo_dashboard_page():
         top_clicks=_top_n(items, "clicks"), top_ctr=_top_n(items, "ctr"),
         top_inquiries=_top_n(items, "line_inquiries"), top_orders=_top_n(items, "orders"),
         top_revenue=_top_n(items, "revenue"),
+        low_score_articles=low_score_articles,
         suggestion=suggestion,
         suggestion_time=time.strftime("%Y-%m-%d %H:%M", time.localtime(gen_at)) if gen_at else "尚未生成")
 
