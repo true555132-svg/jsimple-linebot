@@ -8,6 +8,20 @@ LINE Bot / FB Messenger / CRM 完全不在此檔案中。
 import os, json, time, threading, urllib.request, io, base64
 from flask import Blueprint, request, jsonify, render_template_string, Response
 
+try:
+    from zhconv import convert as _zhconv
+except Exception:
+    _zhconv = None
+
+def _to_tw(text):
+    """簡體轉繁體（顯示用，不改 DB 原始資料）"""
+    if not text or not _zhconv:
+        return text
+    try:
+        return _zhconv(text, "zh-tw")
+    except Exception:
+        return text
+
 # ── 設定（從環境變數，與 app.py 一致）────────────────────────────
 DATABASE_URL         = os.getenv("DATABASE_URL", "")
 ANTHROPIC_API_KEY    = os.getenv("ANTHROPIC_API_KEY", "")
@@ -241,7 +255,7 @@ def _pj_list(limit=50):
             (limit,)
         )
         rows = cur.fetchall(); cur.close(); conn.close()
-        return [{"id":r[0],"url":r[1],"platform":r[2],"status":r[3],"raw_title":r[4],"ai_name":r[5],"ai_desc":r[6],"ai_keywords":r[7],"error_msg":r[8],"created_at":r[9],"brand":r[10] or "","category":r[11] or "","listing_status":r[12] or "草稿","img_status":r[13] or "","main_image":r[14] or "","raw_images":json.loads(r[15] or "[]")} for r in rows]
+        return [{"id":r[0],"url":r[1],"platform":r[2],"status":r[3],"raw_title":_to_tw(r[4]),"ai_name":r[5],"ai_desc":r[6],"ai_keywords":r[7],"error_msg":r[8],"created_at":r[9],"brand":r[10] or "","category":r[11] or "","listing_status":r[12] or "草稿","img_status":r[13] or "","main_image":r[14] or "","raw_images":json.loads(r[15] or "[]")} for r in rows]
     except Exception:
         return []
 
@@ -259,12 +273,31 @@ def _pj_get(job_id):
         row = cur.fetchone()
         if not row:
             cur.close(); conn.close(); return None
-        result = {"id":row[0],"url":row[1],"platform":row[2],"status":row[3],"raw_title":row[4],"raw_desc":row[5],"raw_images":json.loads(row[6] or "[]"),"raw_price":row[7],"ai_name":row[8],"ai_desc":row[9],"ai_keywords":row[10],"error_msg":row[11],"created_at":row[12],"processed_images":json.loads(row[13] or "[]"),"img_status":row[14] or "","raw_extra":json.loads(row[15] or "{}"),"brand":row[16] or "","translated_images":json.loads(row[17] or "[]"),"translate_status":row[18] or "",
+        raw_extra = json.loads(row[15] or "{}")
+        if isinstance(raw_extra.get("specs"), list):
+            raw_extra["specs"] = [
+                {"name": _to_tw(s.get("name","")) if isinstance(s, dict) else _to_tw(str(s)),
+                 "value": _to_tw(s.get("value","")) if isinstance(s, dict) else ""}
+                for s in raw_extra["specs"]
+            ]
+        if isinstance(raw_extra.get("sku_prices"), list):
+            raw_extra["sku_prices"] = [
+                {**p, "label": _to_tw(p.get("label",""))} if isinstance(p, dict) else p
+                for p in raw_extra["sku_prices"]
+            ]
+        result = {"id":row[0],"url":row[1],"platform":row[2],"status":row[3],"raw_title":_to_tw(row[4]),"raw_desc":_to_tw(row[5]),"raw_images":json.loads(row[6] or "[]"),"raw_price":row[7],"ai_name":row[8],"ai_desc":row[9],"ai_keywords":row[10],"error_msg":row[11],"created_at":row[12],"processed_images":json.loads(row[13] or "[]"),"img_status":row[14] or "","raw_extra":raw_extra,"brand":row[16] or "","translated_images":json.loads(row[17] or "[]"),"translate_status":row[18] or "",
                   "category":row[19] or "","price_min":row[20] or "","price_max":row[21] or "","shopee_title":row[22] or "","website_name":row[23] or "","features":row[24] or "","seo_desc":row[25] or "","faq":json.loads(row[26] or "[]"),"main_image":row[27] or "","listing_status":row[28] or "草稿"}
         try:
             cur.execute("SELECT product_images FROM product_jobs WHERE id=%s", (job_id,))
             pi_row = cur.fetchone()
-            result["product_images"] = json.loads((pi_row[0] if pi_row else None) or "{}")
+            pi = json.loads((pi_row[0] if pi_row else None) or "{}")
+            for cat in ("sku_images",):
+                if isinstance(pi.get(cat), list):
+                    pi[cat] = [
+                        {**i, "label": _to_tw(i.get("label",""))} if isinstance(i, dict) else i
+                        for i in pi[cat]
+                    ]
+            result["product_images"] = pi
         except Exception:
             result["product_images"] = {}
         cur.close(); conn.close()
@@ -1870,7 +1903,6 @@ function tab1Html(j){
       <div class="compare-field"><label>原始標題</label><div class="static-val">${esc(j.raw_title||"（無）")}</div></div>
       <div class="compare-field"><label>原始價格</label><div class="static-val">${esc(j.raw_price||"（無）")}</div></div>
       <div class="compare-field"><label>原始規格</label><div class="static-val">${specsHtml}</div></div>
-      <div class="compare-field"><label>多規格價格</label><div class="static-val">${skuPricesHtml}</div></div>
       <div class="compare-field"><label>來源網址</label><div class="static-val" style="word-break:break-all"><a href="${esc(j.url)}" target="_blank" style="color:#1a73e8">${esc(j.url)}</a></div></div>
     </div>
     <div>
@@ -1883,6 +1915,7 @@ function tab1Html(j){
           <button type="button" class="sel-btn" onclick="applyMultiplier(${j.id})">用原始價格 × 乘數 換算</button>
         </div>
       </div>
+      <div class="compare-field"><label>多規格價格</label><div class="static-val" style="max-height:220px;overflow-y:auto">${skuPricesHtml}</div></div>
       <div class="compare-field"><label>商品分類</label><input type="text" id="t1_category" value="${esc(j.category||"")}"></div>
       <div class="compare-field"><label>狀態</label><select id="t1_status">${["草稿","待審核","待上架","上架中","已下架"].map(s=>`<option${j.listing_status===s?" selected":""}>${s}</option>`).join("")}</select></div>
       <button class="btn-save" onclick="saveTab1(${j.id})">儲存</button>
