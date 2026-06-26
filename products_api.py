@@ -2053,34 +2053,71 @@ function tab3Html(j){
     ${multiline?`<textarea id="${id}" style="height:${multiline}px">${esc(val||"")}</textarea>`:`<input type="text" id="${id}" value="${esc(val||"")}">`}
   </div>`;
 
-  // Pipeline 分析卡片
-  const pipelineTag = j.pipeline_used
-    ? `<span style="background:#e8f5e9;color:#2e7d32;border-radius:6px;padding:2px 10px;font-size:12px;font-weight:600">Pipeline ✓</span>`
-    : `<span style="background:#f5f5f5;color:#999;border-radius:6px;padding:2px 10px;font-size:12px">舊版生成</span>`;
+  // ── Pipeline 狀態區塊 ──────────────────────────────────────────
+  const log = j.pipeline_log || "";
+  const hasFail = log.includes("PIPELINE_FAIL:");
 
+  let badge, badgeNote;
+  if (j.pipeline_used) {
+    badge = `<span style="background:#e8f5e9;color:#2e7d32;border-radius:6px;padding:2px 10px;font-size:12px;font-weight:600">Pipeline 成功</span>`;
+    badgeNote = `<span style="font-size:12px;color:#888">5 階段分析完成</span>`;
+  } else if (hasFail) {
+    const failLine = log.split('\n').find(l=>l.includes('PIPELINE_FAIL:')) || '';
+    const reason = failLine.replace('PIPELINE_FAIL:','').split('\n')[0].trim().slice(0,80);
+    badge = `<span style="background:#fff3e0;color:#e65100;border-radius:6px;padding:2px 10px;font-size:12px;font-weight:600">Fallback 舊版</span>`;
+    badgeNote = `<span style="font-size:12px;color:#e65100" title="${esc(reason)}">${esc(reason.slice(0,50))}${reason.length>50?'…':''}</span>`;
+  } else {
+    badge = `<span style="background:#f5f5f5;color:#999;border-radius:6px;padding:2px 10px;font-size:12px">舊版生成</span>`;
+    badgeNote = '';
+  }
+
+  // pipeline_log 逐行解析，加色
+  let logHtml = '';
+  if (log.trim()) {
+    const lines = log.trim().split('\n').filter(l=>l.trim());
+    const logLines = lines.map(line => {
+      let color = '#555', bg = 'transparent';
+      if (/完成|Pipeline 全部/.test(line)) { color='#2e7d32'; }
+      else if (/失敗|FAIL|error/i.test(line)) { color='#c62828'; bg='#fff8f8'; }
+      else if (/開始|平行/.test(line))  { color='#1565c0'; }
+      return `<div style="padding:1px 4px;color:${color};background:${bg};border-radius:3px;font-size:11px;font-family:monospace">${esc(line)}</div>`;
+    }).join('');
+    logHtml = `<details style="margin-top:6px">
+      <summary style="font-size:11px;color:#aaa;cursor:pointer;user-select:none">執行 log（${lines.length} 步）</summary>
+      <div style="background:#f8f8f8;border-radius:6px;padding:6px 8px;margin-top:4px;line-height:1.7">${logLines}</div>
+    </details>`;
+  }
+
+  // 分析 JSON 卡片（摺疊）
   const jsonCard = (title, obj) => {
     if (!obj || !Object.keys(obj).length) return '';
     const rows = Object.entries(obj).map(([k,v]) => {
-      const val = Array.isArray(v) ? v.join('、') : String(v);
-      return `<tr><td style="padding:3px 8px;color:#666;white-space:nowrap;vertical-align:top">${esc(k)}</td><td style="padding:3px 8px">${esc(val)}</td></tr>`;
+      const val = Array.isArray(v) ? v.join('、') : (typeof v==='boolean' ? (v?'是':'否') : String(v));
+      return `<tr><td style="padding:3px 8px;color:#888;white-space:nowrap;vertical-align:top;width:120px">${esc(k)}</td><td style="padding:3px 8px">${esc(val)}</td></tr>`;
     }).join('');
-    return `<details style="margin-bottom:10px;border:1px solid #e0e0e0;border-radius:8px;overflow:hidden">
-      <summary style="padding:8px 12px;cursor:pointer;background:#fafafa;font-weight:600;font-size:13px">${title}</summary>
-      <table style="width:100%;font-size:12px;border-collapse:collapse;padding:6px">${rows}</table>
+    return `<details style="margin-bottom:8px;border:1px solid #eee;border-radius:8px;overflow:hidden">
+      <summary style="padding:7px 12px;cursor:pointer;background:#fafafa;font-size:12px;font-weight:600;color:#555">${title}</summary>
+      <table style="width:100%;font-size:12px;border-collapse:collapse">${rows}</table>
     </details>`;
   };
 
-  let h = `<div style="display:flex;align-items:center;gap:8px;margin-bottom:12px">
-    <span style="font-weight:600;font-size:14px">生成方式</span>${pipelineTag}
-    <button onclick="regenerateCopy(${j.id},false)" style="margin-left:auto;background:#f5f5f5;border:none;border-radius:8px;padding:5px 12px;font-size:12px;cursor:pointer">↻ 舊版重生成</button>
-    <button onclick="regenerateCopy(${j.id},true)" style="background:#e8f0fe;color:#1a73e8;border:none;border-radius:8px;padding:5px 12px;font-size:12px;cursor:pointer">✦ Pipeline 重生成</button>
+  let h = `<div id="pipelineStatusBlock_${j.id}" style="background:#fafafa;border:1px solid #eee;border-radius:10px;padding:10px 14px;margin-bottom:14px">
+    <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+      <span style="font-size:12px;color:#888;font-weight:600;flex-shrink:0">生成方式</span>
+      ${badge} ${badgeNote}
+      <div style="margin-left:auto;display:flex;gap:6px;flex-shrink:0">
+        <button id="regenOld_${j.id}" onclick="regenerateCopy(${j.id},false)" style="background:#f5f5f5;border:none;border-radius:7px;padding:4px 11px;font-size:12px;cursor:pointer;color:#555">↻ 舊版</button>
+        <button id="regenPipe_${j.id}" onclick="regenerateCopy(${j.id},true)" style="background:#e8f0fe;color:#1a73e8;border:none;border-radius:7px;padding:4px 11px;font-size:12px;cursor:pointer">✦ Pipeline</button>
+      </div>
+    </div>
+    ${logHtml}
   </div>`;
 
   h += jsonCard("商品分析（Stage 1）", j.analysis_json);
   h += jsonCard("搜尋意圖（Stage 3）", j.search_intent_json);
   h += jsonCard("競品分析（Stage 4）", j.competitor_json);
 
-  h += `<div style="border-top:2px solid #e0e0e0;margin:12px 0 12px"></div>`;
+  h += `<div style="border-top:1px solid #eee;margin:12px 0"></div>`;
   h += field("商品名稱","t3_name",j.ai_name);
   h += field("蝦皮標題","t3_shopee",j.shopee_title);
   h += field("官網商品名稱","t3_website",j.website_name);
@@ -2111,19 +2148,48 @@ async function saveTab3(id){
 }
 
 async function regenerateCopy(id, usePipeline){
-  const body = usePipeline !== undefined ? JSON.stringify({use_pipeline: usePipeline}) : null;
+  // 鎖定兩個按鈕，顯示 loading 狀態
+  const btnOld  = document.getElementById(`regenOld_${id}`);
+  const btnPipe = document.getElementById(`regenPipe_${id}`);
+  if(btnOld){btnOld.disabled=true;btnOld.textContent='...';}
+  if(btnPipe){btnPipe.disabled=true;btnPipe.textContent='...';}
+
+  const body  = usePipeline !== undefined ? JSON.stringify({use_pipeline: usePipeline}) : null;
   const label = usePipeline ? "Pipeline" : "舊版";
-  const r=await api("/api/products/"+id+"/regenerate-copy",{method:"POST",body});
-  if(!r.ok){toast("失敗："+(r.error||""));return;}
-  toast(`AI 正在重新生成文案（${label}）...`);
-  pollRegenerate(id,0);
+  const r = await api("/api/products/"+id+"/regenerate-copy",{method:"POST",body});
+  if(!r.ok){
+    toast("送出失敗："+(r.error||""));
+    if(btnOld){btnOld.disabled=false;btnOld.textContent='↻ 舊版';}
+    if(btnPipe){btnPipe.disabled=false;btnPipe.textContent='✦ Pipeline';}
+    return;
+  }
+
+  // 狀態區塊顯示 spinner
+  const statusBlock = document.getElementById(`pipelineStatusBlock_${id}`);
+  if(statusBlock){
+    statusBlock.innerHTML = `<div style="display:flex;align-items:center;gap:8px;color:#666;font-size:13px">
+      <span class="spinner"></span> ${esc(label)} 生成中，請稍候...
+    </div>`;
+  }
+  pollRegenerate(id, 0, usePipeline);
 }
-async function pollRegenerate(id,tries){
-  if(tries>20){toast("生成超時，請重試");const btn=document.getElementById("regenBtn");if(btn){btn.disabled=false;btn.textContent="↻ 重新生成文案";}return;}
-  const j=await api("/api/products/"+id);
-  if(j.status==="done"){toast("文案已更新");if(openId===id)openJob(id);}
-  else if(j.status==="error"){toast("生成失敗："+(j.error_msg||""));}
-  else setTimeout(()=>pollRegenerate(id,tries+1),3000);
+
+async function pollRegenerate(id, tries, usePipeline){
+  if(tries > 30){toast("生成超時（超過 60 秒），請重試");if(openId===id)openJob(id);return;}
+  const j = await api("/api/products/"+id);
+  if(j.status === "done"){
+    const label = usePipeline ? "Pipeline 分析完成" : "文案已更新";
+    toast(label + " — 畫面已更新");
+    if(openId===id){
+      await openJob(id);   // 重新載入所有欄位
+      switchModalTab("tab3");  // 確保停在 AI 商品分析 tab
+    }
+  } else if(j.status === "error"){
+    toast("生成失敗：" + (j.error_msg || "未知錯誤"));
+    if(openId===id){await openJob(id);switchModalTab("tab3");}
+  } else {
+    setTimeout(()=>pollRegenerate(id, tries+1, usePipeline), 2000);
+  }
 }
 
 function tab4Html(j){
