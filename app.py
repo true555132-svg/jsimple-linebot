@@ -4007,8 +4007,9 @@ def api_delete_quick_image():
 
 
 # ═══ 商品搜運 Blueprint ═══════════════════════════════════════════
-from products_api import products_bp
+from products_api import products_bp, _migrate_pipeline_columns
 app.register_blueprint(products_bp)
+_migrate_pipeline_columns()
 
 # ═══ SEO 內容管理後台 Blueprint ═══════════════════════════════════
 from seo_admin import seo_bp
