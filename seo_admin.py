@@ -42,6 +42,14 @@ def init_seo_db():
         with _db_lock:
             conn = _pg_conn()
             cur = conn.cursor()
+            # brand_profiles 由 app.py 建立並先初始化，這裡只額外加品牌一致性防護用的欄位，
+            # 不碰 app.py、也不影響既有的 LINE Bot / FB Bot / 商品搬運邏輯
+            for col_sql in [
+                "ALTER TABLE brand_profiles ADD COLUMN IF NOT EXISTS allowed_products TEXT DEFAULT ''",
+                "ALTER TABLE brand_profiles ADD COLUMN IF NOT EXISTS allowed_services TEXT DEFAULT ''",
+            ]:
+                try: cur.execute(col_sql)
+                except Exception: pass
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS seo_titles (
                     id          SERIAL PRIMARY KEY,
@@ -273,13 +281,28 @@ def _get_brand(brand_key):
     if not DATABASE_URL or not brand_key:
         return {}
     try:
-        row = _q("SELECT brand_key,name,category,style,tone,custom_prompt FROM brand_profiles WHERE brand_key=%s",
-                 (brand_key,), fetch="one")
+        row = _q("""SELECT brand_key,name,category,style,tone,custom_prompt,allowed_products,allowed_services
+                    FROM brand_profiles WHERE brand_key=%s""", (brand_key,), fetch="one")
         if not row:
             return {}
-        return {"key": row[0], "name": row[1], "category": row[2], "style": row[3], "tone": row[4], "custom_prompt": row[5]}
+        return {"key": row[0], "name": row[1], "category": row[2], "style": row[3], "tone": row[4],
+                "custom_prompt": row[5], "allowed_products": row[6] or "", "allowed_services": row[7] or ""}
     except Exception:
         return {}
+
+def _list_brands_with_allowed():
+    """品牌SEO規則頁頂部「允許商品/服務清單」編輯區用：只需要brand_key/name/allowed_products/allowed_services"""
+    if not DATABASE_URL:
+        return []
+    try:
+        rows = _q("SELECT brand_key,name,allowed_products,allowed_services FROM brand_profiles ORDER BY brand_key", fetch="all") or []
+        return [{"key": r[0], "name": r[1], "allowed_products": r[2] or "", "allowed_services": r[3] or ""} for r in rows]
+    except Exception:
+        return []
+
+def _save_brand_allowed(brand_key, allowed_products, allowed_services):
+    _q("UPDATE brand_profiles SET allowed_products=%s, allowed_services=%s, updated_at=%s WHERE brand_key=%s",
+       (allowed_products, allowed_services, time.time(), brand_key))
 
 # ── 知識庫（讓AI生成文章時引用真實品牌資料，提升EEAT、避免虛構）──
 
@@ -344,6 +367,69 @@ def _knowledge_block(items):
         label = KNOWLEDGE_TYPE_LABELS.get(it["type"], it["type"])
         lines.append(f"{i}. [{label}] {it['title']}：{it['content']}")
     return "\n".join(lines)
+
+def _allowed_products_block(brand, knowledge_items):
+    """搜尋意圖分析「最後可能購買什麼產品」的真實資料錨點：優先用brand_profiles.allowed_products/
+    allowed_services（人工維護、最可靠），其次用seo_knowledge的商品/品牌特色資料；兩者都沒有就
+    明確告知AI沒有資料，不要自行推測——這是避免AI亂掰商品/跨品牌聯想的關鍵，不是只靠Prompt語氣硬性要求。"""
+    allowed_products = (brand.get("allowed_products") or "").strip()
+    allowed_services = (brand.get("allowed_services") or "").strip()
+    lines = []
+    if allowed_products:
+        lines.append(f"允許提到的商品（只能從這裡面挑）：{allowed_products}")
+    if allowed_services:
+        lines.append(f"允許提到的服務（只能從這裡面挑）：{allowed_services}")
+    if knowledge_items:
+        lines.append("品牌知識庫資料：\n" + _knowledge_block(knowledge_items))
+    if not lines:
+        return "（目前品牌尚未建立商品資料，不列出商品。）"
+    return "\n".join(lines)
+
+def _knowledge_sufficiency_note(brand, knowledge_items):
+    has_data = bool(knowledge_items or (brand.get("allowed_products") or "").strip() or (brand.get("allowed_services") or "").strip())
+    if has_data:
+        return ""
+    return ("目前品牌知識庫資料不足。你可以分析搜尋需求，但不能自行補品牌介紹、服務、案例或商品。"
+            "請在分析最前面加一行：「此品牌尚未建立相關知識，以下內容僅分析搜尋需求。」")
+
+def _brand_guardrail_header(brand, category):
+    """品牌一致性規則：用程式碼直接組字串、不放進「Prompt設定」頁可編輯的範本裡，
+    這樣使用者編輯Prompt範本時不會不小心把這道防線改掉或刪掉，符合「最高優先權」的要求。
+    搜尋意圖分析、Prompt Preview、AI生成文章共用同一支，三個流程的防護內容保證一致。"""
+    brand_name = brand.get("name") or "(未指定)"
+    allowed_products = (brand.get("allowed_products") or "").strip()
+    allowed_services = (brand.get("allowed_services") or "").strip()
+    allowed_lines = []
+    if allowed_products:
+        allowed_lines.append(f"允許提到的商品：{allowed_products}")
+    if allowed_services:
+        allowed_lines.append(f"允許提到的服務：{allowed_services}")
+    allowed_block = ("\n" + "\n".join(allowed_lines) + "\n（只能從上面這份清單裡提商品/服務，清單外的商品、服務、或其他品牌的任何東西都不能出現）") if allowed_lines else ""
+    return f"""========
+品牌一致性規則（最高優先權，違反視為錯誤輸出，回傳前必須遵守）
+目前品牌：{brand_name}
+目前品類：{category or "(未指定)"}
+{allowed_block}
+所有分析與文章內容只能依據：
+- 目前品牌（{brand_name}）
+- 目前品牌知識庫（seo_knowledge）
+- 目前品牌SEO規則（seo_brand_rules）
+
+禁止：
+- 推測或提及其他品牌名稱、其他品牌的商品、其他品牌的服務
+- 混用不同品牌的資料
+- 自行創造本品牌沒有資料佐證的商品、服務、案例、特色
+
+若沒有相關資料，請直接回答不知道，不得用其他品牌或虛構內容填補。
+========"""
+
+def _brand_guardrail_footer(brand):
+    brand_name = brand.get("name") or "(未指定)"
+    return f"""========
+【最後驗證，回傳前必做】
+請再檢查一次你即將輸出的內容，是否出現「{brand_name}」以外的其他品牌名稱、其他品牌的商品、或其他品牌的服務。
+如果有，請先修正（拿掉或換成「{brand_name}」實際的資料）再輸出，不要讓不同品牌的內容混在同一份輸出裡。
+========"""
 
 def _knowledge_import_prompt(raw_text):
     return f"""你是品牌知識庫整理專家。以下是使用者貼上的原始資料（可能是商品介紹、FAQ、客服對話紀錄、案例內容等，格式可能很亂）：
@@ -847,12 +933,17 @@ DEFAULT_ANALYZE_PROMPT = """你是台灣SEO/GEO/AEO內容策略專家。
 品類：[[CATEGORY]]
 主題：[[TOPIC]]
 
+[[KNOWLEDGE_SUFFICIENCY_NOTE]]
+
+可用商品資料（[[BRAND_NAME]]實際販售的商品/服務，下面第5點只能從這裡面挑）：
+[[ALLOWED_PRODUCTS_BLOCK]]
+
 請分析這個主題的搜尋意圖，輸出繁體中文、台灣用語，不要寫成英文翻譯腔：
 1. 搜尋者是誰
 2. 遇到什麼問題
 3. 為什麼搜尋
 4. 想得到什麼答案
-5. 最後可能購買什麼產品
+5. 最後可能購買什麼產品 —— 只能列出上面「可用商品資料」裡實際存在的商品/服務；如果上面顯示沒有資料，就直接回答「目前品牌尚未建立商品資料，不列出商品。」不要自行推測。
 
 再列出「客群 × 場景 × 問題」矩陣，各至少5項。
 
@@ -977,11 +1068,15 @@ def _fill_tokens(template, **tokens):
     return out
 
 def _analyze_intent_prompt(brand, category, topic):
+    knowledge_items = _get_knowledge_for_prompt(brand.get('key', ''), category, limit=10)
     tmpl = _get_prompt_template("analyze", DEFAULT_ANALYZE_PROMPT)
-    return _fill_tokens(tmpl,
+    body = _fill_tokens(tmpl,
         BRAND_NAME=brand.get('name', ''), BRAND_CATEGORY=brand.get('category', ''),
         BRAND_STYLE=brand.get('style', ''), CATEGORY=category, TOPIC=topic,
-        ARTICLE_TYPE_OPTIONS='、'.join(ARTICLE_TYPES))
+        ARTICLE_TYPE_OPTIONS='、'.join(ARTICLE_TYPES),
+        ALLOWED_PRODUCTS_BLOCK=_allowed_products_block(brand, knowledge_items),
+        KNOWLEDGE_SUFFICIENCY_NOTE=_knowledge_sufficiency_note(brand, knowledge_items))
+    return _brand_guardrail_header(brand, category) + "\n\n" + body + "\n\n" + _brand_guardrail_footer(brand)
 
 def _extract_suggested_article_type(text):
     """從AI分析結果裡拆出「建議文章類型：XXX」這一行，回傳(清理後的分析文字, 判定到的類型)。
@@ -999,7 +1094,7 @@ def _generate_article_prompt(brand, category, topic, intent_analysis, knowledge_
     avoid_directions/cta_direction/article_type），缺省時用空字串，不影響舊呼叫方式。"""
     fields = fields or {}
     tmpl = _get_prompt_template("generate", DEFAULT_GENERATE_PROMPT)
-    return _fill_tokens(tmpl,
+    body = _fill_tokens(tmpl,
         BRAND_NAME=brand.get('name', ''), BRAND_CATEGORY=brand.get('category', ''),
         BRAND_STYLE=brand.get('style', ''), BRAND_TONE=brand.get('tone', ''),
         CATEGORY=category, TOPIC=topic, ANALYSIS=intent_analysis,
@@ -1013,6 +1108,7 @@ def _generate_article_prompt(brand, category, topic, intent_analysis, knowledge_
         ARTICLE_TYPE=fields.get('article_type', ''),
         ARTICLE_TYPE_GUIDE=_article_type_guide(fields.get('article_type', '')),
         BRAND_RULE=_brand_rule_block(brand_rule))
+    return _brand_guardrail_header(brand, category) + "\n\n" + body + "\n\n" + _brand_guardrail_footer(brand)
 
 # ── Auth（複製自 app.py，避免 circular import，與既有後台共用同一支密碼）──
 
@@ -1966,9 +2062,31 @@ th{color:#888;font-weight:600;font-size:11px;text-transform:uppercase}
 td.excerpt{max-width:260px;color:#666;font-size:12px}
 .btn{padding:7px 14px;background:#0d6efd;color:#fff;border:none;border-radius:6px;font-size:12px;font-weight:600;cursor:pointer;white-space:nowrap;text-decoration:none;display:inline-block}
 .link{color:#0d6efd;text-decoration:none;font-weight:600;font-size:12px}
+label{font-size:12px;color:#888;font-weight:700;display:block;margin-bottom:5px;margin-top:10px}
+label:first-child{margin-top:0}
+textarea{width:100%;border:1px solid #ddd;border-radius:8px;padding:8px 10px;font-size:13px;font-family:inherit;line-height:1.6;resize:vertical}
+.brand-allowed-row{border-top:1px solid #f0f0f0;padding:14px 0}
+.brand-allowed-row:first-of-type{border-top:none;padding-top:0}
+.hint2{font-size:12px;color:#999;margin-bottom:14px;line-height:1.6}
 </style></head><body>
 {{ shell|safe }}
 <div class="container">
+  <div class="section">
+    <h3 style="font-size:15px;margin-bottom:6px">品牌允許商品／服務清單（品牌一致性防護）</h3>
+    <div class="hint2">AI在搜尋意圖分析與生成文章時，只能提到這份清單裡的商品/服務，清單外的（包括其他品牌的）一律禁止出現——這比單純靠Prompt語氣指示更可靠。留空＝退回只靠知識庫/Prompt規則判斷，防護力較弱。</div>
+    {% for b in brands_allowed %}
+    <form method="POST" action="/admin/seo-brand-rules/allowed/save?key={{ key }}" class="brand-allowed-row">
+      <input type="hidden" name="brand_key" value="{{ b.key }}">
+      <label>{{ b.name }}（{{ b.key }}）— 允許商品</label>
+      <textarea name="allowed_products" rows="2" placeholder="例如：高架床、穀倉門、辦公家具、頂天立地架、層板架">{{ b.allowed_products }}</textarea>
+      <label>允許服務</label>
+      <textarea name="allowed_services" rows="2" placeholder="例如：客製訂做、到府丈量">{{ b.allowed_services }}</textarea>
+      <button class="btn" type="submit" style="margin-top:10px">儲存</button>
+    </form>
+    {% else %}
+    <div class="hint2">目前沒有品牌資料（brand_profiles 是空的）。</div>
+    {% endfor %}
+  </div>
   <div class="section">
     <h3 style="font-size:15px;margin-bottom:12px">品牌SEO規則（{{ rules|length }}）</h3>
     <table>
@@ -2070,7 +2188,8 @@ textarea{width:100%;border:1px solid #ddd;border-radius:8px;padding:10px;font-si
 
   <div class="section">
     <h3>① 搜尋意圖分析 Prompt</h3>
-    <div class="hint">可用變數：<code>[[BRAND_NAME]]</code> <code>[[BRAND_CATEGORY]]</code> <code>[[BRAND_STYLE]]</code> <code>[[CATEGORY]]</code> <code>[[TOPIC]]</code> <code>[[ARTICLE_TYPE_OPTIONS]]</code>（文章類型選項清單）— 結尾的「建議文章類型：」那一行請保留，系統會用它自動帶入文章類型欄位並讓品牌SEO規則比對更準；存檔後立即生效，不需重新部署</div>
+    <div class="hint">⚠️ 系統會自動在這份Prompt的最前面與最後面加上「品牌一致性規則」（禁止提及其他品牌/商品/服務），這段防護是寫在程式碼裡，不在下面這個文字框裡，編輯/還原都不會影響它，<a href="/admin/seo-brand-rules?key={{ key }}">允許商品/服務清單</a>沒填的話防護力較弱，建議去填。</div>
+    <div class="hint">可用變數：<code>[[BRAND_NAME]]</code> <code>[[BRAND_CATEGORY]]</code> <code>[[BRAND_STYLE]]</code> <code>[[CATEGORY]]</code> <code>[[TOPIC]]</code> <code>[[ARTICLE_TYPE_OPTIONS]]</code>（文章類型選項清單）<code>[[ALLOWED_PRODUCTS_BLOCK]]</code>（允許商品/服務清單＋知識庫資料）<code>[[KNOWLEDGE_SUFFICIENCY_NOTE]]</code>（知識不足時的提示文字）— 結尾的「建議文章類型：」那一行請保留，系統會用它自動帶入文章類型欄位並讓品牌SEO規則比對更準；存檔後立即生效，不需重新部署</div>
     <form method="POST" action="/admin/seo-settings/save?key={{ key }}" onsubmit="return true">
       <input type="hidden" name="prompt_key" value="analyze">
       <textarea name="content" rows="14">{{ analyze_prompt }}</textarea>
@@ -2086,6 +2205,7 @@ textarea{width:100%;border:1px solid #ddd;border-radius:8px;padding:10px;font-si
 
   <div class="section">
     <h3>② AI 生成文章 Prompt</h3>
+    <div class="hint">⚠️ 同上，系統會自動在這份Prompt的最前面與最後面加上「品牌一致性規則」，這段防護不在下面的文字框裡，Prompt Preview看到的內容已經包含它。</div>
     <div class="hint">可用變數：<code>[[BRAND_NAME]]</code> <code>[[BRAND_CATEGORY]]</code> <code>[[BRAND_STYLE]]</code> <code>[[BRAND_TONE]]</code> <code>[[CATEGORY]]</code> <code>[[TOPIC]]</code> <code>[[ANALYSIS]]</code>（搜尋意圖分析結果）<code>[[KNOWLEDGE]]</code>（<a href="/admin/seo-knowledge?key={{ key }}">知識庫</a>引用資料）<code>[[BRAND_RULE]]</code>（依「自動／不套用／手動」選出的<a href="/admin/seo-brand-rules?key={{ key }}">品牌SEO規則</a>）<code>[[ARTICLE_TYPE_GUIDE]]</code>（依文章類型給的架構指引，未指定類型時會請AI自行判斷）— 結尾的JSON輸出格式請保留，否則文章會存不進去</div>
     <form method="POST" action="/admin/seo-settings/save?key={{ key }}">
       <input type="hidden" name="prompt_key" value="generate">
@@ -2921,8 +3041,18 @@ def seo_brand_rules_page():
     if not ok:
         return render_template_string(LOGIN_HTML, error=None)
     rules = _list_brand_rules()
+    brands_allowed = _list_brands_with_allowed()
     shell = _shell_open(key, "seo-brand-rules", [("品牌SEO規則", None)])
-    return render_template_string(BRAND_RULES_LIST_HTML, key=key, shell=shell, rules=rules)
+    return render_template_string(BRAND_RULES_LIST_HTML, key=key, shell=shell, rules=rules, brands_allowed=brands_allowed)
+
+@seo_bp.route("/admin/seo-brand-rules/allowed/save", methods=["POST"])
+def seo_brand_allowed_save():
+    ok, key = check_auth()
+    if not ok:
+        abort(403)
+    _save_brand_allowed(request.form.get("brand_key", ""), request.form.get("allowed_products", ""),
+                         request.form.get("allowed_services", ""))
+    return redirect(f"/admin/seo-brand-rules?key={key}")
 
 @seo_bp.route("/admin/seo-brand-rules/item/new")
 def seo_brand_rule_new():
