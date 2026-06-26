@@ -253,6 +253,20 @@ def init_seo_db():
                     updated_at   FLOAT DEFAULT 0
                 )
             """)
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS seo_ga4_batch_jobs (
+                    id            SERIAL PRIMARY KEY,
+                    status        TEXT DEFAULT 'pending',
+                    total         INTEGER DEFAULT 0,
+                    success_count INTEGER DEFAULT 0,
+                    skip_count    INTEGER DEFAULT 0,
+                    error_count   INTEGER DEFAULT 0,
+                    log_text      TEXT DEFAULT '',
+                    error_msg     TEXT DEFAULT '',
+                    created_at    FLOAT DEFAULT 0,
+                    updated_at    FLOAT DEFAULT 0
+                )
+            """)
             conn.commit()
             cur.close()
             conn.close()
@@ -398,6 +412,104 @@ def _resolve_allowed_products(brand, category):
     if ap:
         return ap, "品牌預設 allowed_products"
     return "", "無商品資料"
+
+def _list_articles_with_ga4():
+    """文章列表 + 最新一筆 GA4 來源的 seo_tracking 資料（LATERAL JOIN，不額外打 GA4 API）"""
+    if not DATABASE_URL:
+        return []
+    try:
+        rows = _q("""
+            SELECT a.id, a.title, a.status, a.slug, a.updated_at, a.extra,
+                   t.page_views, t.active_users, t.sessions, t.engagement_rate,
+                   t.bounce_rate, t.avg_duration, t.record_date, t.notes
+            FROM seo_articles a
+            LEFT JOIN LATERAL (
+                SELECT page_views, active_users, sessions, engagement_rate,
+                       bounce_rate, avg_duration, record_date, notes
+                FROM seo_tracking
+                WHERE article_id = a.id AND source = 'ga4'
+                ORDER BY created_at DESC
+                LIMIT 1
+            ) t ON TRUE
+            ORDER BY a.id DESC
+        """, fetch="all") or []
+        articles = []
+        for r in rows:
+            extra = _parse_extra(r[5])
+            notes = r[13] or ""
+            ga4_match = "slug" if "slug:" in notes else ("title" if "title" in notes else "")
+            has_ga4 = r[6] is not None
+            articles.append({
+                "id": r[0], "title": r[1], "status": r[2], "slug": r[3] or "",
+                "updated_at": time.strftime("%Y-%m-%d %H:%M", time.localtime(r[4])) if r[4] else "",
+                "main_keyword": extra.get("main_keyword", ""),
+                "ai_score": extra.get("ai_score", 0),
+                "related_products": extra.get("related_products", ""),
+                "next_action": extra.get("next_action", ""),
+                "page_views":      r[6] or 0 if has_ga4 else None,
+                "active_users":    r[7] or 0 if has_ga4 else None,
+                "sessions":        r[8] or 0 if has_ga4 else None,
+                "engagement_rate": r[9] or 0 if has_ga4 else None,
+                "bounce_rate":     r[10] or 0 if has_ga4 else None,
+                "avg_duration":    r[11] or 0 if has_ga4 else None,
+                "ga4_date":        r[12] or "" if has_ga4 else "",
+                "ga4_match":       ga4_match,
+            })
+        return articles
+    except Exception as e:
+        import sys; print(f"[list_articles_with_ga4] {e}", file=sys.stderr)
+        return []
+
+def _run_ga4_batch_job(job_id, days=28):
+    """背景執行：同步所有有 slug 的文章到 seo_tracking（source=ga4）"""
+    import sys
+    try:
+        _q("UPDATE seo_ga4_batch_jobs SET status='running', updated_at=%s WHERE id=%s", (time.time(), job_id))
+        rows = _q("""SELECT id, slug, title FROM seo_articles
+                     WHERE slug IS NOT NULL AND TRIM(slug) != ''
+                     ORDER BY id DESC""", fetch="all") or []
+        total = len(rows)
+        _q("UPDATE seo_ga4_batch_jobs SET total=%s, updated_at=%s WHERE id=%s", (total, time.time(), job_id))
+        success, skipped, errors = 0, 0, 0
+        log_lines = []
+        for art_id, slug, title in rows:
+            short = (title or "")[:30]
+            try:
+                data = _ga4_fetch_page(slug, match_by="slug", days=days)
+                if not data:
+                    skipped += 1
+                    log_lines.append(f"⬜ 跳過 [{art_id}] {short}（GA4 無此 slug 資料）")
+                else:
+                    today = time.strftime("%Y-%m-%d")
+                    _q("""INSERT INTO seo_tracking
+                          (article_id,record_date,ranking,clicks,impressions,
+                           page_views,active_users,engagement_rate,avg_duration,sessions,bounce_rate,
+                           ai_overview_cited,chatgpt_cited,notes,line_inquiries,orders,revenue,source,created_at)
+                          VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+                       (art_id, today, "", 0, 0,
+                        data["page_views"], data["active_users"], data["engagement_rate"], data["avg_duration"],
+                        data["sessions"], data["bounce_rate"],
+                        False, False, f"GA4批次同步（過去{days}天｜slug:{slug[:40]}）",
+                        0, 0, 0, "ga4", time.time()))
+                    success += 1
+                    log_lines.append(f"✓ [{art_id}] {short}（{data['page_views']} 次瀏覽）")
+            except Exception as e:
+                errors += 1
+                log_lines.append(f"✗ [{art_id}] {short}（錯誤：{str(e)[:60]}）")
+            _q("""UPDATE seo_ga4_batch_jobs SET success_count=%s, skip_count=%s, error_count=%s,
+                  log_text=%s, updated_at=%s WHERE id=%s""",
+               (success, skipped, errors, "\n".join(log_lines[-80:]), time.time(), job_id))
+            time.sleep(0.3)
+        _q("""UPDATE seo_ga4_batch_jobs SET status='done', success_count=%s, skip_count=%s,
+              error_count=%s, log_text=%s, updated_at=%s WHERE id=%s""",
+           (success, skipped, errors, "\n".join(log_lines), time.time(), job_id))
+    except Exception as e:
+        print(f"[GA4 Batch Job] {e}", file=sys.stderr)
+        try:
+            _q("UPDATE seo_ga4_batch_jobs SET status='error', error_msg=%s, updated_at=%s WHERE id=%s",
+               (str(e)[:200], time.time(), job_id))
+        except Exception:
+            pass
 
 # ── 知識庫（讓AI生成文章時引用真實品牌資料，提升EEAT、避免虛構）──
 
@@ -1417,7 +1529,7 @@ LIST_HTML = """<!DOCTYPE html>
 *{box-sizing:border-box;margin:0;padding:0}
 body{font-family:-apple-system,sans-serif;background:#f5f5f5;color:#333}
 """ + SIDEBAR_CSS + """
-.container{max-width:1000px;margin:24px auto;padding:0 16px}
+.container{max-width:1440px;margin:24px auto;padding:0 16px}
 .section{background:#fff;border-radius:14px;padding:20px;margin-bottom:20px;box-shadow:0 1px 4px rgba(0,0,0,.08)}
 .section h3{font-size:15px;margin-bottom:12px}
 table{width:100%;border-collapse:collapse;font-size:13px}
@@ -1441,11 +1553,20 @@ th{color:#888;font-weight:600;font-size:11px;text-transform:uppercase}
 .score-good{background:#e8f5e9;color:#2e7d32}
 .score-warn{background:#fff8e1;color:#f57f17}
 .score-bad{background:#fdecea;color:#c62828}
+.ga4-num{font-weight:700;font-size:13px}
+.ga4-label{font-size:10px;color:#888;display:block}
+.no-ga4{color:#ccc;font-size:12px}
+.batch-panel{background:#f0f7ff;border:1px solid #bbd6f5;border-radius:10px;padding:14px 16px;margin-top:12px;font-size:13px}
+.batch-panel .bp-row{display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+.prog-bar-wrap{flex:1;min-width:120px;background:#dde;border-radius:6px;height:8px;overflow:hidden}
+.prog-bar{height:8px;background:#0d6efd;border-radius:6px;transition:width .4s}
+.batch-log{margin-top:10px;background:#fff;border:1px solid #e0e0e0;border-radius:6px;padding:10px;font-size:11px;font-family:monospace;max-height:180px;overflow-y:auto;white-space:pre-wrap;color:#333}
 input[type=text],select,textarea{width:100%;border:1px solid #ddd;border-radius:6px;padding:7px 9px;font-size:13px;font-family:inherit}
 .add-row{display:flex;gap:8px;margin-top:10px}
 .add-row input{flex:1}
 .btn{padding:7px 14px;background:#0d6efd;color:#fff;border:none;border-radius:6px;font-size:12px;font-weight:600;cursor:pointer;white-space:nowrap}
 .btn-del{background:#dc3545}
+.btn-ga4{background:#e8710a}
 .btn-sm{padding:4px 10px;font-size:11px}
 .link{color:#0d6efd;text-decoration:none;font-weight:600}
 form.inline{display:inline}
@@ -1487,26 +1608,108 @@ form.inline{display:inline}
   </div>
 
   <div class="section">
-    <h3>文章（{{ articles|length }}）</h3>
+    <div style="display:flex;align-items:center;gap:10px;margin-bottom:12px;flex-wrap:wrap">
+      <h3 style="margin:0">文章（{{ articles|length }}）</h3>
+      <span style="flex:1"></span>
+      {% if ga4_no_creds %}
+      <span style="color:#c00;font-size:12px">⚠️ 未設定 GA4_CREDENTIALS_JSON，無法同步</span>
+      {% else %}
+      <form method="POST" action="/admin/seo/ga4-batch-sync?key={{ key }}" style="display:flex;align-items:center;gap:6px">
+        <select name="days" style="width:auto;padding:5px 8px;font-size:12px">
+          <option value="28">近 28 天</option>
+          <option value="14">近 14 天</option>
+          <option value="7">近 7 天</option>
+        </select>
+        <button class="btn btn-ga4 btn-sm" type="submit">同步全部 GA4</button>
+      </form>
+      {% endif %}
+      <a class="btn btn-sm" style="text-decoration:none" href="/admin/seo/article/new?key={{ key }}">+ 新增文章</a>
+    </div>
+
+    {% if batch_job_id %}
+    <div class="batch-panel" id="batchPanel">
+      <div class="bp-row">
+        <span id="bpStatus" style="font-weight:700;color:#0d6efd">同步中…</span>
+        <span id="bpCount" style="color:#555"></span>
+        <div class="prog-bar-wrap"><div class="prog-bar" id="bpBar" style="width:0%"></div></div>
+        <span id="bpPct" style="font-size:12px;color:#888">0%</span>
+      </div>
+      <div class="batch-log" id="bpLog">等待中…</div>
+    </div>
+    <script>
+    (function(){
+      var jobId={{ batch_job_id }}, key='{{ key }}';
+      var done=false;
+      function poll(){
+        if(done)return;
+        fetch('/admin/seo/ga4-batch-sync/status/'+jobId+'?key='+key)
+          .then(function(r){return r.json()})
+          .then(function(d){
+            var s=d.status, tot=d.total||0, suc=d.success||0, skip=d.skipped||0, err=d.errors||0;
+            var pct=tot>0?Math.round((suc+skip+err)/tot*100):0;
+            document.getElementById('bpBar').style.width=pct+'%';
+            document.getElementById('bpPct').textContent=pct+'%';
+            document.getElementById('bpCount').textContent='成功 '+suc+' / 跳過 '+skip+' / 失敗 '+err+' / 共 '+tot;
+            document.getElementById('bpLog').textContent=d.log||'等待中…';
+            var el=document.getElementById('bpLog');
+            el.scrollTop=el.scrollHeight;
+            if(s==='done'){
+              done=true;
+              document.getElementById('bpStatus').textContent='同步完成';
+              document.getElementById('bpStatus').style.color='#2e7d32';
+              document.getElementById('bpBar').style.width='100%';
+              document.getElementById('bpPct').textContent='100%';
+              setTimeout(function(){location.href='/admin/seo?key='+key;},2000);
+            } else if(s==='error'){
+              done=true;
+              document.getElementById('bpStatus').textContent='同步失敗：'+d.error_msg;
+              document.getElementById('bpStatus').style.color='#c00';
+            } else {
+              setTimeout(poll,2000);
+            }
+          }).catch(function(){if(!done)setTimeout(poll,3000);});
+      }
+      setTimeout(poll,1000);
+    })();
+    </script>
+    {% endif %}
+
     <div class="scroll-x">
     <table>
-      <tr><th>標題</th><th>狀態</th><th>主關鍵字</th><th>AI評分</th><th>對應商品</th><th>下一步</th><th>更新時間</th><th>操作</th></tr>
+      <tr>
+        <th>標題</th><th>狀態</th><th>AI分</th>
+        <th>瀏覽(近28天)</th><th>使用者</th><th>互動率</th><th>跳出率</th><th>最後同步</th>
+        <th>操作</th>
+      </tr>
       {% for a in articles %}
       <tr>
-        <td style="font-weight:600">{{ a.title }}</td>
-        <td><span class="badge b-{{ a.status }}">{{ article_status_labels.get(a.status, a.status) }}</span></td>
-        <td>{{ a.main_keyword }}</td>
+        <td style="font-weight:600;min-width:160px">
+          {{ a.title }}
+          {% if a.slug %}<br><span style="font-size:11px;color:#aaa;font-weight:normal">{{ a.slug }}</span>{% endif %}
+        </td>
+        <td style="white-space:nowrap">
+          <span class="badge b-{{ a.status }}">{{ article_status_labels.get(a.status, a.status) }}</span>
+        </td>
         <td>
           {% if a.ai_score %}
           <span class="score-badge {{ 'score-good' if a.ai_score>=80 else ('score-warn' if a.ai_score>=60 else 'score-bad') }}">{{ a.ai_score }}</span>
           {% else %}<span style="color:#bbb">—</span>{% endif %}
         </td>
-        <td style="max-width:160px;font-size:12px;color:#666">{{ a.related_products }}</td>
-        <td>{% if a.next_action %}<span class="badge" style="background:#eef2ff;color:#3730a3">{{ a.next_action }}</span>{% endif %}</td>
-        <td style="white-space:nowrap">{{ a.updated_at }}</td>
+        {% if a.page_views is not none %}
+        <td><span class="ga4-num">{{ "{:,}".format(a.page_views) }}</span></td>
+        <td><span class="ga4-num">{{ "{:,}".format(a.active_users) }}</span></td>
+        <td><span class="ga4-num">{{ "%.0f%%"|format(a.engagement_rate*100) }}</span></td>
+        <td><span class="ga4-num">{{ "%.0f%%"|format(a.bounce_rate*100) }}</span></td>
+        <td style="white-space:nowrap;font-size:11px;color:#888">
+          {{ a.ga4_date }}
+          {% if a.ga4_match %}<br><span style="color:#0d6efd">{{ a.ga4_match }}</span>{% endif %}
+        </td>
+        {% else %}
+        <td colspan="5" class="no-ga4">{% if a.slug %}未同步{% else %}無 Slug{% endif %}</td>
+        {% endif %}
         <td style="white-space:nowrap">
           <a class="link btn-sm" href="/admin/seo/article/{{ a.id }}?key={{ key }}">編輯</a>
-          <a class="link btn-sm" href="/admin/seo/article/{{ a.id }}/tracking?key={{ key }}">成效記錄</a>
+          <a class="link btn-sm" href="/admin/seo/article/{{ a.id }}/tracking?key={{ key }}">成效</a>
           <form class="inline" method="POST" action="/admin/seo/article/{{ a.id }}/delete?key={{ key }}" onsubmit="return confirm('刪除這篇文章？')">
             <button class="btn btn-del btn-sm" type="submit">刪除</button>
           </form>
@@ -1515,7 +1718,6 @@ form.inline{display:inline}
       {% endfor %}
     </table>
     </div>
-    <a class="btn" style="display:inline-block;margin-top:10px;text-decoration:none" href="/admin/seo/article/new?key={{ key }}">+ 新增文章</a>
   </div>
 
 </div>
@@ -3263,21 +3465,13 @@ def seo_dashboard():
     if not ok:
         return render_template_string(LOGIN_HTML, error=None)
     titles = _q("SELECT id,topic,title,status,slug FROM seo_titles ORDER BY id DESC", fetch="all") or []
-    rows = _q("SELECT id,title,status,slug,updated_at,extra FROM seo_articles ORDER BY id DESC", fetch="all") or []
-    articles = []
-    for r in rows:
-        extra = _parse_extra(r[5])
-        articles.append({
-            "id": r[0], "title": r[1], "status": r[2], "slug": r[3],
-            "updated_at": time.strftime("%Y-%m-%d %H:%M", time.localtime(r[4])) if r[4] else "",
-            "main_keyword": extra.get("main_keyword", ""),
-            "ai_score": extra.get("ai_score", 0),
-            "related_products": extra.get("related_products", ""),
-            "next_action": extra.get("next_action", ""),
-        })
+    articles = _list_articles_with_ga4()
+    ga4_no_creds = not GA4_CREDENTIALS_JSON and not (GA4_CREDENTIALS_FILE and os.path.exists(GA4_CREDENTIALS_FILE))
+    batch_job_id = request.args.get("batch_job_id", "")
     shell = _shell_open(key, "seo", [("文章管理", None)])
     return render_template_string(LIST_HTML, key=key, shell=shell, titles=titles, articles=articles,
-        title_status=TITLE_STATUS, article_status_labels=ARTICLE_STATUS_LABELS)
+        title_status=TITLE_STATUS, article_status_labels=ARTICLE_STATUS_LABELS,
+        ga4_no_creds=ga4_no_creds, batch_job_id=batch_job_id)
 
 @seo_bp.route("/admin/seo/title/add", methods=["POST"])
 def seo_title_add():
@@ -3303,6 +3497,35 @@ def seo_title_delete(tid):
         abort(403)
     _q("DELETE FROM seo_titles WHERE id=%s", (tid,))
     return redirect(f"/admin/seo?key={key}")
+
+@seo_bp.route("/admin/seo/ga4-batch-sync", methods=["POST"])
+def seo_ga4_batch_sync_start():
+    ok, key = check_auth()
+    if not ok:
+        abort(403)
+    if not GA4_CREDENTIALS_JSON and not (GA4_CREDENTIALS_FILE and os.path.exists(GA4_CREDENTIALS_FILE)):
+        return redirect(f"/admin/seo?key={key}&ga4_error=未設定GA4憑證")
+    days = int(request.form.get("days", 28) or 28)
+    now = time.time()
+    job_id = _q("INSERT INTO seo_ga4_batch_jobs (status,created_at,updated_at) VALUES ('pending',%s,%s) RETURNING id",
+                (now, now), fetch="id")
+    threading.Thread(target=_run_ga4_batch_job, args=(job_id, days), daemon=True).start()
+    return redirect(f"/admin/seo?key={key}&batch_job_id={job_id}")
+
+@seo_bp.route("/admin/seo/ga4-batch-sync/status/<int:job_id>")
+def seo_ga4_batch_sync_status(job_id):
+    ok, _ = check_auth()
+    if not ok:
+        return jsonify({"error": "unauthorized"}), 403
+    row = _q("""SELECT status,total,success_count,skip_count,error_count,log_text,error_msg
+                FROM seo_ga4_batch_jobs WHERE id=%s""", (job_id,), fetch="one")
+    if not row:
+        return jsonify({"status": "error", "error_msg": "找不到這個同步任務"})
+    return jsonify({
+        "status": row[0], "total": row[1] or 0,
+        "success": row[2] or 0, "skipped": row[3] or 0, "errors": row[4] or 0,
+        "log": row[5] or "", "error_msg": row[6] or "",
+    })
 
 @seo_bp.route("/admin/seo/article/new")
 def seo_article_new():
