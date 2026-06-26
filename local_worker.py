@@ -986,7 +986,7 @@ _SCAN_TAOBAO_JS = """() => {
 def scan_store_page(page, url, limit=60):
     """Phase 1：掃描店鋪/分類頁，只抓當前頁面商品卡片，不翻頁。"""
     from datetime import datetime
-    platform = '1688' if '1688.com' in url else 'taobao' if 'taobao.com' in url else 'unknown'
+    platform = '1688' if '1688.com' in url else 'taobao' if ('taobao.com' in url or 'tmall.com' in url) else 'unknown'
     if platform == 'unknown':
         return {"platform": platform, "items": [], "error": "不支援的平台"}
 

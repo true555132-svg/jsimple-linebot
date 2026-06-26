@@ -462,7 +462,7 @@ def _scrape_images(html):
 
 def _detect_platform(url):
     if "1688.com" in url: return "1688"
-    if "taobao.com" in url: return "taobao"
+    if "taobao.com" in url or "tmall.com" in url: return "taobao"
     return "unknown"
 
 def _extract_meta_text(html, prop):
@@ -2619,7 +2619,7 @@ def api_products_add():
         return jsonify({"error": "請提供商品連結"}), 400
     platform = _detect_platform(url)
     if platform == "unknown":
-        return jsonify({"error": "目前只支援 1688 和 淘寶 連結"}), 400
+        return jsonify({"error": "目前只支援 1688、淘寶、天貓 連結"}), 400
     brand = (data.get("brand") or "").strip()
     job_id = _pj_insert(url, platform, brand)
     if not job_id:
@@ -3531,7 +3531,7 @@ def api_store_scan_create():
         return jsonify({"error": "請提供店鋪/分類頁連結"}), 400
     platform = _detect_platform(url)
     if platform == "unknown":
-        return jsonify({"error": "目前只支援 1688 和 淘寶 連結"}), 400
+        return jsonify({"error": "目前只支援 1688、淘寶、天貓 連結"}), 400
     job_id = _ss_insert(url, platform)
     if not job_id:
         return jsonify({"error": "建立失敗，請確認資料庫連線"}), 500
