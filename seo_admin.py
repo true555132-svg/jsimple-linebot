@@ -518,7 +518,7 @@ def _article_type_guide(article_type):
     return f"文章類型：{article_type} → {guide}"
 
 def _opportunity_prompt(brand, category, knowledge_items, brand_rule=None):
-    return f"""你是台灣SEO/GEO/AEO內容策略專家。請根據以下品牌資訊，產生20個有價值的SEO文章主題。
+    body = f"""你是台灣SEO/GEO/AEO內容策略專家。請根據以下品牌資訊，產生20個有價值的SEO文章主題。
 
 品牌：{brand.get('name','')}（{brand.get('category','')}）
 品牌風格：{brand.get('style','')}
@@ -527,14 +527,15 @@ def _opportunity_prompt(brand, category, knowledge_items, brand_rule=None):
 品牌SEO規則（重要，主題不可偏離）：
 {_brand_rule_block(brand_rule)}
 
-品牌知識庫參考（真實資料，主題應該盡量貼近這些內容，不要憑空想像不存在的功能或案例）：
-{_knowledge_block(knowledge_items)}
+可用商品資料（{brand.get('name','')}實際販售的商品/服務，每個主題的related_products只能從這裡面挑）：
+{_allowed_products_block(brand, knowledge_items)}
 
 請產生20個SEO文章主題，要求：
 1. 是真實使用者會搜尋的問題，不要空泛的標題
 2. 涵蓋不同類型：價格型、比較型、商業型、資訊型都要有，不要全部都一樣
-3. 盡量能對應到上面知識庫的真實商品/案例/特色
+3. 主題與related_products只能對應到上面「可用商品資料」裡實際存在的商品/服務，禁止自己發明商品、禁止混入其他品牌的商品或服務、禁止推測本品牌沒有販售的商品
 4. 不可偏離品牌SEO規則裡的「禁止偏離方向」
+5. 如果上面「可用商品資料」顯示沒有資料，主題可以聚焦在搜尋需求與問題本身，related_products留空，不要為了湊主題硬塞不存在的商品
 
 每個主題請評估：
 - main_keyword：這個主題的主關鍵字
@@ -545,8 +546,8 @@ def _opportunity_prompt(brand, category, knowledge_items, brand_rule=None):
 - business_score（1~100）：整體商業價值（綜合考量帶來詢價/成交的潛力與品牌契合度）
 - competition_score（1~100）：競爭度，分數越高代表越難排名
 - priority：A（優先）/ B（中等）/ C（次要）
-- suggested_article_type：建議文章類型，從「導購文/比較文/尺寸指南/案例文/FAQ文/採購指南/問題解決文/品牌介紹文」選一個
-- related_products：對應商品，逗號分隔
+- suggested_article_type：建議文章類型，從「{'／'.join(ARTICLE_TYPES)}」選一個
+- related_products：對應商品，逗號分隔，只能是{brand.get('name','')}實際販售的商品
 - reason：50字以內，說明為什麼推薦這個主題
 
 輸出格式（只輸出JSON陣列，不要其他文字，不要markdown code block）：
@@ -554,9 +555,10 @@ def _opportunity_prompt(brand, category, knowledge_items, brand_rule=None):
   {{"topic": "主題", "main_keyword": "主關鍵字", "search_intent": "搜尋意圖簡述", "target_customer": "目標客群",
     "seo_score": 8, "geo_score": 7, "conversion_score": 9, "difficulty": 4,
     "business_score": 85, "competition_score": 50, "priority": "A",
-    "suggested_article_type": "採購指南", "related_products": "員工桌,辦公椅",
+    "suggested_article_type": "商業導購", "related_products": "員工桌,辦公椅",
     "reason": "推薦原因"}}
 ]"""
+    return _brand_guardrail_header(brand, category) + "\n\n" + body + "\n\n" + _brand_guardrail_footer(brand)
 
 def _opportunity_insert_batch(brand, category, items):
     """依 brand+category+topic（去頭尾空白、不分大小寫）比對，重複就跳過（不覆蓋既有狀態與分數）。回傳 (inserted, skipped)。"""
@@ -790,11 +792,14 @@ CTA方向：{rule.get('cta_direction','')}
 
 # ── AI 文章品質檢查 ─────────────────────────────────────────────
 
-def _quality_check_prompt(article, brand_rule, extra):
-    return f"""你是台灣SEO/GEO/AEO內容策略專家，請幫以下文章做發布前品質檢查。
+def _quality_check_prompt(article, brand, category, brand_rule, extra):
+    body = f"""你是台灣SEO/GEO/AEO內容策略專家，請幫以下文章做發布前品質檢查。
 
 品牌SEO規則（文章必須符合，不可偏離）：
 {_brand_rule_block(brand_rule)}
+
+可用商品資料（{brand.get('name','')}實際販售的商品/服務，第15項品牌一致性檢查要用這份清單比對）：
+{_allowed_products_block(brand, [])}
 
 文章主關鍵字：{extra.get('main_keyword','')}
 文章目標客群：{extra.get('target_audience','')}
@@ -806,7 +811,7 @@ Meta Description：{article.get('meta_description','')}
 文章內容：
 {article.get('content','')[:8000]}
 
-請檢查以下14項：
+請檢查以下15項：
 1. 標題是否包含主關鍵字
 2. Meta Title是否清楚
 3. Meta Description是否有吸引點擊
@@ -821,11 +826,14 @@ Meta Description：{article.get('meta_description','')}
 12. 是否需要拆成多篇文章
 13. 是否有內容太泛、太像AI文的問題
 14. 是否有錯誤或不適合品牌的方向（尤其注意是否偏離「禁止偏離方向」）
+15. 品牌一致性檢查（重要）—— 逐項檢查文章裡是否出現：(a) 「{brand.get('name','')}」以外的其他品牌名稱 (b) 不屬於{brand.get('name','')}的商品 (c) 不屬於{brand.get('name','')}的服務 (d) 違反上面「可用商品資料」清單的商品/服務 (e) 混用其他品牌知識庫內容。只要出現其中任何一項，這篇文章的品牌一致性就算未通過，必須在brand_consistency_issues欄位具體列出疑似違規的文字段落。
 
 輸出格式（只輸出JSON，不要其他文字，不要markdown code block）：
 {{
   "score": 0到100的整數,
   "recommend_publish": true或false,
+  "brand_consistency_pass": true或false,
+  "brand_consistency_issues": "列出第15項找到的疑似違反品牌一致性的具體內容，沒有問題就輸出空字串",
   "issues": "主要問題，條列式文字，找到的問題具體寫出來",
   "suggestions": "修改建議，具體可執行",
   "next_status": "從 draft_review/needs_revision/ready_to_publish 選一個",
@@ -833,6 +841,7 @@ Meta Description：{article.get('meta_description','')}
   "suggested_internal_links": "建議內部連結，逗號分隔",
   "suggested_related_products": "建議對應商品，逗號分隔"
 }}"""
+    return _brand_guardrail_header(brand, category) + "\n\n" + body + "\n\n" + _brand_guardrail_footer(brand)
 
 def _run_quality_check_job(job_id, article_id):
     try:
@@ -846,15 +855,24 @@ def _run_quality_check_job(job_id, article_id):
         article = {"title": row[0], "meta_title": row[1], "meta_description": row[2], "content": row[3]}
         brand_key, category = row[4], row[5]
         extra = _parse_extra(row[6])
+        brand = _get_brand(brand_key)
         brand_rule = _match_brand_rule(brand_key, category)
-        prompt = _quality_check_prompt(article, brand_rule, extra)
+        prompt = _quality_check_prompt(article, brand, category, brand_rule, extra)
         result, err = _ai_call_json(prompt, model="claude-sonnet-4-6", max_tokens=2000)
         if err:
             _q("UPDATE seo_quality_check_jobs SET status='error', error_msg=%s, updated_at=%s WHERE id=%s",
                (f"AI檢查失敗：{err}", time.time(), job_id))
             return
+        # 品牌一致性是硬性規則：只要AI判定未通過，不管AI自己填的recommend_publish/next_status是什麼，
+        # 強制視為不可發布，避免品質檢查這道安全網被AI自己的判斷打折扣
+        if result.get("brand_consistency_pass") is False:
+            result["recommend_publish"] = False
+            if not (result.get("brand_consistency_issues") or "").strip():
+                result["brand_consistency_issues"] = "AI標示品牌一致性檢查未通過，但未說明具體違規內容"
         next_status = result.get("next_status", "")
         if next_status not in ARTICLE_STATUS:
+            next_status = "needs_revision"
+        if result.get("brand_consistency_pass") is False:
             next_status = "needs_revision"
         extra["ai_score"] = int(result.get("score", 0) or 0)
         extra["quality_check"] = result
@@ -1412,6 +1430,7 @@ textarea{resize:vertical;line-height:1.7}
   <div class="qc-result" id="qc-result">
     <span class="qc-score" id="qc-score"></span>
     <span id="qc-recommend" style="margin-left:10px;font-weight:700"></span>
+    <div class="qc-row"><b>品牌一致性檢查</b><span id="qc-brand-consistency"></span></div>
     <div class="qc-row"><b>主要問題</b><span id="qc-issues"></span></div>
     <div class="qc-row"><b>修改建議</b><span id="qc-suggestions"></span></div>
     <div class="qc-row"><b>建議補強段落</b><span id="qc-sections"></span></div>
@@ -1469,6 +1488,14 @@ function renderQc(r){
   el.textContent = 'AI評分：' + score + '分';
   el.className = 'qc-score ' + (score>=80?'qc-good':(score>=60?'qc-warn':'qc-bad'));
   document.getElementById('qc-recommend').textContent = '是否建議發布：' + (r.recommend_publish ? '是' : '否');
+  const bcEl = document.getElementById('qc-brand-consistency');
+  if (r.brand_consistency_pass === false) {
+    bcEl.textContent = '❌ 未通過：' + (r.brand_consistency_issues || '（AI未說明具體內容）');
+    bcEl.style.color = '#c62828'; bcEl.style.fontWeight = '700';
+  } else {
+    bcEl.textContent = '✅ 通過';
+    bcEl.style.color = '#2e7d32'; bcEl.style.fontWeight = '700';
+  }
   document.getElementById('qc-issues').textContent = r.issues || '（無）';
   document.getElementById('qc-suggestions').textContent = r.suggestions || '（無）';
   document.getElementById('qc-sections').textContent = r.suggested_sections || '（無）';
