@@ -10,9 +10,12 @@ seo_admin.py — SEO 內容管理後台 Blueprint
 import os, json, time, threading, urllib.request, re
 from flask import Blueprint, request, jsonify, render_template_string, redirect, abort
 
-DATABASE_URL      = os.getenv("DATABASE_URL", "")
-ADMIN_PASSWORD    = os.getenv("ADMIN_PASSWORD", "jsimple2024")
-ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
+DATABASE_URL          = os.getenv("DATABASE_URL", "")
+ADMIN_PASSWORD        = os.getenv("ADMIN_PASSWORD", "jsimple2024")
+ANTHROPIC_API_KEY     = os.getenv("ANTHROPIC_API_KEY", "")
+GA4_CREDENTIALS_JSON  = os.getenv("GA4_CREDENTIALS_JSON", "")
+GA4_CREDENTIALS_FILE  = os.getenv("GA4_CREDENTIALS_FILE", r"C:\Users\user\jsimple-ga-credentials.json")
+GA4_PROPERTY_ID       = os.getenv("GA4_PROPERTY_ID", "395475976")
 
 seo_bp = Blueprint("seo", __name__)
 _db_lock = threading.Lock()
@@ -100,6 +103,10 @@ def init_seo_db():
                 "ALTER TABLE seo_tracking ADD COLUMN IF NOT EXISTS orders INTEGER DEFAULT 0",
                 "ALTER TABLE seo_tracking ADD COLUMN IF NOT EXISTS revenue NUMERIC DEFAULT 0",
                 "ALTER TABLE seo_tracking ADD COLUMN IF NOT EXISTS source TEXT DEFAULT 'manual'",
+                "ALTER TABLE seo_tracking ADD COLUMN IF NOT EXISTS page_views INTEGER DEFAULT 0",
+                "ALTER TABLE seo_tracking ADD COLUMN IF NOT EXISTS active_users INTEGER DEFAULT 0",
+                "ALTER TABLE seo_tracking ADD COLUMN IF NOT EXISTS engagement_rate NUMERIC DEFAULT 0",
+                "ALTER TABLE seo_tracking ADD COLUMN IF NOT EXISTS avg_duration NUMERIC DEFAULT 0",
             ]:
                 try: cur.execute(col_sql)
                 except Exception: pass
@@ -304,6 +311,83 @@ def _save_brand_allowed(brand_key, allowed_products, allowed_services):
     _q("UPDATE brand_profiles SET allowed_products=%s, allowed_services=%s, updated_at=%s WHERE brand_key=%s",
        (allowed_products, allowed_services, time.time(), brand_key))
 
+def _ga4_client():
+    """建立 GA4 API client。優先用 GA4_CREDENTIALS_JSON env var（Render部署用），
+    其次用本機 GA4_CREDENTIALS_FILE。"""
+    from google.oauth2 import service_account
+    from google.analytics.data_v1beta import BetaAnalyticsDataClient
+    scopes = ["https://www.googleapis.com/auth/analytics.readonly"]
+    if GA4_CREDENTIALS_JSON:
+        info = json.loads(GA4_CREDENTIALS_JSON)
+        creds = service_account.Credentials.from_service_account_info(info, scopes=scopes)
+    elif GA4_CREDENTIALS_FILE and os.path.exists(GA4_CREDENTIALS_FILE):
+        creds = service_account.Credentials.from_service_account_file(GA4_CREDENTIALS_FILE, scopes=scopes)
+    else:
+        raise RuntimeError("未設定 GA4 憑證：請在 Render 設定 GA4_CREDENTIALS_JSON 環境變數")
+    return BetaAnalyticsDataClient(credentials=creds)
+
+def _ga4_fetch_page(page_title, days=28):
+    """依頁面標題從 GA4 取得指定期間的指標。
+    page_title 用 CONTAINS 比對（不區分大小寫）。
+    回傳 dict(page_views, active_users, engagement_rate, avg_duration, matched_title) 或 None。"""
+    from google.analytics.data_v1beta.types import (
+        DateRange, Dimension, Metric, RunReportRequest,
+        FilterExpression, Filter
+    )
+    if not GA4_PROPERTY_ID:
+        raise RuntimeError("未設定 GA4_PROPERTY_ID 環境變數")
+    client = _ga4_client()
+    req = RunReportRequest(
+        property=f"properties/{GA4_PROPERTY_ID}",
+        dimensions=[Dimension(name="pageTitle")],
+        metrics=[
+            Metric(name="screenPageViews"),
+            Metric(name="activeUsers"),
+            Metric(name="engagementRate"),
+            Metric(name="averageSessionDuration"),
+        ],
+        date_ranges=[DateRange(start_date=f"{days}daysAgo", end_date="today")],
+        dimension_filter=FilterExpression(
+            filter=Filter(
+                field_name="pageTitle",
+                string_filter=Filter.StringFilter(
+                    match_type=Filter.StringFilter.MatchType.CONTAINS,
+                    value=page_title,
+                    case_sensitive=False,
+                )
+            )
+        ),
+        limit=1,
+    )
+    response = client.run_report(req)
+    if not response.rows:
+        return None
+    row = response.rows[0]
+    return {
+        "page_views":      int(row.metric_values[0].value),
+        "active_users":    int(row.metric_values[1].value),
+        "engagement_rate": round(float(row.metric_values[2].value), 4),
+        "avg_duration":    round(float(row.metric_values[3].value), 1),
+        "matched_title":   row.dimension_values[0].value,
+    }
+
+def _resolve_allowed_products(brand, category):
+    """Allowed Products 三層 fallback。
+    回傳 (products_str, source_label)：
+      第一優先：seo_brand_rules.key_products（品牌 + 品類精確比對）
+      第二優先：brand_profiles.allowed_products（品牌預設）
+      第三優先：("", "無商品資料")
+    """
+    if category and brand.get("key"):
+        rule = _match_brand_rule(brand["key"], category)
+        kp = (rule.get("key_products") or "").strip()
+        if kp:
+            return kp, "品類規則 key_products"
+    ap = (brand.get("allowed_products") or "").strip()
+    if ap:
+        return ap, "品牌預設 allowed_products"
+    return "", "無商品資料"
+
 # ── 知識庫（讓AI生成文章時引用真實品牌資料，提升EEAT、避免虛構）──
 
 KNOWLEDGE_TYPES = [
@@ -368,15 +452,14 @@ def _knowledge_block(items):
         lines.append(f"{i}. [{label}] {it['title']}：{it['content']}")
     return "\n".join(lines)
 
-def _allowed_products_block(brand, knowledge_items):
-    """搜尋意圖分析「最後可能購買什麼產品」的真實資料錨點：優先用brand_profiles.allowed_products/
-    allowed_services（人工維護、最可靠），其次用seo_knowledge的商品/品牌特色資料；兩者都沒有就
-    明確告知AI沒有資料，不要自行推測——這是避免AI亂掰商品/跨品牌聯想的關鍵，不是只靠Prompt語氣硬性要求。"""
-    allowed_products = (brand.get("allowed_products") or "").strip()
+def _allowed_products_block(brand, knowledge_items, category=""):
+    """Allowed Products 錨點：依 brand+category 三層 fallback 取最精確的商品清單。
+    category 傳入後優先用 seo_brand_rules.key_products，其次品牌預設，最後知識庫/無資料。"""
+    products, _ = _resolve_allowed_products(brand, category)
     allowed_services = (brand.get("allowed_services") or "").strip()
     lines = []
-    if allowed_products:
-        lines.append(f"允許提到的商品（只能從這裡面挑）：{allowed_products}")
+    if products:
+        lines.append(f"允許提到的商品（只能從這裡面挑）：{products}")
     if allowed_services:
         lines.append(f"允許提到的服務（只能從這裡面挑）：{allowed_services}")
     if knowledge_items:
@@ -385,8 +468,10 @@ def _allowed_products_block(brand, knowledge_items):
         return "（目前品牌尚未建立商品資料，不列出商品。）"
     return "\n".join(lines)
 
-def _knowledge_sufficiency_note(brand, knowledge_items):
-    has_data = bool(knowledge_items or (brand.get("allowed_products") or "").strip() or (brand.get("allowed_services") or "").strip())
+def _knowledge_sufficiency_note(brand, knowledge_items, category=""):
+    products, _ = _resolve_allowed_products(brand, category)
+    allowed_services = (brand.get("allowed_services") or "").strip()
+    has_data = bool(knowledge_items or products or allowed_services)
     if has_data:
         return ""
     return ("目前品牌知識庫資料不足。你可以分析搜尋需求，但不能自行補品牌介紹、服務、案例或商品。"
@@ -395,9 +480,10 @@ def _knowledge_sufficiency_note(brand, knowledge_items):
 def _brand_guardrail_header(brand, category):
     """品牌一致性規則：用程式碼直接組字串、不放進「Prompt設定」頁可編輯的範本裡，
     這樣使用者編輯Prompt範本時不會不小心把這道防線改掉或刪掉，符合「最高優先權」的要求。
-    搜尋意圖分析、Prompt Preview、AI生成文章共用同一支，三個流程的防護內容保證一致。"""
+    搜尋意圖分析、Prompt Preview、AI生成文章共用同一支，三個流程的防護內容保證一致。
+    Allowed Products 依 brand+category 三層 fallback（key_products > 品牌預設 > 無）。"""
     brand_name = brand.get("name") or "(未指定)"
-    allowed_products = (brand.get("allowed_products") or "").strip()
+    allowed_products, _ = _resolve_allowed_products(brand, category)
     allowed_services = (brand.get("allowed_services") or "").strip()
     allowed_lines = []
     if allowed_products:
@@ -528,7 +614,7 @@ def _opportunity_prompt(brand, category, knowledge_items, brand_rule=None):
 {_brand_rule_block(brand_rule)}
 
 可用商品資料（{brand.get('name','')}實際販售的商品/服務，每個主題的related_products只能從這裡面挑）：
-{_allowed_products_block(brand, knowledge_items)}
+{_allowed_products_block(brand, knowledge_items, category)}
 
 請產生20個SEO文章主題，要求：
 1. 是真實使用者會搜尋的問題，不要空泛的標題
@@ -799,7 +885,7 @@ def _quality_check_prompt(article, brand, category, brand_rule, extra):
 {_brand_rule_block(brand_rule)}
 
 可用商品資料（{brand.get('name','')}實際販售的商品/服務，第15項品牌一致性檢查要用這份清單比對）：
-{_allowed_products_block(brand, [])}
+{_allowed_products_block(brand, [], category)}
 
 文章主關鍵字：{extra.get('main_keyword','')}
 文章目標客群：{extra.get('target_audience','')}
@@ -1092,8 +1178,8 @@ def _analyze_intent_prompt(brand, category, topic):
         BRAND_NAME=brand.get('name', ''), BRAND_CATEGORY=brand.get('category', ''),
         BRAND_STYLE=brand.get('style', ''), CATEGORY=category, TOPIC=topic,
         ARTICLE_TYPE_OPTIONS='、'.join(ARTICLE_TYPES),
-        ALLOWED_PRODUCTS_BLOCK=_allowed_products_block(brand, knowledge_items),
-        KNOWLEDGE_SUFFICIENCY_NOTE=_knowledge_sufficiency_note(brand, knowledge_items))
+        ALLOWED_PRODUCTS_BLOCK=_allowed_products_block(brand, knowledge_items, category),
+        KNOWLEDGE_SUFFICIENCY_NOTE=_knowledge_sufficiency_note(brand, knowledge_items, category))
     return _brand_guardrail_header(brand, category) + "\n\n" + body + "\n\n" + _brand_guardrail_footer(brand)
 
 def _extract_suggested_article_type(text):
@@ -1522,44 +1608,109 @@ TRACKING_HTML = """<!DOCTYPE html>
 *{box-sizing:border-box;margin:0;padding:0}
 body{font-family:-apple-system,sans-serif;background:#f5f5f5;color:#333}
 """ + SIDEBAR_CSS + """
-.container{max-width:900px;margin:24px auto;padding:0 16px}
+.container{max-width:1100px;margin:24px auto;padding:0 16px}
 .section{background:#fff;border-radius:14px;padding:20px;margin-bottom:16px;box-shadow:0 1px 4px rgba(0,0,0,.08)}
-table{width:100%;border-collapse:collapse;font-size:13px}
-th,td{text-align:left;padding:7px 6px;border-bottom:1px solid #f0f0f0}
-th{color:#888;font-weight:600;font-size:11px;text-transform:uppercase}
+.section h3{font-size:14px;font-weight:700;margin-bottom:14px;color:#333}
+.scroll-x{overflow-x:auto}
+table{width:100%;border-collapse:collapse;font-size:12px}
+th,td{text-align:left;padding:7px 6px;border-bottom:1px solid #f0f0f0;white-space:nowrap}
+th{color:#888;font-weight:600;font-size:10px;text-transform:uppercase}
 .add-row{display:flex;gap:6px;margin-top:10px;flex-wrap:wrap;align-items:center}
 .add-row input{border:1px solid #ddd;border-radius:6px;padding:6px 8px;font-size:12px}
 .btn{padding:7px 14px;background:#0d6efd;color:#fff;border:none;border-radius:6px;font-size:12px;font-weight:600;cursor:pointer}
+.btn-green{background:#2e7d32}
 .yes{color:#2e7d32;font-weight:700}.no{color:#bbb}
+.badge-ga4{font-size:10px;padding:1px 6px;background:#e8f5e9;color:#2e7d32;border-radius:8px;font-weight:700}
+.badge-manual{font-size:10px;padding:1px 6px;background:#e3f2fd;color:#1565c0;border-radius:8px;font-weight:700}
+.ga4-box{background:#f1f8e9;border:1px solid #c5e1a5;border-radius:10px;padding:14px 16px;margin-bottom:14px}
+.ga4-box label{font-size:12px;font-weight:700;color:#33691e;display:block;margin-bottom:6px}
+.ga4-row{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.ga4-row input{border:1px solid #aed581;border-radius:6px;padding:6px 10px;font-size:12px;background:#fff}
+.ga4-row select{border:1px solid #aed581;border-radius:6px;padding:6px 8px;font-size:12px;background:#fff}
+.msg-ok{color:#2e7d32;font-size:13px;font-weight:700;margin-bottom:10px}
+.msg-err{color:#c62828;font-size:13px;margin-bottom:10px}
+.ga4-stat{display:inline-block;text-align:center;background:#fff;border:1px solid #dcedc8;border-radius:8px;padding:8px 14px;margin:4px}
+.ga4-stat .num{font-size:20px;font-weight:800;color:#2e7d32}
+.ga4-stat .lbl{font-size:10px;color:#888;margin-top:2px}
 </style></head><body>
 {{ shell|safe }}
 <div class="container">
+  <h2 style="font-size:16px;font-weight:700;margin-bottom:14px">{{ article_title }}</h2>
+
+  {% if ga4_ok %}
+  <div class="msg-ok">✓ GA4 數據同步成功</div>
+  {% endif %}
+  {% if ga4_error %}
+  <div class="msg-err">⚠ {{ ga4_error }}</div>
+  {% endif %}
+
+  {% if ga4_available %}
   <div class="section">
+    <h3>從 GA4 自動同步</h3>
+    <form method="POST" action="/admin/seo/article/{{ article_id }}/tracking/ga4-sync?key={{ key }}">
+      <div class="ga4-box">
+        <label>GA4 頁面標題關鍵字（用來比對 GA4 裡的頁面，例如：Forme步梯高架床｜KY-01）</label>
+        <div class="ga4-row">
+          <input type="text" name="ga4_page_title" value="{{ ga4_page_title }}" placeholder="輸入頁面標題的一部分，系統用 CONTAINS 比對" style="flex:1;min-width:260px">
+          <label style="margin:0;font-size:12px;font-weight:600;color:#555">期間</label>
+          <select name="days">
+            <option value="7">過去 7 天</option>
+            <option value="28" selected>過去 28 天</option>
+            <option value="90">過去 90 天</option>
+          </select>
+          <button class="btn btn-green" type="submit">從 GA4 同步</button>
+        </div>
+        <div style="font-size:11px;color:#888;margin-top:6px">同步後會自動新增一筆今日記錄，標題關鍵字會儲存供下次使用。</div>
+      </div>
+    </form>
+  </div>
+  {% endif %}
+
+  <div class="section">
+    <h3>成效記錄</h3>
+    <div class="scroll-x">
     <table>
-      <tr><th>日期</th><th>排名</th><th>點擊</th><th>曝光</th><th>詢價</th><th>成交</th><th>營收</th><th>AI Overview</th><th>ChatGPT</th><th>備註</th></tr>
-      {% for r in records %}
       <tr>
-        <td>{{ r[2] }}</td><td>{{ r[3] }}</td><td>{{ r[4] }}</td><td>{{ r[5] }}</td>
+        <th>來源</th><th>日期</th>
+        <th>瀏覽數</th><th>使用者</th><th>互動率</th><th>停留時間</th>
+        <th>排名</th><th>點擊</th><th>曝光</th>
+        <th>詢價</th><th>成交</th><th>營收</th>
+        <th>AI Overview</th><th>ChatGPT</th><th>備註</th>
+      </tr>
+      {% for r in records %}
+      {% set src = r[12] or 'manual' %}
+      <tr>
+        <td><span class="{{ 'badge-ga4' if src == 'ga4' else 'badge-manual' }}">{{ 'GA4' if src == 'ga4' else '手動' }}</span></td>
+        <td>{{ r[2] }}</td>
+        <td>{{ r[13] if r[13] else '—' }}</td>
+        <td>{{ r[14] if r[14] else '—' }}</td>
+        <td>{% if r[15] %}{{ "%.0f%%"|format(r[15]*100) }}{% else %}—{% endif %}</td>
+        <td>{% if r[16] %}{% set m = (r[16]//60)|int %}{% set s = (r[16]%60)|int %}{{ m }}分{{ '%02d'|format(s) }}秒{% else %}—{% endif %}</td>
+        <td>{{ r[3] or '—' }}</td><td>{{ r[4] if r[4] else '—' }}</td><td>{{ r[5] if r[5] else '—' }}</td>
         <td>{{ r[9] }}</td><td>{{ r[10] }}</td><td>{{ r[11] }}</td>
         <td class="{{ 'yes' if r[6] else 'no' }}">{{ '✓' if r[6] else '—' }}</td>
         <td class="{{ 'yes' if r[7] else 'no' }}">{{ '✓' if r[7] else '—' }}</td>
-        <td>{{ r[8] }}</td>
+        <td style="max-width:200px;white-space:normal;font-size:11px;color:#888">{{ r[8] }}</td>
       </tr>
       {% endfor %}
     </table>
-    <form class="add-row" method="POST" action="/admin/seo/article/{{ article_id }}/tracking/add?key={{ key }}">
-      <input type="text" name="record_date" placeholder="YYYY-MM-DD" required style="width:110px">
-      <input type="text" name="ranking" placeholder="排名" style="width:60px">
-      <input type="text" name="clicks" placeholder="點擊" style="width:60px">
-      <input type="text" name="impressions" placeholder="曝光" style="width:60px">
-      <input type="text" name="line_inquiries" placeholder="LINE詢價數" style="width:80px">
-      <input type="text" name="orders" placeholder="成交數" style="width:60px">
-      <input type="text" name="revenue" placeholder="營收" style="width:80px">
-      <label style="margin:0;font-size:12px"><input type="checkbox" name="ai_overview_cited" style="width:auto"> AI Overview</label>
-      <label style="margin:0;font-size:12px"><input type="checkbox" name="chatgpt_cited" style="width:auto"> ChatGPT</label>
-      <input type="text" name="notes" placeholder="備註" style="flex:1;min-width:120px">
-      <button class="btn" type="submit">新增記錄</button>
-    </form>
+    </div>
+    <details style="margin-top:16px">
+      <summary style="font-size:12px;color:#888;cursor:pointer">手動新增記錄（Search Console / 人工填寫）</summary>
+      <form class="add-row" method="POST" action="/admin/seo/article/{{ article_id }}/tracking/add?key={{ key }}" style="margin-top:10px">
+        <input type="text" name="record_date" placeholder="YYYY-MM-DD" required style="width:110px">
+        <input type="text" name="ranking" placeholder="排名" style="width:60px">
+        <input type="text" name="clicks" placeholder="點擊" style="width:60px">
+        <input type="text" name="impressions" placeholder="曝光" style="width:60px">
+        <input type="text" name="line_inquiries" placeholder="LINE詢價" style="width:70px">
+        <input type="text" name="orders" placeholder="成交數" style="width:60px">
+        <input type="text" name="revenue" placeholder="營收" style="width:70px">
+        <label style="margin:0;font-size:12px"><input type="checkbox" name="ai_overview_cited" style="width:auto"> AI Overview</label>
+        <label style="margin:0;font-size:12px"><input type="checkbox" name="chatgpt_cited" style="width:auto"> ChatGPT</label>
+        <input type="text" name="notes" placeholder="備註" style="flex:1;min-width:100px">
+        <button class="btn" type="submit">新增</button>
+      </form>
+    </details>
   </div>
 </div>
 """ + SHELL_CLOSE + """
@@ -2387,6 +2538,8 @@ pre{white-space:pre-wrap;font-family:inherit;font-size:13px;line-height:1.7;back
   <div class="section step" id="step-preview">
     <label>套用的品牌SEO規則</label>
     <div id="preview-brand-rule" style="font-size:13px;margin-bottom:14px"></div>
+    <label>Allowed Products 來源</label>
+    <div id="preview-allowed-products-source" style="font-size:13px;margin-bottom:14px"></div>
     <label>知識庫引用</label>
     <div id="preview-knowledge" style="font-size:13px;line-height:1.7;margin-bottom:14px"></div>
     <label>文章類型判定</label>
@@ -2561,6 +2714,10 @@ async function doPreview(){
     if (data.error) { document.getElementById('err-preview').textContent = data.error; }
     else {
       document.getElementById('preview-brand-rule').textContent = data.brand_rule_label;
+      const apSource = data.allowed_products_source || '無商品資料';
+      const apColor = apSource === '品類規則 key_products' ? '#2e7d32' : apSource === '品牌預設 allowed_products' ? '#e65100' : '#999';
+      document.getElementById('preview-allowed-products-source').innerHTML =
+        '<span style="color:' + apColor + ';font-weight:700">▸ ' + apSource + '</span>';
       document.getElementById('preview-knowledge').innerHTML = data.knowledge_items.length
         ? data.knowledge_items.map(k => '・[' + k.type + '] ' + k.title).join('<br>')
         : '（沒有符合此品牌/品類的知識庫資料可引用）';
@@ -2768,14 +2925,22 @@ def seo_tracking_view(aid):
     ok, key = check_auth()
     if not ok:
         return render_template_string(LOGIN_HTML, error=None)
-    art = _q("SELECT title FROM seo_articles WHERE id=%s", (aid,), fetch="one")
+    art = _q("SELECT title,extra FROM seo_articles WHERE id=%s", (aid,), fetch="one")
     if not art:
         abort(404)
+    article_title, extra_raw = art[0], art[1]
+    ga4_page_title = _parse_extra(extra_raw).get("ga4_page_title", "")
     records = _q("""SELECT id,article_id,record_date,ranking,clicks,impressions,
-                     ai_overview_cited,chatgpt_cited,notes,line_inquiries,orders,revenue
+                     ai_overview_cited,chatgpt_cited,notes,line_inquiries,orders,revenue,
+                     source,page_views,active_users,engagement_rate,avg_duration
                      FROM seo_tracking WHERE article_id=%s ORDER BY record_date DESC""", (aid,), fetch="all") or []
-    shell = _shell_open(key, "seo", [("文章管理", "/admin/seo"), (f"成效記錄 — {art[0]}", None)])
-    return render_template_string(TRACKING_HTML, key=key, shell=shell, article_id=aid, article_title=art[0], records=records)
+    shell = _shell_open(key, "seo", [("文章管理", "/admin/seo"), (f"成效記錄 — {article_title}", None)])
+    ga4_ok = request.args.get("ga4_ok", "")
+    ga4_error = request.args.get("ga4_error", "")
+    return render_template_string(TRACKING_HTML, key=key, shell=shell, article_id=aid,
+        article_title=article_title, records=records,
+        ga4_page_title=ga4_page_title, ga4_ok=ga4_ok, ga4_error=ga4_error,
+        ga4_available=bool(GA4_CREDENTIALS_JSON or (GA4_CREDENTIALS_FILE and os.path.exists(GA4_CREDENTIALS_FILE))))
 
 @seo_bp.route("/admin/seo/article/<int:aid>/tracking/add", methods=["POST"])
 def seo_tracking_add(aid):
@@ -2794,6 +2959,40 @@ def seo_tracking_add(aid):
         int(f.get("line_inquiries") or 0), int(f.get("orders") or 0), float(f.get("revenue") or 0),
         "manual", time.time()))
     return redirect(f"/admin/seo/article/{aid}/tracking?key={key}")
+
+@seo_bp.route("/admin/seo/article/<int:aid>/tracking/ga4-sync", methods=["POST"])
+def seo_tracking_ga4_sync(aid):
+    ok, key = check_auth()
+    if not ok:
+        abort(403)
+    ga4_page_title = request.form.get("ga4_page_title", "").strip()
+    days = int(request.form.get("days", 28) or 28)
+    # 儲存 ga4_page_title 到文章 extra（方便下次不用重填）
+    if ga4_page_title:
+        _update_article_extra(aid, {"ga4_page_title": ga4_page_title})
+    else:
+        row = _q("SELECT extra FROM seo_articles WHERE id=%s", (aid,), fetch="one")
+        ga4_page_title = _parse_extra(row[0] if row else "").get("ga4_page_title", "")
+    if not ga4_page_title:
+        return redirect(f"/admin/seo/article/{aid}/tracking?key={key}&ga4_error=請先輸入GA4頁面標題關鍵字")
+    try:
+        data = _ga4_fetch_page(ga4_page_title, days=days)
+        if not data:
+            return redirect(f"/admin/seo/article/{aid}/tracking?key={key}&ga4_error=GA4找不到符合的頁面，請確認標題關鍵字是否正確")
+        today = time.strftime("%Y-%m-%d")
+        _q("""INSERT INTO seo_tracking
+              (article_id,record_date,ranking,clicks,impressions,
+               page_views,active_users,engagement_rate,avg_duration,
+               ai_overview_cited,chatgpt_cited,notes,line_inquiries,orders,revenue,source,created_at)
+              VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+           (aid, today, "", 0, 0,
+            data["page_views"], data["active_users"], data["engagement_rate"], data["avg_duration"],
+            False, False, f"GA4自動同步（過去{days}天，比對：{data['matched_title'][:40]}）",
+            0, 0, 0, "ga4", time.time()))
+        return redirect(f"/admin/seo/article/{aid}/tracking?key={key}&ga4_ok=1")
+    except Exception as e:
+        import sys; print(f"[GA4 Sync] {e}", file=sys.stderr)
+        return redirect(f"/admin/seo/article/{aid}/tracking?key={key}&ga4_error={str(e)[:120]}")
 
 # ── SEO Opportunity 主題機會池 ──────────────────────────────────
 
@@ -3268,11 +3467,13 @@ def seo_generator_preview():
     knowledge_items = _get_knowledge_for_prompt(brand_key, category, limit=10)
     brand_rule_mode, brand_rule = _resolve_brand_rule(brand_key, category, fields)
     prompt = _generate_article_prompt(brand, category, topic, analysis, knowledge_items, fields, brand_rule)
+    _, ap_source = _resolve_allowed_products(brand, category)
     return jsonify({
         "brand_rule_mode": brand_rule_mode,
         "brand_rule_label": _brand_rule_label(brand_rule),
         "knowledge_items": [{"type": KNOWLEDGE_TYPE_LABELS.get(it["type"], it["type"]), "title": it["title"]} for it in knowledge_items],
         "article_type_label": _article_type_label(fields.get("article_type", "")),
+        "allowed_products_source": ap_source,
         "prompt": prompt,
     })
 

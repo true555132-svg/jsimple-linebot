@@ -4,6 +4,7 @@ anthropic
 gunicorn
 gspread
 google-auth
+google-analytics-data
 psycopg2-binary
 Pillow
 openpyxl
