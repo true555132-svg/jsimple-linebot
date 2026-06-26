@@ -1204,10 +1204,39 @@ def _extract_suggested_article_type(text):
     cleaned = (text[:m.start()] + text[m.end():]).strip()
     return cleaned, suggested
 
+def _resolve_generate_fields(fields, brand_rule):
+    """把 fields（用戶表單輸入）和 brand_rule（seo_brand_rules）合併，
+    回傳 (resolved_dict, source_dict)。
+    規則：用戶有填 → 用用戶值；沒填 → 從 brand_rule 補；兩邊都沒有 → 空字串。
+    source_dict 供 Preview 偵錯區塊顯示資料來源。"""
+    rule = brand_rule or {}
+    resolved, sources = {}, {}
+    for field_key, rule_key, label in [
+        ("related_products", "key_products",      "RELATED_PRODUCTS"),
+        ("target_audience",  "target_audience",   "TARGET_AUDIENCE"),
+        ("avoid_directions", "avoid_directions",  "AVOID_DIRECTIONS"),
+        ("cta_direction",    "cta_direction",     "CTA_DIRECTION"),
+    ]:
+        user_val  = (fields.get(field_key) or "").strip()
+        rule_val  = (rule.get(rule_key) or "").strip()
+        if user_val:
+            resolved[field_key] = user_val
+            sources[label] = {"value": user_val, "src": "手動輸入"}
+        elif rule_val:
+            resolved[field_key] = rule_val
+            sources[label] = {"value": rule_val, "src": "seo_brand_rules"}
+        else:
+            resolved[field_key] = ""
+            sources[label] = {"value": "", "src": "空（無資料）"}
+    return resolved, sources
+
 def _generate_article_prompt(brand, category, topic, intent_analysis, knowledge_items=None, fields=None, brand_rule=None):
     """fields: 結構化表單欄位 dict（main_keyword/search_intent/target_audience/related_products/
-    avoid_directions/cta_direction/article_type），缺省時用空字串，不影響舊呼叫方式。"""
+    avoid_directions/cta_direction/article_type），缺省時用空字串，不影響舊呼叫方式。
+    RELATED_PRODUCTS / TARGET_AUDIENCE / AVOID_DIRECTIONS / CTA_DIRECTION：
+      用戶有填 → 優先；沒填 → 自動從 seo_brand_rules 補，確保 AI 不會因欄位空白而亂猜。"""
     fields = fields or {}
+    resolved, _ = _resolve_generate_fields(fields, brand_rule)
     tmpl = _get_prompt_template("generate", DEFAULT_GENERATE_PROMPT)
     body = _fill_tokens(tmpl,
         BRAND_NAME=brand.get('name', ''), BRAND_CATEGORY=brand.get('category', ''),
@@ -1216,10 +1245,10 @@ def _generate_article_prompt(brand, category, topic, intent_analysis, knowledge_
         KNOWLEDGE=_knowledge_block(knowledge_items or []),
         MAIN_KEYWORD=fields.get('main_keyword', ''),
         SEARCH_INTENT=fields.get('search_intent', ''),
-        TARGET_AUDIENCE=fields.get('target_audience', ''),
-        RELATED_PRODUCTS=fields.get('related_products', ''),
-        AVOID_DIRECTIONS=fields.get('avoid_directions', ''),
-        CTA_DIRECTION=fields.get('cta_direction', ''),
+        TARGET_AUDIENCE=resolved['target_audience'],
+        RELATED_PRODUCTS=resolved['related_products'],
+        AVOID_DIRECTIONS=resolved['avoid_directions'],
+        CTA_DIRECTION=resolved['cta_direction'],
         ARTICLE_TYPE=fields.get('article_type', ''),
         ARTICLE_TYPE_GUIDE=_article_type_guide(fields.get('article_type', '')),
         BRAND_RULE=_brand_rule_block(brand_rule))
@@ -2606,8 +2635,10 @@ pre{white-space:pre-wrap;font-family:inherit;font-size:13px;line-height:1.7;back
   <div class="section step" id="step-preview">
     <label>套用的品牌SEO規則</label>
     <div id="preview-brand-rule" style="font-size:13px;margin-bottom:14px"></div>
-    <label>Allowed Products 來源</label>
-    <div id="preview-allowed-products-source" style="font-size:13px;margin-bottom:14px"></div>
+
+    <label>資料來源偵錯</label>
+    <div id="preview-debug" style="background:#f8f9fa;border:1px solid #e0e0e0;border-radius:8px;padding:12px 14px;font-size:12px;line-height:1.9;margin-bottom:14px;font-family:monospace"></div>
+
     <label>知識庫引用</label>
     <div id="preview-knowledge" style="font-size:13px;line-height:1.7;margin-bottom:14px"></div>
     <label>文章類型判定</label>
@@ -2782,10 +2813,24 @@ async function doPreview(){
     if (data.error) { document.getElementById('err-preview').textContent = data.error; }
     else {
       document.getElementById('preview-brand-rule').textContent = data.brand_rule_label;
-      const apSource = data.allowed_products_source || '無商品資料';
-      const apColor = apSource === '品類規則 key_products' ? '#2e7d32' : apSource === '品牌預設 allowed_products' ? '#e65100' : '#999';
-      document.getElementById('preview-allowed-products-source').innerHTML =
-        '<span style="color:' + apColor + ';font-weight:700">▸ ' + apSource + '</span>';
+      // 偵錯面板
+      if (data.debug) {
+        const d = data.debug;
+        const ruleColor = d.rule_hit ? '#2e7d32' : '#c62828';
+        const ruleIcon  = d.rule_hit ? '✓' : '✗';
+        const srcColor = s => s === '手動輸入' ? '#1565c0' : s === 'seo_brand_rules' ? '#2e7d32' : '#999';
+        const flds = d.fields || {};
+        const rows = ['RELATED_PRODUCTS','TARGET_AUDIENCE','AVOID_DIRECTIONS','CTA_DIRECTION'].map(k => {
+          const f = flds[k] || {};
+          const val = (f.value || '').substring(0, 60) + ((f.value||'').length > 60 ? '…' : '');
+          return `<span style="color:#888">${k}</span>　<span style="color:${srcColor(f.src)};font-weight:700">[${f.src||'?'}]</span>　${val || '<em style="color:#bbb">空</em>'}`;
+        }).join('<br>');
+        document.getElementById('preview-debug').innerHTML =
+          `<b>品牌</b>：${d.brand}　<b>品類</b>：${d.category}<br>` +
+          `<b>seo_brand_rules 命中</b>：<span style="color:${ruleColor};font-weight:700">${ruleIcon} ${d.rule_label}</span><br>` +
+          `<b>key_products</b>：${d.key_products}<br><hr style="border:none;border-top:1px solid #e0e0e0;margin:6px 0">` +
+          rows;
+      }
       document.getElementById('preview-knowledge').innerHTML = data.knowledge_items.length
         ? data.knowledge_items.map(k => '・[' + k.type + '] ' + k.title).join('<br>')
         : '（沒有符合此品牌/品類的知識庫資料可引用）';
@@ -3557,6 +3602,7 @@ def _run_generate_job(job_id, brand_key, category, topic, analysis, opp_id=None,
         brand = _get_brand(brand_key)
         knowledge_items = _get_knowledge_for_prompt(brand_key, category, limit=10)
         brand_rule_mode, brand_rule = _resolve_brand_rule(brand_key, category, fields)
+        resolved_fields, _ = _resolve_generate_fields(fields, brand_rule)
         prompt = _generate_article_prompt(brand, category, topic, analysis, knowledge_items, fields, brand_rule)
         result, err = _ai_call_json(prompt, model="claude-sonnet-4-6", max_tokens=8000)
         if err:
@@ -3567,8 +3613,8 @@ def _run_generate_job(job_id, brand_key, category, topic, analysis, opp_id=None,
         extra = _dump_extra({
             "main_keyword": fields.get("main_keyword", ""),
             "search_intent": fields.get("search_intent", "") or analysis[:200],
-            "target_audience": fields.get("target_audience", ""),
-            "related_products": fields.get("related_products", ""),
+            "target_audience": resolved_fields["target_audience"],
+            "related_products": resolved_fields["related_products"],
             "article_type": fields.get("article_type", ""),
             "internal_links": result.get("internal_links", ""),
             "long_tail_keywords": result.get("long_tail_keywords", ""),
@@ -3628,14 +3674,25 @@ def seo_generator_preview():
     brand = _get_brand(brand_key)
     knowledge_items = _get_knowledge_for_prompt(brand_key, category, limit=10)
     brand_rule_mode, brand_rule = _resolve_brand_rule(brand_key, category, fields)
+    resolved_fields, field_sources = _resolve_generate_fields(fields, brand_rule)
     prompt = _generate_article_prompt(brand, category, topic, analysis, knowledge_items, fields, brand_rule)
     _, ap_source = _resolve_allowed_products(brand, category)
+    rule = brand_rule or {}
+    debug = {
+        "brand": brand_key,
+        "category": category,
+        "rule_hit": bool(rule),
+        "rule_label": f"{rule.get('brand','')} + {rule.get('category','')} + {rule.get('article_type','') or '全部類型'}" if rule else "（未命中任何規則）",
+        "key_products": (rule.get("key_products") or "").strip() or "（空）",
+        "fields": field_sources,
+    }
     return jsonify({
         "brand_rule_mode": brand_rule_mode,
         "brand_rule_label": _brand_rule_label(brand_rule),
         "knowledge_items": [{"type": KNOWLEDGE_TYPE_LABELS.get(it["type"], it["type"]), "title": it["title"]} for it in knowledge_items],
         "article_type_label": _article_type_label(fields.get("article_type", "")),
         "allowed_products_source": ap_source,
+        "debug": debug,
         "prompt": prompt,
     })
 
