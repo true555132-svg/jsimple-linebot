@@ -267,6 +267,17 @@ def init_seo_db():
                     updated_at    FLOAT DEFAULT 0
                 )
             """)
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS seo_link_jobs (
+                    id           SERIAL PRIMARY KEY,
+                    status       TEXT DEFAULT 'pending',
+                    article_id   INTEGER DEFAULT NULL,
+                    result       TEXT DEFAULT '',
+                    error_msg    TEXT DEFAULT '',
+                    created_at   FLOAT DEFAULT 0,
+                    updated_at   FLOAT DEFAULT 0
+                )
+            """)
             conn.commit()
             cur.close()
             conn.close()
@@ -1160,6 +1171,95 @@ def _run_quality_check_job(job_id, article_id):
         except Exception:
             pass
 
+def _run_suggest_links_job(job_id, aid):
+    """背景：規則比對 + Haiku 排名，為文章推薦內部連結。結果存回 seo_articles.extra。"""
+    import sys
+    try:
+        _q("UPDATE seo_link_jobs SET status='running', updated_at=%s WHERE id=%s", (time.time(), job_id))
+        art = _q("SELECT title, slug, brand_key, category, extra FROM seo_articles WHERE id=%s", (aid,), fetch="one")
+        if not art:
+            raise RuntimeError("找不到文章")
+        title, slug, brand_key, category, extra_raw = art
+        extra = _parse_extra(extra_raw)
+        main_kw  = extra.get("main_keyword", "")
+        longtail = extra.get("longtail_keywords", "")
+
+        rows = _q("""SELECT id, title, slug, extra FROM seo_articles
+                     WHERE id != %s AND brand_key = %s
+                     AND status IN ('published','ready_to_publish','draft_review')
+                     ORDER BY id DESC LIMIT 60""",
+                  (aid, brand_key or ""), fetch="all") or []
+
+        if not rows:
+            result = {"suggestions": [], "note": "沒有同品牌已發布文章可參考"}
+        else:
+            all_kw = set((main_kw + " " + longtail).lower().replace("，",",").replace(",", " ").split())
+            candidates = []
+            for rid, rtitle, rslug, rextra_raw in rows:
+                rex = _parse_extra(rextra_raw)
+                rkw      = rex.get("main_keyword", "")
+                rlongtail = rex.get("longtail_keywords", "")
+                all_rkw  = set((rkw + " " + rlongtail).lower().replace("，",",").replace(",", " ").split())
+                score = 0
+                if rkw and rkw.lower() in title.lower():   score += 5
+                if main_kw and main_kw.lower() in rtitle.lower(): score += 5
+                if all_kw and all_rkw:
+                    score += len(all_kw & all_rkw) * 2
+                if category and rex.get("category") == category: score += 1
+                if score > 0:
+                    candidates.append({"id": rid, "title": rtitle, "slug": rslug or "",
+                                       "main_keyword": rkw, "score": score})
+            candidates.sort(key=lambda x: x["score"], reverse=True)
+            top = candidates[:12]
+
+            if ANTHROPIC_API_KEY and top:
+                cand_lines = "\n".join(
+                    f"[{c['id']}] {c['title']}（主關鍵字：{c['main_keyword'] or '未填'}｜slug：{c['slug']}）"
+                    for c in top
+                )
+                prompt = (
+                    f"你是 SEO 內部連結專家。請為以下文章推薦最適合的內部連結（3～5篇）。\n\n"
+                    f"目前文章：\n標題：{title}\n主關鍵字：{main_kw}\n長尾關鍵字：{longtail}\n品類：{category}\n\n"
+                    f"候選文章：\n{cand_lines}\n\n"
+                    f"請選 3～5 篇，為每篇建議自然錨文字（4～12字，符合台灣中文語境）。\n"
+                    f"只回傳 JSON：\n"
+                    f'{{"suggestions":[{{"id":整數,"title":"標題","slug":"/blog/xxx","anchor_text":"錨文字","reason":"一句話原因"}}]}}'
+                )
+                result, err = _ai_call_json(prompt, model="claude-haiku-4-5-20251001", max_tokens=1000)
+                if err or not result:
+                    result = {"suggestions": [
+                        {"id": c["id"], "title": c["title"], "slug": c["slug"],
+                         "anchor_text": c["title"][:20], "reason": "關鍵字相似"}
+                        for c in top[:5]
+                    ]}
+                else:
+                    slug_map = {c["id"]: c["slug"] for c in top}
+                    for s in result.get("suggestions", []):
+                        if not s.get("slug") and isinstance(s.get("id"), int):
+                            s["slug"] = slug_map.get(s["id"], "")
+            else:
+                result = {"suggestions": [
+                    {"id": c["id"], "title": c["title"], "slug": c["slug"],
+                     "anchor_text": c["title"][:20], "reason": "關鍵字相似"}
+                    for c in top[:5]
+                ]}
+
+        existing = _q("SELECT extra FROM seo_articles WHERE id=%s", (aid,), fetch="one")
+        art_extra = _parse_extra(existing[0] if existing else None)
+        art_extra["link_suggestions"] = result.get("suggestions", [])
+        art_extra["link_suggestions_updated"] = time.strftime("%Y-%m-%d %H:%M")
+        _q("UPDATE seo_articles SET extra=%s, updated_at=%s WHERE id=%s",
+           (_dump_extra(art_extra), time.time(), aid))
+        _q("UPDATE seo_link_jobs SET status='done', result=%s, updated_at=%s WHERE id=%s",
+           (json.dumps(result, ensure_ascii=False), time.time(), job_id))
+    except Exception as e:
+        print(f"[Link Suggest Job] {e}", file=sys.stderr)
+        try:
+            _q("UPDATE seo_link_jobs SET status='error', error_msg=%s, updated_at=%s WHERE id=%s",
+               (_safe_job_error_msg(e), time.time(), job_id))
+        except Exception:
+            pass
+
 # ── Claude AI 呼叫 ──────────────────────────────────────────────
 
 def _ai_call(prompt, model="claude-haiku-4-5-20251001", max_tokens=2000):
@@ -1519,6 +1619,7 @@ SIDEBAR_ITEMS = [
     ("seo-generator",   "✨ AI 生成文章",    "/admin/seo-generator"),
     ("seo-knowledge",   "📚 知識庫管理",     "/admin/seo-knowledge"),
     ("seo-brand-rules", "🏷️ 品牌SEO規則",   "/admin/seo-brand-rules"),
+    ("seo-keyword-map", "🗺️ 關鍵字地圖",    "/admin/seo/keyword-map"),
     ("seo-settings",    "⚙️ Prompt 設定",   "/admin/seo-settings"),
 ]
 
@@ -1754,6 +1855,128 @@ form.inline{display:inline}
 """ + SHELL_CLOSE + """
 </body></html>"""
 
+KEYWORD_MAP_HTML = """<!DOCTYPE html>
+<html lang="zh-TW"><head><meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>關鍵字地圖</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:-apple-system,sans-serif;background:#f5f5f5;color:#333}
+""" + SIDEBAR_CSS + """
+.container{max-width:1200px;margin:24px auto;padding:0 16px 40px}
+.section{background:#fff;border-radius:14px;padding:20px;margin-bottom:20px;box-shadow:0 1px 4px rgba(0,0,0,.08)}
+.section h3{font-size:15px;font-weight:700;margin-bottom:14px}
+table{width:100%;border-collapse:collapse;font-size:13px}
+th,td{text-align:left;padding:8px 8px;border-bottom:1px solid #f0f0f0}
+th{color:#888;font-weight:600;font-size:11px;text-transform:uppercase}
+.badge{font-size:11px;padding:2px 8px;border-radius:10px;font-weight:700}
+.role-pillar{background:#e8eaf6;color:#283593;font-weight:700;border-left:3px solid #3949ab}
+.role-cluster{background:#e8f5e9;color:#2e7d32;padding-left:18px}
+.role-support{background:#fff8e1;color:#f57f17;padding-left:26px}
+.role-landing{background:#fce4ec;color:#880e4f}
+.role-none{color:#bbb}
+.conflict-card{background:#fdecea;border:1.5px solid #ef9a9a;border-radius:10px;padding:12px 16px;margin-bottom:10px;font-size:13px}
+.conflict-card b{color:#c62828}
+.stat-card{background:#f8f9ff;border:1px solid #e0e4f5;border-radius:10px;padding:14px 18px;text-align:center;flex:1;min-width:100px}
+.stat-num{font-size:28px;font-weight:800;color:#283593}
+.stat-label{font-size:12px;color:#888;margin-top:2px}
+.stats-row{display:flex;gap:12px;flex-wrap:wrap;margin-bottom:16px}
+.intent-info{background:#e3f2fd;color:#1565c0}
+.intent-comm{background:#fff8e1;color:#f57f17}
+.intent-trans{background:#e8f5e9;color:#2e7d32}
+.intent-nav{background:#fce4ec;color:#880e4f}
+.score-badge{display:inline-block;min-width:28px;text-align:center;padding:1px 7px;border-radius:8px;font-weight:700;font-size:12px}
+.score-good{background:#e8f5e9;color:#2e7d32}
+.score-warn{background:#fff8e1;color:#f57f17}
+.score-bad{background:#fdecea;color:#c62828}
+.link{color:#0d6efd;text-decoration:none;font-weight:600}
+.scroll-x{overflow-x:auto}
+</style></head><body>
+{{ shell|safe }}
+<div class="container">
+
+{% set total = articles|length %}
+{% set pillar_count = articles|selectattr('seo_role','eq','pillar')|list|length %}
+{% set cluster_count = articles|selectattr('seo_role','eq','cluster')|list|length %}
+{% set no_role_count = articles|selectattr('seo_role','eq','')|list|length %}
+
+<div class="section">
+  <h3>關鍵字地圖概覽</h3>
+  <div class="stats-row">
+    <div class="stat-card"><div class="stat-num">{{ total }}</div><div class="stat-label">文章總數</div></div>
+    <div class="stat-card"><div class="stat-num" style="color:#283593">{{ pillar_count }}</div><div class="stat-label">Pillar 主題頁</div></div>
+    <div class="stat-card"><div class="stat-num" style="color:#2e7d32">{{ cluster_count }}</div><div class="stat-label">Cluster 支援文</div></div>
+    <div class="stat-card"><div class="stat-num" style="color:#f57f17">{{ conflicts|length }}</div><div class="stat-label">關鍵字衝突</div></div>
+    <div class="stat-card"><div class="stat-num" style="color:#bbb">{{ no_role_count }}</div><div class="stat-label">未設定角色</div></div>
+  </div>
+
+  {% if conflicts %}
+  <h3 style="color:#c62828;margin-bottom:10px">⚠️ 關鍵字衝突（{{ conflicts|length }} 個）</h3>
+  {% for c in conflicts %}
+  <div class="conflict-card">
+    <b>「{{ c.keyword }}」</b> 出現在 {{ c.count }} 篇文章，品牌：{{ c.brand }}
+    — Google 可能搞不清楚哪篇是主要排名頁面
+    <br><span style="font-size:11px;color:#888">文章 ID：{{ c.article_ids|join(', ') }}</span>
+  </div>
+  {% endfor %}
+  {% else %}
+  <div style="color:#2e7d32;font-size:13px;font-weight:600">✅ 目前沒有關鍵字衝突</div>
+  {% endif %}
+</div>
+
+{% set brands = articles|map(attribute='brand_key')|unique|list %}
+{% for brand in brands %}
+{% set brand_arts = articles|selectattr('brand_key','eq',brand)|list %}
+{% set cats = brand_arts|map(attribute='category')|unique|list %}
+<div class="section">
+  <h3>{{ brand or '（未分配品牌）' }} — {{ brand_arts|length }} 篇</h3>
+  {% for cat in cats %}
+  {% set cat_arts = brand_arts|selectattr('category','eq',cat)|list %}
+  <div style="margin-bottom:16px">
+    <div style="font-size:12px;color:#888;font-weight:700;margin-bottom:8px;border-left:3px solid #ddd;padding-left:8px">
+      {{ cat or '（未分類）' }}（{{ cat_arts|length }} 篇）
+    </div>
+    <div class="scroll-x">
+    <table>
+      <tr><th>角色</th><th>標題</th><th>主關鍵字</th><th>長尾關鍵字</th><th>搜尋意圖</th><th>AI分</th><th>狀態</th><th>操作</th></tr>
+      {% for a in cat_arts|sort(attribute='seo_role') %}
+      <tr>
+        <td>
+          {% if a.seo_role == 'pillar' %}<span class="badge role-pillar">Pillar 主題</span>
+          {% elif a.seo_role == 'cluster' %}<span class="badge role-cluster">↳ Cluster</span>
+          {% elif a.seo_role == 'support' %}<span class="badge role-support">↳↳ Support</span>
+          {% elif a.seo_role == 'landing' %}<span class="badge role-landing">Landing</span>
+          {% else %}<span class="role-none">未設定</span>{% endif %}
+        </td>
+        <td style="max-width:220px">
+          <a class="link" href="/admin/seo/article/{{ a.id }}?key={{ key }}">{{ a.title }}</a>
+          {% if a.slug %}<br><span style="font-size:10px;color:#aaa">{{ a.slug }}</span>{% endif %}
+        </td>
+        <td style="color:#0d6efd;font-weight:600">{{ a.main_keyword or '—' }}</td>
+        <td style="font-size:11px;color:#666;max-width:180px">{{ a.longtail_keywords or '—' }}</td>
+        <td>
+          {% if a.search_intent == 'informational' %}<span class="badge intent-info">知識型</span>
+          {% elif a.search_intent == 'commercial' %}<span class="badge intent-comm">比較型</span>
+          {% elif a.search_intent == 'transactional' %}<span class="badge intent-trans">購買型</span>
+          {% elif a.search_intent == 'navigational' %}<span class="badge intent-nav">導航型</span>
+          {% else %}<span style="color:#bbb;font-size:11px">—</span>{% endif %}
+        </td>
+        <td>{% if a.ai_score %}<span class="score-badge {{ 'score-good' if a.ai_score>=80 else ('score-warn' if a.ai_score>=60 else 'score-bad') }}">{{ a.ai_score }}</span>{% else %}—{% endif %}</td>
+        <td><span class="badge b-{{ a.status }}">{{ article_status_labels.get(a.status, a.status) }}</span></td>
+        <td><a class="link" href="/admin/seo/article/{{ a.id }}?key={{ key }}" style="font-size:11px">編輯</a></td>
+      </tr>
+      {% endfor %}
+    </table>
+    </div>
+  </div>
+  {% endfor %}
+</div>
+{% endfor %}
+
+</div>
+""" + SHELL_CLOSE + """
+</body></html>"""
+
 ARTICLE_HTML = """<!DOCTYPE html>
 <html lang="zh-TW"><head><meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
@@ -1812,6 +2035,36 @@ textarea{resize:vertical;line-height:1.7}
     </select>
   </div>
   <div class="section">
+    <label style="font-size:13px;color:#555;font-weight:800">🗺️ 關鍵字地圖設定</label>
+    <label>SEO 文章角色</label>
+    <select name="seo_role">
+      <option value="">（未設定）</option>
+      <option value="pillar" {{ 'selected' if extra.seo_role=='pillar' else '' }}>Pillar Page｜主題頁（大主題，統籌多篇 Cluster）</option>
+      <option value="cluster" {{ 'selected' if extra.seo_role=='cluster' else '' }}>Cluster Page｜支援文（針對一個長尾關鍵字）</option>
+      <option value="support" {{ 'selected' if extra.seo_role=='support' else '' }}>Support Page｜輔助文（比較、FAQ、指南類）</option>
+      <option value="landing" {{ 'selected' if extra.seo_role=='landing' else '' }}>Landing Page｜轉換頁（主打購買意圖）</option>
+    </select>
+    <label>長尾關鍵字（逗號分隔）</label>
+    <input type="text" name="longtail_keywords" value="{{ extra.longtail_keywords or '' }}" placeholder="例：小型辦公室配置,辦公桌椅推薦,台灣辦公家具品牌">
+    <label>搜尋意圖</label>
+    <select name="search_intent">
+      <option value="">（未設定）</option>
+      <option value="informational" {{ 'selected' if extra.search_intent=='informational' else '' }}>Informational｜知識型（How/What/Why）</option>
+      <option value="commercial" {{ 'selected' if extra.search_intent=='commercial' else '' }}>Commercial｜比較型（Best/推薦/比較）</option>
+      <option value="transactional" {{ 'selected' if extra.search_intent=='transactional' else '' }}>Transactional｜購買型（買/訂購/多少錢）</option>
+      <option value="navigational" {{ 'selected' if extra.search_intent=='navigational' else '' }}>Navigational｜導航型（找特定品牌/頁面）</option>
+    </select>
+    {% if pillar_articles %}
+    <label>上層 Pillar 文章（此篇為 Cluster/Support 時設定）</label>
+    <select name="pillar_article_id">
+      <option value="">（無 / 本身為 Pillar）</option>
+      {% for pa in pillar_articles %}
+      <option value="{{ pa.id }}" {{ 'selected' if extra.pillar_article_id|string == pa.id|string else '' }}>{{ pa.title }}</option>
+      {% endfor %}
+    </select>
+    {% endif %}
+  </div>
+  <div class="section">
     <label>Meta Title</label>
     <input type="text" name="meta_title" value="{{ a[3] if a else '' }}">
     <label>Meta Description</label>
@@ -1848,6 +2101,34 @@ textarea{resize:vertical;line-height:1.7}
   {% if extra.quality_check %}
   <div class="hint" style="font-size:11px;color:#999;margin-top:8px">上次檢查分數：{{ extra.ai_score }}</div>
   {% endif %}
+</div>
+
+<div class="section">
+  <label style="font-size:13px;color:#555;font-weight:800">🔗 內部連結建議</label>
+  <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+    <button class="btn btn-outline" id="btn-links" onclick="suggestLinks({{ a[0] }})" type="button">AI 分析相關文章</button>
+    {% if extra.link_suggestions_updated %}
+    <span style="font-size:11px;color:#999">上次分析：{{ extra.link_suggestions_updated }}（{{ extra.link_suggestions|length if extra.link_suggestions else 0 }} 篇建議）</span>
+    {% endif %}
+  </div>
+  <div class="loading" id="links-loading" style="display:none;margin-top:8px">AI分析中，約 10 秒...</div>
+  <div class="err" id="links-err"></div>
+  <div id="links-result" style="margin-top:12px">
+    {% if extra.link_suggestions %}
+    {% for s in extra.link_suggestions %}
+    <div style="border:1px solid #e8eaf6;border-radius:8px;padding:10px 12px;margin-bottom:8px;font-size:13px">
+      <span style="font-weight:700">{{ s.title }}</span>
+      <span style="color:#888;margin:0 5px">→</span>
+      <span style="color:#0d6efd">{{ s.anchor_text }}</span>
+      <br>
+      <span style="font-size:11px;color:#999">{{ s.reason }}</span>
+      <br>
+      <code id="html-{{ loop.index }}" style="font-size:11px;background:#f5f5f5;padding:2px 8px;border-radius:4px;display:inline-block;margin-top:4px">&lt;a href="{{ s.slug }}"&gt;{{ s.anchor_text }}&lt;/a&gt;</code>
+      <button onclick="copyCode('html-{{ loop.index }}')" style="margin-left:8px;padding:2px 8px;font-size:11px;border:1px solid #ccc;border-radius:4px;cursor:pointer;background:#fff">複製 HTML</button>
+    </div>
+    {% endfor %}
+    {% endif %}
+  </div>
 </div>
 {% endif %}
 
@@ -1914,6 +2195,57 @@ function applyNextStatus(){
   if (!_qcNextStatus) return;
   const sel = document.getElementById('status-select');
   for (const opt of sel.options) { if (opt.value === _qcNextStatus) { sel.value = _qcNextStatus; break; } }
+}
+async function suggestLinks(articleId){
+  const btn = document.getElementById('btn-links');
+  btn.disabled = true;
+  document.getElementById('links-loading').style.display = 'block';
+  document.getElementById('links-err').textContent = '';
+  try {
+    const res = await fetch('/admin/seo/article/'+articleId+'/suggest-links?key='+encodeURIComponent(KEY), {method:'POST'});
+    const data = await safeJson(res);
+    if (data.error){ document.getElementById('links-err').textContent = data.error; btn.disabled=false; document.getElementById('links-loading').style.display='none'; return; }
+    await pollLinks(articleId, data.job_id);
+  } catch(e) {
+    document.getElementById('links-err').textContent = String(e.message||e);
+    btn.disabled=false; document.getElementById('links-loading').style.display='none';
+  }
+}
+async function pollLinks(articleId, jobId){
+  while(true){
+    await new Promise(r=>setTimeout(r,2500));
+    const res = await fetch('/admin/seo/article/'+articleId+'/suggest-links/status/'+jobId+'?key='+encodeURIComponent(KEY));
+    const data = await safeJson(res);
+    if(data.status==='pending'||data.status==='running') continue;
+    if(data.status==='error'){ document.getElementById('links-err').textContent = data.error||'分析失敗'; break; }
+    if(data.status==='done'){ renderLinks(data.result); break; }
+  }
+  document.getElementById('btn-links').disabled=false;
+  document.getElementById('links-loading').style.display='none';
+}
+function renderLinks(r){
+  const list = r.suggestions || [];
+  if(!list.length){ document.getElementById('links-result').innerHTML='<div style="color:#999;font-size:13px">找不到相關文章（建議先發布更多同品牌文章）</div>'; return; }
+  let html = '';
+  list.forEach(function(s,i){
+    const htmlCode = '<a href="'+s.slug+'">'+s.anchor_text+'</a>';
+    html += '<div style="border:1px solid #e8eaf6;border-radius:8px;padding:10px 12px;margin-bottom:8px;font-size:13px">'
+      + '<span style="font-weight:700">'+s.title+'</span>'
+      + '<span style="color:#888;margin:0 5px">→</span>'
+      + '<span style="color:#0d6efd">'+s.anchor_text+'</span>'
+      + '<br><span style="font-size:11px;color:#999">'+s.reason+'</span>'
+      + '<br><code id="new-html-'+i+'" style="font-size:11px;background:#f5f5f5;padding:2px 8px;border-radius:4px;display:inline-block;margin-top:4px">'+htmlCode.replace(/</g,'&lt;').replace(/>/g,'&gt;')+'</code>'
+      + '<button onclick="copyCode(\'new-html-'+i+'\')" style="margin-left:8px;padding:2px 8px;font-size:11px;border:1px solid #ccc;border-radius:4px;cursor:pointer;background:#fff">複製 HTML</button>'
+      + '</div>';
+  });
+  document.getElementById('links-result').innerHTML = html;
+}
+function copyCode(elId){
+  const el = document.getElementById(elId);
+  const text = el.textContent;
+  navigator.clipboard.writeText(text).then(function(){
+    el.style.background='#e8f5e9'; setTimeout(function(){el.style.background='#f5f5f5';},1200);
+  });
 }
 </script>
 """ + SHELL_CLOSE + """
@@ -3449,7 +3781,7 @@ async function doAnalyze(){
       const siEl = document.getElementById('search_intent');
       if (!siEl.value.trim() && data.analysis) {
         const sents = data.analysis.replace(/\r\n/g,'\n')
-          .replace(/([。！？])/g,'$1 ').split(' ')
+          .replace(/([。！？])/g,'$1').split('')
           .map(s=>s.trim()).filter(s=>s.length>4);
         const summary = sents.slice(0,2).join('').replace(/^\s*\d+[.、．]\s*/,'').trim();
         if (summary.length > 10) siEl.value = summary.substring(0, 100);
@@ -3681,9 +4013,19 @@ def seo_article_edit(aid):
     if not a:
         abort(404)
     extra = _parse_extra(a[8])
+    # Pillar articles for dropdown (other articles tagged as pillar, excluding self)
+    pillar_articles = []
+    try:
+        rows = _q("SELECT id, title, extra FROM seo_articles WHERE id != %s ORDER BY id DESC LIMIT 200",
+                  (aid,), fetch="all") or []
+        pillar_articles = [{"id": r[0], "title": r[1]}
+                           for r in rows if _parse_extra(r[2]).get("seo_role") == "pillar"]
+    except Exception:
+        pass
     shell = _shell_open(key, "seo", [("文章管理", "/admin/seo"), ("編輯文章", None)])
     return render_template_string(ARTICLE_HTML, key=key, shell=shell, a=a, extra=extra, default_title="",
-        article_status=ARTICLE_STATUS, article_status_labels=ARTICLE_STATUS_LABELS, next_action_options=NEXT_ACTION_OPTIONS)
+        article_status=ARTICLE_STATUS, article_status_labels=ARTICLE_STATUS_LABELS,
+        next_action_options=NEXT_ACTION_OPTIONS, pillar_articles=pillar_articles)
 
 @seo_bp.route("/admin/seo/article/save", methods=["POST"])
 def seo_article_save():
@@ -3694,7 +4036,9 @@ def seo_article_save():
     aid = f.get("id", "")
     now = time.time()
     extra_patch = {"main_keyword": f.get("main_keyword", ""), "target_audience": f.get("target_audience", ""),
-                   "related_products": f.get("related_products", ""), "next_action": f.get("next_action", "")}
+                   "related_products": f.get("related_products", ""), "next_action": f.get("next_action", ""),
+                   "seo_role": f.get("seo_role", ""), "longtail_keywords": f.get("longtail_keywords", ""),
+                   "search_intent": f.get("search_intent", ""), "pillar_article_id": f.get("pillar_article_id", "")}
     if aid:
         existing = _q("SELECT extra FROM seo_articles WHERE id=%s", (aid,), fetch="one")
         extra = _parse_extra(existing[0] if existing else None)
@@ -3724,6 +4068,72 @@ def seo_article_delete(aid):
     _q("DELETE FROM seo_tracking WHERE article_id=%s", (aid,))
     _q("DELETE FROM seo_articles WHERE id=%s", (aid,))
     return redirect(f"/admin/seo?key={key}")
+
+@seo_bp.route("/admin/seo/article/<int:aid>/suggest-links", methods=["POST"])
+def seo_suggest_links(aid):
+    ok, _ = auth_required()
+    if not ok:
+        return jsonify({"error": "unauthorized"}), 403
+    if not ANTHROPIC_API_KEY:
+        return jsonify({"error": "未設定 ANTHROPIC_API_KEY，無法使用 AI 功能"}), 200
+    now = time.time()
+    job_id = _q("INSERT INTO seo_link_jobs (status,article_id,created_at,updated_at) VALUES ('pending',%s,%s,%s) RETURNING id",
+                (aid, now, now), fetch="id")
+    threading.Thread(target=_run_suggest_links_job, args=(job_id, aid), daemon=True).start()
+    return jsonify({"job_id": job_id})
+
+@seo_bp.route("/admin/seo/article/<int:aid>/suggest-links/status/<int:job_id>")
+def seo_suggest_links_status(aid, job_id):
+    ok, _ = auth_required()
+    if not ok:
+        return jsonify({"error": "unauthorized"}), 403
+    row = _q("SELECT status,result,error_msg FROM seo_link_jobs WHERE id=%s AND article_id=%s",
+             (job_id, aid), fetch="one")
+    if not row:
+        return jsonify({"status": "error", "error": "找不到任務"})
+    status, result, error_msg = row
+    out = {"status": status}
+    if status == "error":
+        out["error"] = error_msg or "未知錯誤"
+    elif status == "done":
+        out["result"] = _parse_extra(result)
+    return jsonify(out)
+
+@seo_bp.route("/admin/seo/keyword-map")
+def seo_keyword_map():
+    ok, key = check_auth()
+    if not ok:
+        return render_template_string(LOGIN_HTML, error=None)
+    rows = _q("""SELECT id, title, slug, brand_key, category, status, extra
+                 FROM seo_articles WHERE status NOT IN ('inactive')
+                 ORDER BY brand_key, category, id DESC""", fetch="all") or []
+    articles = []
+    keyword_index = {}
+    for r in rows:
+        ex = _parse_extra(r[6])
+        mk = ex.get("main_keyword", "")
+        brand = r[3] or ""
+        art = {
+            "id": r[0], "title": r[1], "slug": r[2] or "",
+            "brand_key": brand, "category": r[4] or "",
+            "status": r[5], "main_keyword": mk,
+            "longtail_keywords": ex.get("longtail_keywords", ""),
+            "search_intent": ex.get("search_intent", ""),
+            "seo_role": ex.get("seo_role", ""),
+            "pillar_article_id": ex.get("pillar_article_id", ""),
+            "ai_score": ex.get("ai_score", 0),
+        }
+        articles.append(art)
+        if mk and brand:
+            keyword_index.setdefault(brand, {}).setdefault(mk, []).append(r[0])
+    conflicts = [
+        {"brand": b, "keyword": kw, "article_ids": ids, "count": len(ids)}
+        for b, kw_map in keyword_index.items()
+        for kw, ids in kw_map.items() if len(ids) >= 2
+    ]
+    shell = _shell_open(key, "seo-keyword-map", [("關鍵字地圖", None)])
+    return render_template_string(KEYWORD_MAP_HTML, key=key, shell=shell,
+        articles=articles, conflicts=conflicts, article_status_labels=ARTICLE_STATUS_LABELS)
 
 @seo_bp.route("/admin/seo/article/<int:aid>/quality-check", methods=["POST"])
 def seo_article_quality_check(aid):
