@@ -3448,8 +3448,10 @@ async function doAnalyze(){
       // #3 自動填入搜尋意圖（取分析結果前2句）
       const siEl = document.getElementById('search_intent');
       if (!siEl.value.trim() && data.analysis) {
-        const sents = data.analysis.replace(/\r\n/g,'\n').split(/(?<=[。！？\n])/);
-        const summary = sents.slice(0,2).join('').replace(/^\s*\d+[\.、．]\s*/,'').trim();
+        const sents = data.analysis.replace(/\r\n/g,'\n')
+          .replace(/([。！？])/g,'$1 ').split(' ')
+          .map(s=>s.trim()).filter(s=>s.length>4);
+        const summary = sents.slice(0,2).join('').replace(/^\s*\d+[.、．]\s*/,'').trim();
         if (summary.length > 10) siEl.value = summary.substring(0, 100);
       }
       // 顯示分析階段的 brand_rule debug 資訊
