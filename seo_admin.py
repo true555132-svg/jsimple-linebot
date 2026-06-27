@@ -910,15 +910,20 @@ def _get_brand_rule_by_id(rule_id):
     except Exception:
         return {}
 
+_ATYPE_WILDCARD = {"", "全部類型"}  # 兩者都視為「適用所有文章類型」的萬用規則
+
 def _match_brand_rule(brand, category, article_type=""):
-    """通用比對：不寫死任何品牌/品類/文章類型名稱，全部從 seo_brand_rules 動態比對。
-    比對規則：brand/category/article_type 三個欄位，規則裡留空＝該欄位萬用（適用所有值）；
-    填了值就必須完全相符才算候選。候選裡比對分數最高的勝出（brand相符+1000、category相符+100、
-    article_type相符+10），分數打平時用 priority（數字越大越優先）做最終決定。
-    這個分數機制天然就會做到「精確比對→品牌預設規則→系統預設規則」三層退回，
-    不需要另外寫三段if/else，未來新增品牌或規則也不用改這支邏輯。"""
+    """通用比對：brand/category/article_type 三欄位動態比對。
+    - brand：大小寫不分、去頭尾空白比對（"JSIMPLE" == "jsimple"）
+    - category：去頭尾空白比對
+    - article_type：空字串 / "全部類型" 都視為萬用；填其他值則需完全相符
+    - 分數機制：brand+1000, category+100, article_type精確相符+10，打平用 priority 決勝
+    """
     if not DATABASE_URL or not brand:
         return {}
+    brand_n    = (brand or "").strip().lower()
+    category_n = (category or "").strip()
+    atype_n    = (article_type or "").strip()
     try:
         rows = _q("""SELECT id,brand,category,article_type,priority,positioning,target_audience,key_products,
                      avoid_directions,tone,cta_direction,keywords,negative_keywords
@@ -928,15 +933,21 @@ def _match_brand_rule(brand, category, article_type=""):
         return {}
     best, best_score = None, None
     for r in rows:
-        r_brand, r_category, r_atype = r[1] or "", r[2] or "", r[3] or ""
-        r_priority = r[4] if r[4] is not None else 100
-        if r_brand and r_brand != brand:
+        r_brand_n   = (r[1] or "").strip().lower()
+        r_category_n = (r[2] or "").strip()
+        r_atype     = (r[3] or "").strip()
+        r_priority  = r[4] if r[4] is not None else 100
+        # brand：留空＝萬用；填了＝必須 case-insensitive 相符
+        if r_brand_n and r_brand_n != brand_n:
             continue
-        if r_category and r_category != category:
+        # category：留空＝萬用；填了＝必須相符（trimmed）
+        if r_category_n and r_category_n != category_n:
             continue
-        if r_atype and r_atype != article_type:
+        # article_type：空字串或"全部類型"＝萬用；填其他值＝必須相符
+        if r_atype not in _ATYPE_WILDCARD and r_atype != atype_n:
             continue
-        score = (1000 if r_brand else 0) + (100 if r_category else 0) + (10 if r_atype else 0)
+        is_specific_atype = r_atype not in _ATYPE_WILDCARD
+        score = (1000 if r_brand_n else 0) + (100 if r_category_n else 0) + (10 if is_specific_atype else 0)
         total = score * 100000 + r_priority
         if best_score is None or total > best_score:
             best_score = total
@@ -1341,7 +1352,7 @@ def _fill_tokens(template, **tokens):
         out = out.replace(f"[[{k}]]", v or "")
     return out
 
-def _analyze_intent_prompt(brand, category, topic):
+def _analyze_intent_prompt(brand, category, topic, brand_rule=None):
     knowledge_items = _get_knowledge_for_prompt(brand.get('key', ''), category, limit=10)
     tmpl = _get_prompt_template("analyze", DEFAULT_ANALYZE_PROMPT)
     body = _fill_tokens(tmpl,
@@ -1350,6 +1361,12 @@ def _analyze_intent_prompt(brand, category, topic):
         ARTICLE_TYPE_OPTIONS='、'.join(ARTICLE_TYPES),
         ALLOWED_PRODUCTS_BLOCK=_allowed_products_block(brand, knowledge_items, category),
         KNOWLEDGE_SUFFICIENCY_NOTE=_knowledge_sufficiency_note(brand, knowledge_items, category))
+    if brand_rule:
+        rule_inject = (
+            "\n品牌SEO規則（分析時必須遵守，商品只能從 key_products 裡推薦）：\n"
+            + _brand_rule_block(brand_rule) + "\n"
+        )
+        body = rule_inject + body
     return _brand_guardrail_header(brand, category) + "\n\n" + body + "\n\n" + _brand_guardrail_footer(brand)
 
 def _extract_suggested_article_type(text):
@@ -3193,6 +3210,7 @@ pre{white-space:pre-wrap;font-family:inherit;font-size:13px;line-height:1.7;back
   <div class="section step" id="step-analysis">
     <label>搜尋意圖分析結果</label>
     <pre id="analysis-text"></pre>
+    <div id="analyze-rule-debug" style="background:#f8f9fa;border:1px solid #e0e0e0;border-radius:8px;padding:10px 13px;font-size:12px;line-height:1.8;margin-top:12px;font-family:monospace;display:none"></div>
     <div style="display:flex;gap:10px;margin-top:14px;flex-wrap:wrap">
       <button class="btn btn-outline" id="btn-preview" onclick="doPreview()">👁 預覽 Prompt</button>
       <button class="btn" id="btn-generate" onclick="doGenerate()">AI 生成文章</button>
@@ -3231,13 +3249,22 @@ const BRAND_RULES = {{ brand_rules_json|safe }};
 
 // 跟後端 _match_brand_rule 同一套比分邏輯：規則欄位留空＝萬用，填了就要完全相符；
 // 分數最高的勝出，平手用 priority 決定。不寫死任何品牌/品類/文章類型名稱。
+const ATYPE_WILDCARD = new Set(['', '全部類型']);
+
 function matchBrandRule(brand, category, articleType){
+  const brandN = (brand || '').trim().toLowerCase();
+  const categoryN = (category || '').trim();
+  const atypeN = (articleType || '').trim();
   let best = null, bestScore = -1;
   for (const r of BRAND_RULES) {
-    if (r.brand && r.brand !== brand) continue;
-    if (r.category && r.category !== category) continue;
-    if (r.article_type && r.article_type !== articleType) continue;
-    const score = (r.brand ? 1000 : 0) + (r.category ? 100 : 0) + (r.article_type ? 10 : 0);
+    const rBrand = (r.brand || '').trim().toLowerCase();
+    const rCat   = (r.category || '').trim();
+    const rAtype = (r.article_type || '').trim();
+    if (rBrand && rBrand !== brandN) continue;
+    if (rCat && rCat !== categoryN) continue;
+    if (!ATYPE_WILDCARD.has(rAtype) && rAtype !== atypeN) continue;
+    const isSpecificAtype = !ATYPE_WILDCARD.has(rAtype);
+    const score = (rBrand ? 1000 : 0) + (rCat ? 100 : 0) + (isSpecificAtype ? 10 : 0);
     const total = score * 100000 + (r.priority || 100);
     if (total > bestScore) { bestScore = total; best = r; }
   }
@@ -3337,6 +3364,18 @@ async function doAnalyze(){
       document.getElementById('step-analysis').classList.add('active');
       window._lastBrand = brand; window._lastCategory = category; window._lastTopic = topic;
       window._lastAnalysis = data.analysis;
+      // 顯示分析階段的 brand_rule debug 資訊
+      if (data.debug) {
+        const d = data.debug;
+        const ruleColor = d.rule_hit ? '#2e7d32' : '#c62828';
+        const ruleIcon  = d.rule_hit ? '✓' : '✗';
+        const dbg = document.getElementById('analyze-rule-debug');
+        dbg.style.display = 'block';
+        dbg.innerHTML =
+          `<b>套用的品牌SEO規則</b>：<span style="color:${ruleColor};font-weight:700">${ruleIcon} ${data.brand_rule_label || d.rule_label}</span><br>` +
+          `<b>key_products</b>：<span style="color:#1565c0">${d.key_products}</span><br>` +
+          `<b>avoid_directions</b>：<span style="color:#c62828">${d.avoid_directions}</span>`;
+      }
       const typeSelect = document.getElementById('article_type');
       if (data.suggested_article_type && [...typeSelect.options].some(o => o.value === data.suggested_article_type)) {
         typeSelect.value = data.suggested_article_type;
@@ -4196,20 +4235,33 @@ def seo_generator_analyze():
     if not ok:
         return jsonify({"error": "unauthorized"}), 403
     data = request.get_json(silent=True) or {}
-    brand_key = data.get("brand", "")
-    category = data.get("category", "")
-    topic = data.get("topic", "")
+    brand_key   = data.get("brand", "")
+    category    = data.get("category", "")
+    topic       = data.get("topic", "")
+    article_type = data.get("article_type", "")
     if not topic.strip():
         return jsonify({"error": "請輸入主題"}), 400
     if not ANTHROPIC_API_KEY:
         return jsonify({"error": "尚未設定 ANTHROPIC_API_KEY，請在 Render → Environment 加上這個環境變數才能使用AI功能"}), 200
-    brand = _get_brand(brand_key)
-    prompt = _analyze_intent_prompt(brand, category, topic)
-    text, err = _ai_call(prompt, model="claude-haiku-4-5-20251001", max_tokens=1500)
+    brand      = _get_brand(brand_key)
+    brand_rule = _match_brand_rule(brand_key, category, article_type)
+    prompt     = _analyze_intent_prompt(brand, category, topic, brand_rule)
+    text, err  = _ai_call(prompt, model="claude-haiku-4-5-20251001", max_tokens=1500)
     if err:
         return jsonify({"error": f"AI分析失敗：{err}"}), 200
     analysis, suggested_article_type = _extract_suggested_article_type(text)
-    return jsonify({"analysis": analysis, "suggested_article_type": suggested_article_type})
+    rule = brand_rule or {}
+    return jsonify({
+        "analysis": analysis,
+        "suggested_article_type": suggested_article_type,
+        "brand_rule_label": _brand_rule_label(brand_rule),
+        "debug": {
+            "rule_hit":    bool(rule),
+            "rule_label":  f"{rule.get('brand','')} + {rule.get('category','')} + {rule.get('article_type','') or '全部類型'}" if rule else "（未命中任何規則）",
+            "key_products":     (rule.get("key_products") or "（空）").strip() or "（空）",
+            "avoid_directions": (rule.get("avoid_directions") or "（空）").strip() or "（空）",
+        },
+    })
 
 def _run_generate_job(job_id, brand_key, category, topic, analysis, opp_id=None, fields=None):
     fields = fields or {}
