@@ -36,6 +36,39 @@ _db_lock = threading.Lock()
 
 products_bp = Blueprint("products", __name__)
 
+# ── Pipeline DB migration ─────────────────────────────────────────
+def _migrate_pipeline_columns():
+    """Add pipeline columns to product_jobs / brand_profiles if not present."""
+    if not DATABASE_URL:
+        return
+    pj_cols = [
+        "analysis_json TEXT",
+        "search_intent_json TEXT",
+        "competitor_json TEXT",
+        "pipeline_used BOOLEAN DEFAULT FALSE",
+        "pipeline_log TEXT",
+    ]
+    bp_cols = [
+        "positioning TEXT DEFAULT ''",
+        "target_audience TEXT DEFAULT ''",
+        "forbidden_words TEXT DEFAULT ''",
+        "copy_length TEXT DEFAULT ''",
+        "faq_strategy TEXT DEFAULT ''",
+        "aeo_rules TEXT DEFAULT ''",
+    ]
+    try:
+        import sys
+        conn = _pg_conn(); cur = conn.cursor()
+        for col_def in pj_cols:
+            cur.execute(f"ALTER TABLE product_jobs ADD COLUMN IF NOT EXISTS {col_def}")
+        for col_def in bp_cols:
+            cur.execute(f"ALTER TABLE brand_profiles ADD COLUMN IF NOT EXISTS {col_def}")
+        conn.commit(); cur.close(); conn.close()
+        print("[Pipeline] DB migration 完成", file=sys.stderr)
+    except Exception as e:
+        import sys
+        print(f"[Pipeline] DB migration 失敗：{e}", file=sys.stderr)
+
 # ── DB 連線 ──────────────────────────────────────────────────────
 def _pg_conn():
     import psycopg2
@@ -145,41 +178,6 @@ def upload_image_to_github(filename: str, data: bytes) -> tuple:
         print(f"[GitHub Upload Error] {msg}", file=sys.stderr)
         return "", msg
 
-# ── Pipeline DB migration ─────────────────────────────────────────
-def _migrate_pipeline_columns():
-    """Add pipeline columns to product_jobs and brand_profiles if not present."""
-    if not DATABASE_URL:
-        return
-    product_job_cols = [
-        "analysis_json TEXT",
-        "search_intent_json TEXT",
-        "competitor_json TEXT",
-        "pipeline_used BOOLEAN DEFAULT FALSE",
-        "pipeline_log TEXT",
-    ]
-    brand_profile_cols = [
-        "positioning TEXT DEFAULT ''",
-        "target_audience TEXT DEFAULT ''",
-        "forbidden_words TEXT DEFAULT ''",
-        "copy_length TEXT DEFAULT ''",
-        "faq_strategy TEXT DEFAULT ''",
-        "aeo_rules TEXT DEFAULT ''",
-    ]
-    try:
-        import sys
-        conn = _pg_conn(); cur = conn.cursor()
-        for col_def in product_job_cols:
-            col_name = col_def.split()[0]
-            cur.execute(f"ALTER TABLE product_jobs ADD COLUMN IF NOT EXISTS {col_def}")
-        for col_def in brand_profile_cols:
-            col_name = col_def.split()[0]
-            cur.execute(f"ALTER TABLE brand_profiles ADD COLUMN IF NOT EXISTS {col_def}")
-        conn.commit(); cur.close(); conn.close()
-        print("[Pipeline] DB migration 完成", file=sys.stderr)
-    except Exception as e:
-        import sys
-        print(f"[Pipeline] DB migration 失敗：{e}", file=sys.stderr)
-
 # ── 品牌設定 ──────────────────────────────────────────────────────
 BRAND_PROFILES = {
     "jsimple": {
@@ -286,11 +284,11 @@ def _pj_list(limit=50):
     try:
         conn = _pg_conn(); cur = conn.cursor()
         cur.execute(
-            "SELECT id,url,platform,status,raw_title,ai_name,ai_desc,ai_keywords,error_msg,created_at,brand,COALESCE(category,''),COALESCE(listing_status,'草稿') FROM product_jobs ORDER BY created_at DESC LIMIT %s",
+            "SELECT id,url,platform,status,raw_title,ai_name,ai_desc,ai_keywords,error_msg,created_at,brand,COALESCE(category,''),COALESCE(listing_status,'草稿'),COALESCE(img_status,''),COALESCE(main_image,''),raw_images FROM product_jobs ORDER BY created_at DESC LIMIT %s",
             (limit,)
         )
         rows = cur.fetchall(); cur.close(); conn.close()
-        return [{"id":r[0],"url":r[1],"platform":r[2],"status":r[3],"raw_title":r[4],"ai_name":r[5],"ai_desc":r[6],"ai_keywords":r[7],"error_msg":r[8],"created_at":r[9],"brand":r[10] or "","category":r[11] or "","listing_status":r[12] or "草稿"} for r in rows]
+        return [{"id":r[0],"url":r[1],"platform":r[2],"status":r[3],"raw_title":_to_tw(r[4]),"ai_name":r[5],"ai_desc":r[6],"ai_keywords":r[7],"error_msg":r[8],"created_at":r[9],"brand":r[10] or "","category":r[11] or "","listing_status":r[12] or "草稿","img_status":r[13] or "","main_image":r[14] or "","raw_images":json.loads(r[15] or "[]")} for r in rows]
     except Exception:
         return []
 
@@ -327,7 +325,14 @@ def _pj_get(job_id):
         try:
             cur.execute("SELECT product_images FROM product_jobs WHERE id=%s", (job_id,))
             pi_row = cur.fetchone()
-            result["product_images"] = json.loads((pi_row[0] if pi_row else None) or "{}")
+            pi = json.loads((pi_row[0] if pi_row else None) or "{}")
+            for cat in ("sku_images",):
+                if isinstance(pi.get(cat), list):
+                    pi[cat] = [
+                        {**i, "label": _to_tw(i.get("label",""))} if isinstance(i, dict) else i
+                        for i in pi[cat]
+                    ]
+            result["product_images"] = pi
         except Exception:
             result["product_images"] = {}
         cur.close(); conn.close()
@@ -492,7 +497,7 @@ def _scrape_images(html):
 
 def _detect_platform(url):
     if "1688.com" in url: return "1688"
-    if "taobao.com" in url: return "taobao"
+    if "taobao.com" in url or "tmall.com" in url: return "taobao"
     return "unknown"
 
 def _extract_meta_text(html, prop):
@@ -550,6 +555,7 @@ def _ai_rewrite(raw_title, raw_desc, price="", brand=""):
     brand_category = bp.get("category", "商品")
     brand_style    = bp.get("style", "簡潔、專業、官網風格。")
     brand_tone     = bp.get("tone", "直接說明功能，不像業務推銷。")
+    brand_seo_dir  = bp.get("seo_direction", "")
     custom_prompt  = bp.get("custom_prompt", "")
     parts = []
     if raw_title: parts.append(f"原始標題：{raw_title}")
@@ -561,9 +567,10 @@ def _ai_rewrite(raw_title, raw_desc, price="", brand=""):
         if "{product}" not in custom_prompt:
             prompt = custom_prompt + "\n\n" + product_block
     else:
+        seo_dir_line = f"\nSEO 關鍵字方向：{brand_seo_dir}" if brand_seo_dir.strip() else ""
         prompt = f"""你是「{brand_name}」品牌的文案編輯，負責{brand_category}類商品。
 品牌文案風格：{brand_style}
-語氣要求：{brand_tone}
+語氣要求：{brand_tone}{seo_dir_line}
 
 請將以下中國電商商品資料改寫成台灣官網風格。
 不要直接翻譯淘寶標題，要重新定位商品。
@@ -645,7 +652,7 @@ def _process_product_job(job_id, url, platform):
 
 def _run_ai_rewrite_for_job(job_id, use_pipeline=None):
     """
-    use_pipeline=None  → 依照環境變數 USE_AI_PIPELINE 決定
+    use_pipeline=None  → 依環境變數 USE_AI_PIPELINE 決定
     use_pipeline=True  → 強制使用 pipeline
     use_pipeline=False → 強制使用舊版 _ai_rewrite
     """
@@ -661,7 +668,6 @@ def _run_ai_rewrite_for_job(job_id, use_pipeline=None):
     brand = job.get("brand", "")
     _pj_update(job_id, status="rewriting")
 
-    # 決定是否使用 pipeline
     try:
         from ai_pipeline import run_pipeline, USE_AI_PIPELINE as _PIPE_ENV
         _should_pipeline = use_pipeline if use_pipeline is not None else _PIPE_ENV
@@ -674,8 +680,7 @@ def _run_ai_rewrite_for_job(job_id, use_pipeline=None):
         log_str = "\n".join(pr.get("pipeline_log", []))
 
         if pr.get("error"):
-            # Pipeline 失敗 → fallback 到舊版
-            print(f"[Pipeline] job {job_id} 失敗，fallback 舊版: {pr['error']}", file=sys.stderr)
+            print(f"[Pipeline] job {job_id} 失敗，fallback: {pr['error']}", file=sys.stderr)
             _pj_update(job_id, pipeline_used=False, pipeline_log=f"PIPELINE_FAIL: {pr['error']}\n{log_str}")
             ai = _ai_rewrite(raw_title, raw_desc, raw_price, brand)
             if "error" in ai:
@@ -689,7 +694,6 @@ def _run_ai_rewrite_for_job(job_id, use_pipeline=None):
                        faq=json.dumps(ai.get("faq",[]), ensure_ascii=False))
             return
 
-        # Pipeline 成功
         ai   = pr["copy"]
         astr = json.dumps(pr.get("analysis_json") or {},      ensure_ascii=False)
         sstr = json.dumps(pr.get("search_intent_json") or {}, ensure_ascii=False)
@@ -702,7 +706,6 @@ def _run_ai_rewrite_for_job(job_id, use_pipeline=None):
                    faq=json.dumps(ai.get("faq",[]), ensure_ascii=False),
                    analysis_json=astr, search_intent_json=sstr, competitor_json=cstr,
                    pipeline_used=True, pipeline_log=log_str)
-        print(f"[Pipeline] job {job_id} Pipeline 完成", file=sys.stderr)
         return
 
     # 舊版路徑
@@ -1456,63 +1459,81 @@ PRODUCTS_HTML = """<!DOCTYPE html>
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>JSIMPLE AI 商品工廠</title>
+<title>AI 商品搬運中心</title>
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
-html,body{height:100%;font-family:-apple-system,sans-serif;color:#333;overflow:hidden}
-/* ── Layout ── */
-.app{display:flex;height:100vh}
-.sidebar{width:200px;background:#0f0f0f;color:#fff;display:flex;flex-direction:column;flex-shrink:0;overflow-y:auto}
-.sidebar-brand{padding:18px 16px 14px;border-bottom:1px solid #1e1e1e}
-.sidebar-brand .title{font-size:15px;font-weight:700;letter-spacing:.3px}
-.sidebar-brand .sub{font-size:11px;color:#555;margin-top:3px}
-.nav-item{display:block;padding:10px 16px;font-size:13px;color:#777;text-decoration:none;border-left:3px solid transparent;transition:all .15s}
-.nav-item:hover{color:#ddd;background:#1a1a1a}
-.nav-item.active{color:#fff;border-left-color:#fff;background:#1d1d1d}
-.nav-sep{border-top:1px solid #1e1e1e;margin:6px 0}
-.main-area{flex:1;display:flex;flex-direction:column;overflow:hidden;background:#f5f5f5;min-width:0}
-/* ── Top bar ── */
-.top-bar{background:#fff;border-bottom:1px solid #eee;padding:10px 16px;flex-shrink:0}
-.url-input-row{display:flex;gap:8px;align-items:flex-start}
-.url-ta{flex:1;border:1.5px solid #ddd;border-radius:10px;padding:8px 12px;font-size:13px;height:56px;resize:none;font-family:-apple-system,sans-serif;outline:none}
-.url-ta:focus{border-color:#1a1a1a}
-.brand-sel{border:1.5px solid #ddd;border-radius:10px;padding:7px 10px;font-size:13px;font-family:-apple-system,sans-serif;outline:none;background:#fff;width:130px;flex-shrink:0}
-.btn-primary{background:#1a1a1a;color:#fff;border:none;border-radius:10px;padding:8px 16px;font-size:13px;font-weight:700;cursor:pointer;white-space:nowrap;font-family:-apple-system,sans-serif;height:36px;flex-shrink:0}
-.btn-primary:hover{background:#333}
-.btn-primary:disabled{background:#aaa;cursor:default}
-.err-msg{color:#c62828;font-size:12px;margin-top:4px;display:none}
-.batch-hint{font-size:12px;color:#aaa;margin-top:3px}
-.progress-bar-wrap{background:#f0f0f0;border-radius:10px;height:4px;margin-top:6px;overflow:hidden;display:none}
-.progress-bar{background:#1a1a1a;height:100%;border-radius:10px;transition:width .3s}
-/* ── Stats bar ── */
-.stats-row{display:flex;gap:8px;padding:8px 0 2px;flex-wrap:wrap}
-.stat-card{display:flex;align-items:center;gap:7px;background:#f8f8f8;border:1.5px solid #eee;border-radius:8px;padding:5px 12px;cursor:pointer;transition:all .15s;text-decoration:none;user-select:none}
-.stat-card:hover{background:#fff;border-color:#ccc}
-.stat-card.active{background:#1a1a1a;border-color:#1a1a1a;color:#fff}
-.stat-num{font-size:17px;font-weight:700;line-height:1;color:#333}
-.stat-lbl{font-size:11px;color:#888;line-height:1.2}
-.stat-card.active .stat-num,.stat-card.active .stat-lbl{color:#fff}
-.stat-card.c-today .stat-num{color:#1565c0}
-.stat-card.c-wait .stat-num{color:#e65100}
-.stat-card.c-review .stat-num{color:#7b1fa2}
-.stat-card.c-list .stat-num{color:#1b5e20}
-.stat-card.c-done .stat-num{color:#2e7d32}
-.stat-card.c-error .stat-num{color:#c62828}
-/* ── Content area ── */
-.content-area{flex:1;display:flex;overflow:hidden}
-/* ── List panel ── */
-.list-panel{width:360px;flex-shrink:0;border-right:1px solid #e8e8e8;display:flex;flex-direction:column;background:#f5f5f5;overflow:hidden}
-.list-hd{padding:10px 12px 8px;background:#fff;border-bottom:1px solid #eee;flex-shrink:0}
-.filter-row{display:flex;gap:5px;flex-wrap:wrap}
-.fbtn{border:1.5px solid #ddd;background:#fff;border-radius:16px;padding:4px 11px;font-size:12px;cursor:pointer;font-family:-apple-system,sans-serif;transition:all .15s}
-.fbtn:hover{background:#f0f0f0}
-.fbtn.active{background:#1a1a1a;color:#fff;border-color:#1a1a1a}
-.list-scroll{flex:1;overflow-y:auto;padding:8px}
-.job{background:#fff;border-radius:10px;padding:12px 13px;margin-bottom:7px;box-shadow:0 1px 2px rgba(0,0,0,.05);cursor:pointer;border:1.5px solid transparent;transition:all .15s}
-.job:hover{border-color:#e0e0e0;box-shadow:0 2px 8px rgba(0,0,0,.09)}
-.job.selected{border-color:#1a1a1a;background:#fafafa}
+body{font-family:-apple-system,sans-serif;background:#f0f1f5;color:#333}
+/* ── App shell：側邊欄 + 主區域 ───────────────────────── */
+.app-shell{display:flex;min-height:100vh}
+.sidebar{width:220px;flex-shrink:0;background:#1a1a2e;color:#cfd2e6;display:flex;flex-direction:column;padding:16px 0}
+.sidebar-logo{display:flex;align-items:center;gap:10px;padding:6px 18px 18px;border-bottom:1px solid rgba(255,255,255,.08);margin-bottom:10px}
+.sidebar-logo .logo-mark{width:32px;height:32px;border-radius:9px;background:#7c5cff;display:flex;align-items:center;justify-content:center;font-weight:800;color:#fff;font-size:14px;flex-shrink:0}
+.sidebar-logo .logo-text{line-height:1.25}
+.sidebar-logo .logo-text b{display:block;font-size:13px;color:#fff;font-weight:700}
+.sidebar-logo .logo-text span{font-size:10px;color:#9b9fc0}
+.nav-item{display:flex;align-items:center;gap:10px;padding:10px 18px;font-size:13px;color:#cfd2e6;text-decoration:none;cursor:pointer;border-left:3px solid transparent;white-space:nowrap}
+.nav-item:hover{background:rgba(255,255,255,.06);color:#fff}
+.nav-item.active{background:rgba(124,92,255,.18);color:#fff;border-left-color:#7c5cff;font-weight:700}
+.nav-icon{width:18px;text-align:center;flex-shrink:0}
+.sidebar-foot{margin-top:auto;padding:14px 18px;border-top:1px solid rgba(255,255,255,.08);font-size:12px;color:#9b9fc0;display:flex;align-items:center;gap:8px}
+.sidebar-foot .avatar{width:26px;height:26px;border-radius:50%;background:#7c5cff;color:#fff;display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:700}
+.main-area{flex:1;min-width:0;display:flex;flex-direction:column}
+.topbar{background:#fff;padding:14px 24px;display:flex;align-items:center;gap:14px;border-bottom:1px solid #eceef2}
+.topbar-title{font-size:18px;font-weight:800;color:#1a1a2e}
+.topbar-help{font-size:12px;color:#9b9fc0;cursor:pointer}
+.topbar-help:hover{color:#7c5cff}
+.topbar-actions{margin-left:auto;display:flex;gap:8px;position:relative}
+.btn-ghost{background:#f3f1ff;color:#5b3df0;border:none;border-radius:9px;padding:8px 16px;font-size:13px;font-weight:700;cursor:pointer;font-family:-apple-system,sans-serif;text-decoration:none;display:inline-flex;align-items:center}
+.btn-ghost:hover{background:#e8e3ff}
+.btn-dark{background:#1a1a2e;color:#fff;border:none;border-radius:9px;padding:8px 16px;font-size:13px;font-weight:700;cursor:pointer;font-family:-apple-system,sans-serif}
+.btn-dark:hover{background:#2d2d44}
+.export-flyout{position:absolute;top:42px;right:0;background:#fff;border-radius:10px;box-shadow:0 8px 24px rgba(0,0,0,.15);padding:8px;display:none;flex-direction:column;gap:4px;min-width:140px;z-index:50}
+.export-flyout.show{display:flex}
+.export-flyout a{color:#333;text-decoration:none;font-size:13px;padding:7px 10px;border-radius:7px}
+.export-flyout a:hover{background:#f3f1ff}
+.content-wrap{padding:20px 24px;flex:1;min-width:0}
+.export-btn{background:#2d2d2d;color:#fff;text-decoration:none;border-radius:8px;padding:5px 12px;font-size:12px;font-weight:700;white-space:nowrap;display:inline-block}
+.export-btn:hover{background:#444}
+/* 統計卡 */
+.stat-row{display:grid;grid-template-columns:repeat(6,1fr);gap:12px;margin-bottom:20px}
+.stat-card{background:#fff;border-radius:14px;padding:14px 16px;box-shadow:0 1px 4px rgba(0,0,0,.06);display:flex;flex-direction:column;gap:4px}
+.stat-num{font-size:22px;font-weight:800;color:#1a1a2e}
+.stat-label{font-size:12px;color:#9b9fc0;font-weight:600}
+/* 兩欄：列表 + 詳情 */
+.content-grid{display:grid;grid-template-columns:420px 1fr;gap:18px;align-items:start}
+@media (max-width:1100px){.content-grid{grid-template-columns:1fr}}
+.list-col{min-width:0}
+.detail-col{min-width:0;background:#fff;border-radius:16px;box-shadow:0 1px 4px rgba(0,0,0,.06);overflow:hidden;position:sticky;top:20px}
+.detail-empty{padding:80px 20px;text-align:center;color:#bbb;font-size:14px}
+.detail-hd{padding:18px 22px;border-bottom:1px solid #f0f0f0;display:flex;align-items:center;gap:12px}
+.detail-hd-title{font-size:16px;font-weight:800;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.detail-hd-meta{font-size:12px;color:#9b9fc0;margin-top:3px}
+.detail-actions{display:flex;gap:6px}
+.icon-btn{background:#f5f5f8;border:none;border-radius:8px;padding:6px 10px;font-size:12px;cursor:pointer;color:#555;font-family:-apple-system,sans-serif}
+.icon-btn:hover{background:#ece9ff;color:#5b3df0}
+.icon-btn.danger:hover{background:#fdecea;color:#e53935}
+/* input card */
+.card{background:#fff;border-radius:14px;padding:20px;margin-bottom:16px;box-shadow:0 1px 4px rgba(0,0,0,.08)}
+.card h3{font-size:14px;font-weight:700;color:#666;margin-bottom:12px;letter-spacing:.3px}
+.url-row{display:flex;gap:10px}
+.url-row input{flex:1;border:1.5px solid #ddd;border-radius:10px;padding:10px 14px;font-size:14px;outline:none;font-family:-apple-system,sans-serif}
+.url-row input:focus{border-color:#1a1a1a}
+.btn-primary{background:#7c5cff;color:#fff;border:none;border-radius:10px;padding:10px 22px;font-size:14px;font-weight:700;cursor:pointer;white-space:nowrap;font-family:-apple-system,sans-serif;width:100%}
+.btn-primary:hover{background:#6a4ce8}
+.btn-primary:disabled{background:#c9c2f5;cursor:default}
+.err-msg{color:#c62828;font-size:13px;margin-top:8px;display:none}
+/* filter */
+.filter-row{display:flex;gap:8px;margin-bottom:14px;flex-wrap:wrap}
+.fbtn{border:1.5px solid #ddd;background:#fff;border-radius:20px;padding:5px 14px;font-size:13px;cursor:pointer;font-family:-apple-system,sans-serif}
+.fbtn.active{background:#1a1a2e;color:#fff;border-color:#1a1a2e}
+/* job cards */
+.job{background:#fff;border-radius:12px;padding:13px 14px;margin-bottom:9px;box-shadow:0 1px 3px rgba(0,0,0,.07);cursor:pointer;border:1.5px solid transparent;transition:all .15s;display:flex;gap:10px}
+.job:hover{border-color:#e0e0e0;box-shadow:0 3px 10px rgba(0,0,0,.1)}
+.job.active{border-color:#7c5cff;box-shadow:0 0 0 1px #7c5cff}
+.job-thumb{width:56px;height:56px;border-radius:9px;background:#f3f1ff;flex-shrink:0;object-fit:cover;display:flex;align-items:center;justify-content:center;color:#c4bdf5;font-size:20px}
+.job-main{flex:1;min-width:0}
 .job-top{display:flex;align-items:center;gap:6px}
-.badge{font-size:10px;font-weight:700;padding:2px 7px;border-radius:7px;flex-shrink:0}
+.badge{font-size:11px;font-weight:700;padding:3px 8px;border-radius:8px;flex-shrink:0}
 .pf-1688{background:#fff0f0;color:#c62828}
 .pf-taobao{background:#fff4e5;color:#e65100}
 .st-pending{background:#f5f5f5;color:#999}
@@ -1520,28 +1541,34 @@ html,body{height:100%;font-family:-apple-system,sans-serif;color:#333;overflow:h
 .st-rewriting{background:#fff8e1;color:#f57f17}
 .st-done{background:#e8f5e9;color:#2e7d32}
 .st-error{background:#fdecea;color:#c62828}
-.job-title{flex:1;font-size:13px;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.job-title{flex:1;font-size:13px;font-weight:700;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .job-url{font-size:11px;color:#bbb;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;margin-top:3px}
-.job-time{font-size:10px;color:#ccc;margin-top:2px}
-.del-btn{background:none;border:none;color:#ddd;cursor:pointer;font-size:16px;line-height:1;padding:2px 4px;border-radius:5px;flex-shrink:0}
+.job-foot{display:flex;align-items:center;gap:8px;margin-top:4px}
+.job-time{font-size:11px;color:#ccc}
+.job-imgcount{font-size:11px;color:#9b9fc0;background:#f5f5f8;border-radius:6px;padding:1px 6px}
+.del-btn{background:none;border:none;color:#ddd;cursor:pointer;font-size:18px;line-height:1;padding:2px 4px;border-radius:6px;flex-shrink:0;align-self:flex-start}
 .del-btn:hover{color:#e53935;background:#fdecea}
-.empty{text-align:center;padding:40px 16px;color:#ccc;font-size:14px}
+.empty{text-align:center;padding:50px 20px;color:#ccc;font-size:15px}
 .spinner{display:inline-block;width:12px;height:12px;border:2px solid #ddd;border-top-color:#666;border-radius:50%;animation:spin .8s linear infinite;vertical-align:middle;margin-right:4px}
 @keyframes spin{to{transform:rotate(360deg)}}
-/* ── Detail panel ── */
-.detail-panel{flex:1;display:flex;flex-direction:column;overflow:hidden;background:#fff;min-width:0}
-.detail-empty-wrap{display:flex;flex:1;flex-direction:column;align-items:center;justify-content:center;color:#ccc;gap:10px}
-.detail-hd{padding:14px 18px 12px;border-bottom:1px solid #f0f0f0;display:flex;align-items:center;gap:10px;flex-shrink:0}
-.detail-title{font-size:15px;font-weight:700;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.detail-body{flex:1;overflow-y:auto}
-.section{margin-bottom:18px}
+.detail-body{padding:20px}
+.section{margin-bottom:20px}
 .slabel{font-size:11px;font-weight:700;color:#aaa;letter-spacing:.5px;text-transform:uppercase;margin-bottom:6px}
-.rbox{background:#f8f8f8;border-radius:10px;padding:12px 14px;font-size:13px;line-height:1.7;white-space:pre-wrap;word-break:break-all;position:relative;padding-right:70px}
+.rbox{background:#f8f8f8;border-radius:10px;padding:14px;font-size:14px;line-height:1.7;white-space:pre-wrap;word-break:break-all;position:relative;padding-right:70px}
 .copy-btn{position:absolute;top:8px;right:8px;background:#1a1a1a;color:#fff;border:none;border-radius:8px;padding:4px 10px;font-size:12px;cursor:pointer;opacity:.7;font-family:-apple-system,sans-serif}
 .copy-btn:hover{opacity:1}
 .copy-btn.ok{background:#2e7d32}
-.divider{border:none;border-top:1px solid #f0f0f0;margin:14px 0}
+.kw-row{display:flex;gap:6px;flex-wrap:wrap}
+.kw{background:#e3f2fd;color:#1565c0;border-radius:12px;padding:4px 12px;font-size:13px;font-weight:600}
+.imgs-row{display:flex;gap:8px;flex-wrap:wrap;margin-top:8px}
+.imgs-row img{width:80px;height:80px;object-fit:cover;border-radius:8px;border:1px solid #eee}
+.divider{border:none;border-top:1px solid #f0f0f0;margin:16px 0}
 .err-box{background:#fdecea;color:#c62828;border-radius:10px;padding:12px 14px;font-size:13px;margin-bottom:14px}
+.raw-toggle{background:none;border:none;color:#bbb;font-size:12px;cursor:pointer;font-family:-apple-system,sans-serif;text-decoration:underline;padding:0}
+/* 手動補圖 */
+.img-form{margin-top:14px}
+.img-form textarea{width:100%;border:1.5px solid #ddd;border-radius:10px;padding:10px;font-size:13px;height:90px;resize:vertical;font-family:-apple-system,sans-serif;outline:none}
+.img-form textarea:focus{border-color:#1a1a1a}
 /* 選圖 UI */
 .img-zone-hd{display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin-bottom:6px}
 .img-zone-hd .slabel{margin-bottom:0;flex:none}
@@ -1564,9 +1591,9 @@ html,body{height:100%;font-family:-apple-system,sans-serif;color:#333;overflow:h
 .thumb-actions{display:flex;justify-content:center;gap:3px;margin-top:3px}
 .thumb-act{background:#f0f0f0;border:none;border-radius:4px;padding:2px 6px;font-size:11px;cursor:pointer;color:#555;text-decoration:none;display:inline-block;line-height:1.5}
 .thumb-act:hover{background:#ddd;color:#333}
-.sel-action-bar{position:sticky;bottom:0;background:#fff;border-top:1px solid #f0f0f0;padding:10px 0 4px;display:flex;gap:8px;align-items:center;margin-top:10px;flex-wrap:wrap}
+.sel-action-bar{position:sticky;bottom:0;background:#fff;border-top:1px solid #f0f0f0;padding:12px 0 4px;display:flex;gap:8px;align-items:center;margin-top:12px}
 .sel-count{font-size:12px;color:#888;flex:1}
-.btn-confirm{background:#1a1a1a;color:#fff;border:none;border-radius:9px;padding:8px 14px;font-size:13px;font-weight:700;cursor:pointer;font-family:-apple-system,sans-serif}
+.btn-confirm{background:#1a1a1a;color:#fff;border:none;border-radius:9px;padding:8px 18px;font-size:13px;font-weight:700;cursor:pointer;font-family:-apple-system,sans-serif}
 .btn-confirm:hover{background:#333}
 .btn-zip{background:#e3f2fd;color:#1565c0;border:none;border-radius:9px;padding:8px 14px;font-size:13px;font-weight:600;cursor:pointer;font-family:-apple-system,sans-serif}
 .btn-zip:hover{background:#bbdefb}
@@ -1600,19 +1627,37 @@ html,body{height:100%;font-family:-apple-system,sans-serif;color:#333;overflow:h
 .translated-sec .slabel{color:#16a34a}
 .btn-sm{background:#333;color:#fff;border:none;border-radius:8px;padding:6px 14px;font-size:13px;cursor:pointer;font-family:-apple-system,sans-serif;margin-top:6px}
 .btn-sm:hover{background:#555}
-.hidden{display:none!important}
-.toast{position:fixed;bottom:24px;left:50%;transform:translateX(-50%);background:#333;color:#fff;padding:8px 18px;border-radius:18px;font-size:13px;z-index:9998;opacity:0;transition:opacity .3s;pointer-events:none}
+.hidden{display:none}
+.toast{position:fixed;bottom:28px;left:50%;transform:translateX(-50%);background:#333;color:#fff;padding:9px 20px;border-radius:20px;font-size:14px;z-index:999;opacity:0;transition:opacity .3s;pointer-events:none}
 .toast.show{opacity:1}
+/* 編輯模式 */
+.edit-ta{width:100%;border:1.5px solid #ddd;border-radius:10px;padding:10px 12px;font-size:14px;line-height:1.6;resize:vertical;font-family:-apple-system,sans-serif;outline:none;background:#fff}
+.edit-ta:focus{border-color:#1a1a1a}
+.edit-ta.name{height:52px}
+.edit-ta.desc{height:200px}
+.edit-ta.kw{height:52px}
 .edit-bar{display:flex;gap:8px;margin-top:10px}
-.btn-save{background:#1a1a1a;color:#fff;border:none;border-radius:9px;padding:8px 16px;font-size:13px;font-weight:700;cursor:pointer;font-family:-apple-system,sans-serif}
+.btn-save{background:#1a1a1a;color:#fff;border:none;border-radius:9px;padding:8px 18px;font-size:13px;font-weight:700;cursor:pointer;font-family:-apple-system,sans-serif}
 .btn-save:hover{background:#333}
-.brand-badge{font-size:10px;font-weight:700;padding:2px 6px;border-radius:6px;background:#f3e5f5;color:#7b1fa2;flex-shrink:0}
+.btn-cancel{background:#f5f5f5;color:#555;border:none;border-radius:9px;padding:8px 16px;font-size:13px;cursor:pointer;font-family:-apple-system,sans-serif}
+.btn-cancel:hover{background:#eee}
+.btn-edit{background:#f0f0f0;color:#333;border:none;border-radius:9px;padding:6px 14px;font-size:13px;cursor:pointer;font-family:-apple-system,sans-serif;margin-left:auto}
+.btn-edit:hover{background:#e0e0e0}
+/* 批次輸入 */
+.url-ta{width:100%;border:1.5px solid #ddd;border-radius:10px;padding:10px 14px;font-size:13px;height:90px;resize:vertical;font-family:-apple-system,sans-serif;outline:none}
+.url-ta:focus{border-color:#1a1a1a}
+.brand-sel{border:1.5px solid #ddd;border-radius:10px;padding:8px 12px;font-size:13px;font-family:-apple-system,sans-serif;outline:none;background:#fff;color:#333;cursor:pointer;width:100%}
+.brand-sel:focus{border-color:#1a1a1a}
+.brand-badge{font-size:10px;font-weight:700;padding:2px 7px;border-radius:7px;background:#f3e5f5;color:#7b1fa2;flex-shrink:0}
+.batch-hint{font-size:12px;color:#aaa;margin-top:6px}
+.progress-bar-wrap{background:#f0f0f0;border-radius:10px;height:6px;margin-top:10px;overflow:hidden;display:none}
+.progress-bar{background:#1a1a1a;height:100%;border-radius:10px;transition:width .3s}
 /* Tabs */
-.tab-nav{display:flex;padding:0 16px;border-bottom:1px solid #f0f0f0;overflow-x:auto;background:#fff;flex-shrink:0}
-.tab-btn{background:none;border:none;padding:10px 14px;font-size:13px;font-weight:600;color:#999;cursor:pointer;white-space:nowrap;border-bottom:2px solid transparent;font-family:-apple-system,sans-serif}
+.tab-nav{display:flex;gap:2px;padding:0 20px;border-bottom:1px solid #f0f0f0;overflow-x:auto;background:#fff;position:sticky;top:57px;z-index:1}
+.tab-btn{background:none;border:none;padding:12px 14px;font-size:13px;font-weight:600;color:#999;cursor:pointer;white-space:nowrap;border-bottom:2px solid transparent;font-family:-apple-system,sans-serif}
 .tab-btn:hover{color:#333}
 .tab-btn.active{color:#1a1a1a;border-bottom-color:#1a1a1a}
-.tab-panel{display:none;padding:16px}
+.tab-panel{display:none}
 .tab-panel.active{display:block}
 /* 左右對照 */
 .compare-grid{display:grid;grid-template-columns:1fr 1fr;gap:16px}
@@ -1645,88 +1690,88 @@ html,body{height:100%;font-family:-apple-system,sans-serif;color:#333;overflow:h
 </style>
 </head>
 <body>
-<div class="app">
 
-<!-- Sidebar -->
-<div class="sidebar">
-  <div class="sidebar-brand">
-    <div class="title">JSIMPLE AI</div>
-    <div class="sub">商品工廠</div>
+<div class="app-shell">
+  <div class="sidebar">
+    <div class="sidebar-logo">
+      <div class="logo-mark">J</div>
+      <div class="logo-text"><b>J.SIMPLE</b><span>AI 商品工廠</span></div>
+    </div>
+    <div class="nav-item" data-nav="dashboard" onclick="navStub('總覽 Dashboard')"><span class="nav-icon">📊</span>總覽 Dashboard</div>
+    <div class="nav-item active" data-nav="products"><span class="nav-icon">🚚</span>AI 商品搬運中心</div>
+    <div class="nav-item" data-nav="manage" onclick="navStub('商品管理')"><span class="nav-icon">📦</span>商品管理</div>
+    <div class="nav-item" data-nav="batch" onclick="navStub('批次搬運')"><span class="nav-icon">🗂</span>批次搬運</div>
+    <a class="nav-item" href="/admin/brand-settings?key={{ key }}"><span class="nav-icon">🏷</span>品牌設定</a>
+    <div class="nav-item" data-nav="tpl" onclick="navStub('文案模板')"><span class="nav-icon">📝</span>文案模板</div>
+    <div class="nav-item" data-nav="export-log" onclick="navStub('出口記錄')"><span class="nav-icon">📤</span>出口記錄</div>
+    <div class="sidebar-foot"><div class="avatar">J</div>JSIMPLE Admin</div>
   </div>
-  <a class="nav-item active" href="/admin/products?key={{ key }}">商品搬運中心</a>
-  <div class="nav-sep"></div>
-  <a class="nav-item" href="/admin/brand-settings?key={{ key }}">品牌設定</a>
-  <a class="nav-item" href="/admin/products/store-scan?key={{ key }}">店鋪選品</a>
-  <div class="nav-sep"></div>
-  <a class="nav-item" href="/api/products/export?format=xlsx&key={{ key }}">⬇ Excel</a>
-  <a class="nav-item" href="/api/products/export?format=csv&key={{ key }}">⬇ CSV</a>
-  <a class="nav-item" href="/admin?key={{ key }}" style="margin-top:auto;padding-top:10px">← 後台首頁</a>
+
+  <div class="main-area">
+    <div class="topbar">
+      <div class="topbar-title">AI 商品搬運中心</div>
+      <div class="topbar-help" onclick="toast('貼上 1688 / 淘寶商品連結，AI 會自動爬取並改寫文案，完成後可在右側挑圖、編輯文案、確認上架資料。')">ⓘ 如何使用</div>
+      <div class="topbar-actions">
+        <a class="btn-ghost" href="/admin/products/store-scan?key={{ key }}">店鋪選品</a>
+        <button class="btn-ghost" onclick="toggleExportFlyout()">匯出記錄</button>
+        <div class="export-flyout" id="exportFlyout">
+          <a href="/api/products/export?format=xlsx&key={{ key }}">⬇ 匯出 Excel</a>
+          <a href="/api/products/export?format=csv&key={{ key }}">⬇ 匯出 CSV</a>
+        </div>
+        <button class="btn-dark" onclick="document.getElementById('urlInput').scrollIntoView({behavior:'smooth'});document.getElementById('urlInput').focus()">＋ 新增搬運任務</button>
+      </div>
+    </div>
+
+    <div class="content-wrap">
+      <div class="stat-row" id="statRow">
+        <div class="stat-card"><div class="stat-num" id="stat_today">0</div><div class="stat-label">今日處理</div></div>
+        <div class="stat-card"><div class="stat-num" id="stat_pickimg">0</div><div class="stat-label">待挑圖</div></div>
+        <div class="stat-card"><div class="stat-num" id="stat_review">0</div><div class="stat-label">待審核</div></div>
+        <div class="stat-card"><div class="stat-num" id="stat_publish">0</div><div class="stat-label">待上架</div></div>
+        <div class="stat-card"><div class="stat-num" id="stat_done">0</div><div class="stat-label">已完成</div></div>
+        <div class="stat-card"><div class="stat-num" id="stat_failed">0</div><div class="stat-label">失敗</div></div>
+      </div>
+
+      <div class="content-grid">
+        <div class="list-col">
+          <div class="card">
+            <h3>新增商品任務</h3>
+            <textarea class="url-ta" id="urlInput" placeholder="https://detail.1688.com/offer/xxx.html&#10;https://item.taobao.com/item.htm?id=xxx&#10;（一行一個連結）"></textarea>
+            <div style="margin-top:8px">
+              <select id="brandSel" class="brand-sel">
+                <option value="">不指定品牌（通用風格）</option>
+                <option value="jsimple">JSIMPLE — 高架床 / 家具</option>
+                <option value="lander">朗德燈具 — 燈具 / 照明</option>
+                <option value="filterbreath">濾呼吸 — 空氣濾網</option>
+                <option value="chengguang">澄光窗簾 — 窗簾 / 遮光簾</option>
+              </select>
+            </div>
+            <div class="batch-hint" id="batchHint"></div>
+            <div class="progress-bar-wrap" id="progressWrap"><div class="progress-bar" id="progressBar" style="width:0%"></div></div>
+            <div style="margin-top:10px;display:flex;gap:10px;align-items:center">
+              <button class="btn-primary" id="addBtn" onclick="submitUrl()">開始搬運</button>
+            </div>
+            <div class="err-msg" id="addErr"></div>
+          </div>
+
+          <div class="filter-row">
+            <button class="fbtn active" onclick="setFilter('all',this)">全部</button>
+            <button class="fbtn" onclick="setFilter('done',this)">完成</button>
+            <button class="fbtn" onclick="setFilter('error',this)">失敗</button>
+            <button class="fbtn" onclick="setFilter('processing',this)">進行中</button>
+          </div>
+
+          <div id="jobList"></div>
+          <div id="emptyMsg" class="empty hidden">還沒有任務，貼上連結開始搬運</div>
+        </div>
+
+        <div class="detail-col" id="detailCol">
+          <div class="detail-empty" id="detailEmpty">👈 點選左側商品查看詳情</div>
+        </div>
+      </div>
+    </div>
+  </div>
 </div>
-
-<!-- Main area -->
-<div class="main-area">
-
-  <!-- Top bar -->
-  <div class="top-bar">
-    <div class="url-input-row">
-      <textarea class="url-ta" id="urlInput" placeholder="貼上商品連結（一行一個，支援 1688 / 淘寶）"></textarea>
-      <select id="brandSel" class="brand-sel">
-        <option value="">不指定品牌</option>
-        <option value="jsimple">JSIMPLE</option>
-        <option value="lander">朗德燈具</option>
-        <option value="filterbreath">濾呼吸</option>
-        <option value="chengguang">澄光窗簾</option>
-      </select>
-      <button class="btn-primary" id="addBtn" onclick="submitUrl()">開始搬運</button>
-    </div>
-    <div class="err-msg" id="addErr"></div>
-    <div class="batch-hint" id="batchHint"></div>
-    <div class="progress-bar-wrap" id="progressWrap"><div class="progress-bar" id="progressBar" style="width:0%"></div></div>
-    <div class="stats-row">
-      <div class="stat-card c-today" onclick="setStatFilter('today',this)"><span class="stat-num" id="st_today">-</span><span class="stat-lbl">今日搬運</span></div>
-      <div class="stat-card c-wait" onclick="setStatFilter('pending_img',this)"><span class="stat-num" id="st_pending_img">-</span><span class="stat-lbl">待挑圖</span></div>
-      <div class="stat-card c-review" onclick="setStatFilter('review',this)"><span class="stat-num" id="st_review">-</span><span class="stat-lbl">待審核</span></div>
-      <div class="stat-card c-list" onclick="setStatFilter('listing',this)"><span class="stat-num" id="st_listing">-</span><span class="stat-lbl">待上架</span></div>
-      <div class="stat-card c-done" onclick="setStatFilter('listed',this)"><span class="stat-num" id="st_listed">-</span><span class="stat-lbl">已上架</span></div>
-      <div class="stat-card c-error" onclick="setStatFilter('error',this)"><span class="stat-num" id="st_error">-</span><span class="stat-lbl">失敗</span></div>
-    </div>
-  </div>
-
-  <!-- Two-column content -->
-  <div class="content-area">
-
-    <!-- List panel -->
-    <div class="list-panel">
-      <div class="list-hd">
-        <div class="filter-row">
-          <button class="fbtn active" onclick="setFilter('all',this)">全部</button>
-          <button class="fbtn" onclick="setFilter('done',this)">完成</button>
-          <button class="fbtn" onclick="setFilter('error',this)">失敗</button>
-          <button class="fbtn" onclick="setFilter('processing',this)">進行中</button>
-        </div>
-      </div>
-      <div class="list-scroll" id="jobList"></div>
-      <div id="emptyMsg" class="empty hidden">還沒有任務，貼上連結開始</div>
-    </div>
-
-    <!-- Detail panel -->
-    <div class="detail-panel" id="detailPanel">
-      <div class="detail-empty-wrap" id="detailEmpty">
-        <div style="font-size:36px;opacity:.3">◀</div>
-        <div style="font-size:14px">點擊左側商品查看詳情</div>
-      </div>
-      <div id="detailContent" style="display:none;flex-direction:column;height:100%">
-        <div class="detail-hd">
-          <div class="detail-title" id="detailTitle">商品詳情</div>
-        </div>
-        <div id="detailTabNav"></div>
-        <div class="detail-body" id="detailBody"></div>
-      </div>
-    </div>
-
-  </div><!-- content-area -->
-</div><!-- main-area -->
-</div><!-- app -->
 
 <div class="toast" id="toast"></div>
 
@@ -1745,40 +1790,35 @@ async function loadJobs(){
   }catch(e){console.error(e)}
 }
 
-async function loadStats(){
-  try{
-    const d = await api("/api/products/stats");
-    document.getElementById("st_today").textContent = d.today||0;
-    document.getElementById("st_pending_img").textContent = d.pending_img||0;
-    document.getElementById("st_review").textContent = d.review||0;
-    document.getElementById("st_listing").textContent = d.listing||0;
-    document.getElementById("st_listed").textContent = d.listed||0;
-    document.getElementById("st_error").textContent = d.error||0;
-  }catch(e){}
-}
-
 function schedulePoll(){
   clearTimeout(pollTimer);
   const active = jobs.some(j=>["pending","scraping","rewriting"].includes(j.status));
-  pollTimer = setTimeout(()=>{loadJobs();loadStats();}, active ? 2500 : 10000);
+  pollTimer = setTimeout(loadJobs, active ? 2500 : 8000);
+}
+
+function updateStats(){
+  const todayStr = new Date().toDateString();
+  const today = jobs.filter(j=>j.created_at && new Date(j.created_at*1000).toDateString()===todayStr).length;
+  const pickImg = jobs.filter(j=>j.status==="done" && (!j.img_status || j.img_status==="pending_images")).length;
+  const review = jobs.filter(j=>j.listing_status==="待審核").length;
+  const publish = jobs.filter(j=>j.listing_status==="待上架").length;
+  const done = jobs.filter(j=>j.status==="done").length;
+  const failed = jobs.filter(j=>j.status==="error").length;
+  document.getElementById("stat_today").textContent = today;
+  document.getElementById("stat_pickimg").textContent = pickImg;
+  document.getElementById("stat_review").textContent = review;
+  document.getElementById("stat_publish").textContent = publish;
+  document.getElementById("stat_done").textContent = done;
+  document.getElementById("stat_failed").textContent = failed;
 }
 
 function render(){
   const list = document.getElementById("jobList");
   const empty = document.getElementById("emptyMsg");
+  updateStats();
   const filtered = jobs.filter(j=>{
     if(filter==="all") return true;
     if(filter==="processing") return ["pending","scraping","rewriting"].includes(j.status);
-    if(filter==="done") return j.status==="done";
-    if(filter==="error") return j.status==="error";
-    if(filter==="today"){
-      const today=new Date();today.setHours(0,0,0,0);
-      return j.created_at*1000>=today.getTime()&&j.status==="done";
-    }
-    if(filter==="pending_img") return j.status==="done"&&!j.main_image;
-    if(filter==="review") return j.listing_status==="待審核";
-    if(filter==="listing") return j.listing_status==="草稿"&&j.status==="done";
-    if(filter==="listed") return j.listing_status==="上架中";
     return j.status===filter;
   });
   if(!filtered.length){ list.innerHTML=""; empty.classList.remove("hidden"); return; }
@@ -1788,40 +1828,40 @@ function render(){
 
 function jobCard(j){
   const pfLabel = {1688:"1688",taobao:"淘寶"}[j.platform]||j.platform;
-  const stLabel = {pending:"等待",scraping:"爬取中",rewriting:"改寫中",done:"完成",error:"失敗"}[j.status]||j.status;
+  const stLabel = {pending:"等待 Worker",scraping:"爬取中",rewriting:"改寫中",done:"完成",error:"失敗"}[j.status]||j.status;
   const isActive = ["pending","scraping","rewriting"].includes(j.status);
   const spin = isActive ? '<span class="spinner"></span>' : "";
   const brandLabel = {jsimple:"JSIMPLE",lander:"朗德",filterbreath:"濾呼吸",chengguang:"澄光"}[j.brand]||"";
   const brandBadge = brandLabel ? `<span class="brand-badge">${brandLabel}</span>` : "";
   const title = esc(j.ai_name||j.raw_title||j.url);
-  const urlShort = j.url.length>55 ? j.url.slice(0,55)+"…" : j.url;
+  const urlShort = j.url.length>50 ? j.url.slice(0,50)+"…" : j.url;
   const ts = j.created_at ? new Date(j.created_at*1000).toLocaleString("zh-TW",{month:"2-digit",day:"2-digit",hour:"2-digit",minute:"2-digit"}) : "";
-  const sel = openId===j.id ? " selected" : "";
-  return `<div class="job${sel}" id="jcard_${j.id}" onclick="openJob(${j.id})">
-    <div class="job-top">
-      <span class="badge pf-${j.platform}">${pfLabel}</span>
-      <span class="badge st-${j.status}">${spin}${stLabel}</span>
-      ${brandBadge}
+  const thumbSrc = j.main_image || (j.raw_images&&j.raw_images[0]) || "";
+  const thumb = thumbSrc ? `<img class="job-thumb" src="${esc(thumbSrc)}" loading="lazy" onerror="this.replaceWith(Object.assign(document.createElement('div'),{className:'job-thumb',textContent:'🖼'}))">` : `<div class="job-thumb">🖼</div>`;
+  const imgCount = (j.raw_images||[]).length;
+  return `<div class="job${_curJobId===j.id?' active':''}" onclick="openJob(${j.id})">
+    ${thumb}
+    <div class="job-main">
+      <div class="job-top">
+        <span class="badge pf-${j.platform}">${pfLabel}</span>
+        <span class="badge st-${j.status}">${spin}${stLabel}</span>
+        ${brandBadge}
+        <button class="del-btn" onclick="delJob(event,${j.id})" title="刪除">×</button>
+      </div>
       <div class="job-title">${title}</div>
-      <button class="del-btn" onclick="delJob(event,${j.id})" title="刪除">×</button>
+      <div class="job-url">${esc(urlShort)}</div>
+      <div class="job-foot">
+        ${ts?`<span class="job-time">${ts}</span>`:""}
+        ${imgCount?`<span class="job-imgcount">已選 ${imgCount} 張</span>`:""}
+      </div>
     </div>
-    <div class="job-url">${esc(urlShort)}</div>
-    ${ts?`<div class="job-time">${ts}</div>`:""}
   </div>`;
 }
 
 function setFilter(f,btn){
   filter=f;
   document.querySelectorAll(".fbtn").forEach(b=>b.classList.remove("active"));
-  if(btn) btn.classList.add("active");
-  render();
-}
-
-function setStatFilter(f,card){
-  filter=f;
-  document.querySelectorAll(".fbtn").forEach(b=>b.classList.remove("active"));
-  document.querySelectorAll(".stat-card").forEach(c=>c.classList.remove("active"));
-  card.classList.add("active");
+  btn.classList.add("active");
   render();
 }
 
@@ -1857,62 +1897,85 @@ async function submitUrl(){
   setTimeout(()=>{pWrap.style.display="none"; hint.textContent="";},4000);
 }
 
+function navStub(name){
+  toast(name+" 敬請期待");
+}
+function toggleExportFlyout(){
+  document.getElementById("exportFlyout").classList.toggle("show");
+}
+document.addEventListener("click", e=>{
+  const fly=document.getElementById("exportFlyout");
+  if(fly && !fly.contains(e.target) && !e.target.closest("[onclick='toggleExportFlyout()']")) fly.classList.remove("show");
+});
+
 async function openJob(id){
   openId=id;
-  document.querySelectorAll(".job").forEach(c=>c.classList.toggle("selected",c.id==="jcard_"+id));
-  document.getElementById("detailEmpty").style.display="none";
-  const dc=document.getElementById("detailContent");
-  dc.style.display="flex";
-  document.getElementById("detailBody").innerHTML='<div style="text-align:center;padding:40px"><span class="spinner" style="width:18px;height:18px"></span></div>';
-  document.getElementById("detailTabNav").innerHTML="";
-  document.getElementById("detailTitle").textContent="載入中...";
+  document.querySelectorAll(".job").forEach(el=>el.classList.remove("active"));
+  const card=[...document.querySelectorAll(".job")].find(el=>el.getAttribute("onclick")===`openJob(${id})`);
+  if(card) card.classList.add("active");
+  const detail=document.getElementById("detailCol");
+  detail.innerHTML='<div style="text-align:center;padding:60px"><span class="spinner" style="width:18px;height:18px"></span></div>';
   try{
     const j=await api("/api/products/"+id);
     renderDetail(j);
-  }catch(e){document.getElementById("detailBody").innerHTML='<div style="padding:16px"><div class="err-box">載入失敗</div></div>';}
+  }catch(e){detail.innerHTML='<div class="err-box" style="margin:20px">載入失敗</div>';}
 }
 
 const BRAND_LABELS = {jsimple:"JSIMPLE",lander:"朗德燈具",filterbreath:"濾呼吸",chengguang:"澄光窗簾"};
 let _curJob = null;
 
+function detailHd(j){
+  const stLabel = {pending:"等待 Worker",scraping:"爬取中",rewriting:"改寫中",done:"完成",error:"失敗"}[j.status]||j.status;
+  return `<div class="detail-hd">
+    <div style="min-width:0;flex:1">
+      <div class="detail-hd-title">${esc(j.ai_name||j.raw_title||"商品詳情")}</div>
+      <div class="detail-hd-meta"><span class="badge st-${j.status}">${stLabel}</span> &nbsp;<a href="${esc(j.url)}" target="_blank" style="color:#9b9fc0">來源連結 ↗</a></div>
+    </div>
+    <div class="detail-actions">
+      <button class="icon-btn" onclick="openJob(${j.id})" title="重新整理">↻</button>
+      <button class="icon-btn danger" onclick="delJob(event,${j.id})" title="刪除">🗑</button>
+    </div>
+  </div>`;
+}
+
 function renderDetail(j){
-  document.getElementById("detailTitle").textContent = j.ai_name||j.raw_title||"商品詳情";
-  document.getElementById("detailEmpty").style.display="none";
-  document.getElementById("detailContent").style.display="flex";
   if(j.status==="error"){
-    document.getElementById("detailTabNav").innerHTML="";
-    let h=`<div style="padding:16px"><div class="err-box">${esc(j.error_msg||"未知錯誤")}</div>`;
+    let h=detailHd(j)+`<div class="detail-body"><div class="err-box">${esc(j.error_msg||"未知錯誤")}</div>`;
     if(j.raw_title) h+=`<div class="section"><div class="slabel">原始標題</div><div class="rbox">${esc(j.raw_title)}</div></div>`;
-    h+="</div>";
-    document.getElementById("detailBody").innerHTML=h; return;
+    h+=`</div>`;
+    document.getElementById("detailCol").innerHTML=h; return;
   }
   if(["pending","scraping","rewriting"].includes(j.status)){
     const msg={pending:"等待爬取...",scraping:"正在爬取商品資料...",rewriting:"AI 正在改寫文案，請稍候..."};
-    document.getElementById("detailTabNav").innerHTML="";
-    document.getElementById("detailBody").innerHTML=`<div style="text-align:center;padding:30px;color:#888"><span class="spinner" style="width:16px;height:16px;border-top-color:#555"></span> ${msg[j.status]}</div>`;
+    document.getElementById("detailCol").innerHTML = detailHd(j) + `<div style="text-align:center;padding:30px;color:#888"><span class="spinner" style="width:16px;height:16px;border-top-color:#555"></span> ${msg[j.status]}</div>`;
     if(openId===j.id) setTimeout(()=>{if(openId===j.id)openJob(j.id);},2000);
     return;
   }
-  _curJob=j; _curJobId=j.id; _curMainImage=j.main_image||"";
-  document.getElementById("detailTabNav").innerHTML=`<div class="tab-nav">
+  _curJob = j;
+  _curJobId = j.id;
+  _curMainImage = j.main_image || "";
+  const tabNav = `<div class="tab-nav">
     <button class="tab-btn" data-tab="tab1" onclick="switchModalTab('tab1')">商品資訊</button>
     <button class="tab-btn" data-tab="tab2" onclick="switchModalTab('tab2')">圖片中心</button>
     <button class="tab-btn" data-tab="tab3" onclick="switchModalTab('tab3')">AI 商品分析</button>
     <button class="tab-btn" data-tab="tab4" onclick="switchModalTab('tab4')">SEO / FAQ</button>
     <button class="tab-btn" data-tab="tab5" onclick="switchModalTab('tab5')">上架資料</button>
   </div>`;
-  document.getElementById("detailBody").innerHTML=`<div id="panel_tab1" class="tab-panel">${tab1Html(j)}</div>
-    <div id="panel_tab2" class="tab-panel">${tab2Html(j)}</div>
-    <div id="panel_tab3" class="tab-panel">${tab3Html(j)}</div>
-    <div id="panel_tab4" class="tab-panel">${tab4Html(j)}</div>
-    <div id="panel_tab5" class="tab-panel">${tab5Html(j)}</div>`;
+  const body = `<div class="detail-body">
+    <div class="tab-panel" id="panel_tab1">${tab1Html(j)}</div>
+    <div class="tab-panel" id="panel_tab2">${tab2Html(j)}</div>
+    <div class="tab-panel" id="panel_tab3">${tab3Html(j)}</div>
+    <div class="tab-panel" id="panel_tab4">${tab4Html(j)}</div>
+    <div class="tab-panel" id="panel_tab5">${tab5Html(j)}</div>
+  </div>`;
+  document.getElementById("detailCol").innerHTML = detailHd(j) + tabNav + body;
   switchModalTab(_curTab);
 }
 
 function switchModalTab(name){
-  _curTab=name;
-  document.querySelectorAll(".tab-btn").forEach(b=>b.classList.toggle("active",b.dataset.tab===name));
-  document.querySelectorAll(".tab-panel").forEach(p=>p.classList.toggle("active",p.id==="panel_"+name));
+  _curTab = name;
+  document.querySelectorAll(".tab-btn").forEach(b=>b.classList.toggle("active", b.dataset.tab===name));
+  document.querySelectorAll(".tab-panel").forEach(p=>p.classList.toggle("active", p.id==="panel_"+name));
 }
 
 function tab1Html(j){
@@ -1927,19 +1990,39 @@ function tab1Html(j){
       <div class="compare-field"><label>原始標題</label><div class="static-val">${esc(j.raw_title||"（無）")}</div></div>
       <div class="compare-field"><label>原始價格</label><div class="static-val">${esc(j.raw_price||"（無）")}</div></div>
       <div class="compare-field"><label>原始規格</label><div class="static-val">${specsHtml}</div></div>
-      <div class="compare-field"><label>多規格價格</label><div class="static-val">${skuPricesHtml}</div></div>
       <div class="compare-field"><label>來源網址</label><div class="static-val" style="word-break:break-all"><a href="${esc(j.url)}" target="_blank" style="color:#1a73e8">${esc(j.url)}</a></div></div>
     </div>
     <div>
       <div class="compare-col-hd">台灣版商品</div>
       <div class="compare-field"><label>商品名稱</label><input type="text" id="t1_name" value="${esc(j.ai_name||"")}"></div>
       <div class="compare-field"><label>品牌</label><select id="t1_brand">${brandOpts}</select></div>
-      <div class="compare-field"><label>建議售價</label><div style="display:flex;gap:8px"><input type="text" id="t1_price_min" placeholder="下限" value="${esc(j.price_min||"")}"><input type="text" id="t1_price_max" placeholder="上限" value="${esc(j.price_max||"")}"></div></div>
+      <div class="compare-field"><label>建議售價</label><div style="display:flex;gap:8px"><input type="text" id="t1_price_min" placeholder="下限" value="${esc(j.price_min||"")}"><input type="text" id="t1_price_max" placeholder="上限" value="${esc(j.price_max||"")}"></div>
+        <div style="display:flex;gap:6px;margin-top:6px;align-items:center">
+          <input type="text" id="t1_mult" placeholder="乘數，例如 4.3" style="width:110px;border:1.5px solid #ddd;border-radius:8px;padding:7px 10px;font-size:13px">
+          <button type="button" class="sel-btn" onclick="applyMultiplier(${j.id})">用原始價格 × 乘數 換算</button>
+        </div>
+      </div>
+      <div class="compare-field"><label>多規格價格</label><div class="static-val" style="max-height:220px;overflow-y:auto">${skuPricesHtml}</div></div>
       <div class="compare-field"><label>商品分類</label><input type="text" id="t1_category" value="${esc(j.category||"")}"></div>
-      <div class="compare-field"><label>狀態</label><select id="t1_status">${["草稿","待審核","上架中","已下架"].map(s=>`<option${j.listing_status===s?" selected":""}>${s}</option>`).join("")}</select></div>
+      <div class="compare-field"><label>狀態</label><select id="t1_status">${["草稿","待審核","待上架","上架中","已下架"].map(s=>`<option${j.listing_status===s?" selected":""}>${s}</option>`).join("")}</select></div>
       <button class="btn-save" onclick="saveTab1(${j.id})">儲存</button>
     </div>
   </div>`;
+}
+
+function applyMultiplier(id){
+  const mult = parseFloat(document.getElementById("t1_mult").value);
+  if(!mult || mult<=0){toast("請輸入有效的乘數");return;}
+  const raw = (_curJob && _curJob.raw_price) || "";
+  const skuPrices = (_curJob && _curJob.raw_extra && _curJob.raw_extra.sku_prices) || [];
+  let nums = skuPrices.map(p=>parseFloat(p.price)).filter(n=>!isNaN(n) && n>0);
+  if(!nums.length) nums = (raw.match(/[\\d.]+/g)||[]).map(Number).filter(n=>n>0);
+  if(!nums.length){toast("沒有原始價格可供換算");return;}
+  const lo = Math.round(Math.min(...nums)*mult);
+  const hi = Math.round(Math.max(...nums)*mult);
+  document.getElementById("t1_price_min").value = lo;
+  document.getElementById("t1_price_max").value = hi;
+  toast(`已套用乘數 ${mult}：NT$ ${lo}${hi!==lo?" ~ "+hi:""}（記得按儲存）`);
 }
 
 async function saveTab1(id){
@@ -1961,15 +2044,17 @@ function tab2Html(j){
   const mainImgs   = pi.main_images   || [];
   const detailImgs = pi.detail_images || [];
   const skuImgs    = pi.sku_images    || [];
+  const reviewImgs = pi.review_images || [];
   const videoUrls  = pi.video_urls    || [];
   _selImgs = new Set(j.raw_images || []);
   _lbImgs = [];
   const _addLb = (srcs, labels, cat) => srcs.forEach((s,i) => _lbImgs.push({src:s, label:labels&&labels[i]?labels[i]:cat, cat}));
+
+  // ── 1. 原圖：依分類分區顯示（主圖/SKU/詳情/評價），各自可全選/取消 ──
   const mainSrcs = mainImgs.length ? mainImgs.map(i=>typeof i==='object'?i.src:i) : (j.raw_images||[]);
+  const origCount = mainSrcs.length + skuImgs.length + detailImgs.length + reviewImgs.length;
+  h += `<div class="compare-col-hd">原圖（${origCount} 張）</div>`;
   if(mainSrcs.length){_addLb(mainSrcs,[],"主圖");h+=imgCatHtml("main","主圖",mainSrcs,[]);}
-  if(videoUrls.length){
-    h+=`<div class="section"><div class="slabel">影片（${videoUrls.length} 個）</div><div>${videoUrls.map(v=>`<a href="${esc(v)}" target="_blank" style="font-size:12px;display:block;margin:2px 0;color:#1a73e8;word-break:break-all">${esc(v.slice(0,80))}</a>`).join("")}</div></div>`;
-  }
   if(skuImgs.length){
     const srcs=skuImgs.map(i=>typeof i==='object'?i.src:i);
     const labels=skuImgs.map(i=>typeof i==='object'?(i.label||''):'');
@@ -1981,17 +2066,18 @@ function tab2Html(j){
     _addLb(srcs,[],"詳情");
     h+=imgCatHtml("detail","詳情圖",srcs,[]);
   }
-  const reviewImgs=pi.review_images||[];
   if(reviewImgs.length){
-    const rvSrcs=reviewImgs.map(i=>typeof i==='object'?i.src:i);
-    _addLb(rvSrcs,[],"評價圖");
-    h+=imgCatHtml("review","買家評價圖",rvSrcs,[]);
+    const srcs=reviewImgs.map(i=>typeof i==='object'?i.src:i);
+    _addLb(srcs,[],"評價圖");
+    h+=imgCatHtml("review","買家評價圖",srcs,[]);
   }
-  if(j.processed_images&&j.processed_images.length){
-    const zipUrl=`/api/products/${j.id}/images/zip?key=${KEY}`;
-    h+=`<div class="section"><div class="slabel" style="display:flex;align-items:center;gap:8px">已處理圖片（白底，${j.processed_images.length} 張）<a href="${zipUrl}" class="export-btn" style="font-size:11px">⬇ ZIP</a></div><div class="img-grid">${j.processed_images.map(img=>`<div class="img-thumb"><img src="${esc(img)}" loading="lazy" onerror="this.style.display='none'"></div>`).join("")}</div></div>`;
+  if(videoUrls.length){
+    h+=`<div class="section"><div class="slabel">影片（${videoUrls.length} 個）</div><div>${videoUrls.map(v=>`<a href="${esc(v)}" target="_blank" style="font-size:12px;display:block;margin:2px 0;color:#1a73e8;word-break:break-all">${esc(v.slice(0,80))}</a>`).join("")}</div></div>`;
   }
   h+=`<hr class="divider">`;
+
+  // ── 2. 翻譯圖 ──
+  h += `<div class="compare-col-hd">翻譯圖</div>`;
   const trImgs=j.translated_images||[];
   if(trImgs.length){
     h+=`<div class="translated-sec"><div class="slabel">翻譯完成（${trImgs.length} 張）</div>`
@@ -2006,6 +2092,9 @@ function tab2Html(j){
     if (!tImgs.length) return;
     h += `<div class="tr-type-sec"><div class="tr-type-label">翻譯圖（${trTypeMap[t]}，${tImgs.length} 張）</div><div class="img-grid">${tImgs.map((src,i)=>`<div class="img-thumb"><img src="${esc(src)}" loading="lazy" onerror="this.style.display='none'"><div class="thumb-actions"><a href="${esc(src)}" target="_blank" class="thumb-act">⬇</a><button class="thumb-act" onclick="event.stopPropagation();cp(this,'${esc(src)}')">📋</button></div></div>`).join("")}</div></div>`;
   });
+  if(!trImgs.length && !['main','detail','sku'].some(t=>(piTr['tr_'+t+'_images']||[]).length)){
+    h += `<div style="color:#bbb;font-size:13px;padding:6px 0">尚無翻譯圖片</div>`;
+  }
   h += `<div class="upload-tr-sec">
     <div class="slabel">上傳已翻譯圖片（客優雲翻譯後）</div>
     <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
@@ -2017,23 +2106,35 @@ function tab2Html(j){
       <label class="btn-upload-lbl" for="upFiles_${j.id}">選擇圖片</label>
       <input type="file" id="upFiles_${j.id}" multiple accept="image/*" style="display:none" onchange="prevUpload(${j.id})">
       <span id="upCount_${j.id}" style="font-size:12px;color:#666"></span>
-      <button class="btn-primary" id="upBtn_${j.id}" onclick="doUpload(${j.id})" disabled style="padding:6px 16px;font-size:13px">上傳</button>
+      <button class="btn-primary" id="upBtn_${j.id}" onclick="doUpload(${j.id})" disabled style="padding:6px 16px;font-size:13px;width:auto">上傳</button>
     </div>
     <div id="upPreview_${j.id}" class="img-grid" style="margin-top:8px;max-height:180px;overflow-y:auto"></div>
   </div>`;
+  h+=`<hr class="divider">`;
+
+  // ── 3. 白底圖 ──
+  h += `<div class="compare-col-hd">白底圖</div>`;
+  if(j.processed_images&&j.processed_images.length){
+    const zipUrl=`/api/products/${j.id}/images/zip?key=${KEY}`;
+    h+=`<div class="section"><div class="slabel" style="display:flex;align-items:center;gap:8px">已處理（白底，${j.processed_images.length} 張）<a href="${zipUrl}" class="export-btn" style="font-size:11px">⬇ ZIP</a></div><div class="img-grid">${j.processed_images.map(img=>`<div class="img-thumb"><img src="${esc(img)}" loading="lazy" onerror="this.style.display='none'"></div>`).join("")}</div></div>`;
+  } else {
+    h += `<div style="color:#bbb;font-size:13px;padding:6px 0">尚無白底圖，可在下方選取原圖後生成</div>`;
+  }
+
   h+=`<div class="sel-action-bar">
     <span class="sel-count" id="selCount">已選 ${_selImgs.size} 張</span>
+    <button class="sel-btn" onclick="toggleAllCats(true)">全選全部</button>
+    <button class="sel-btn" onclick="toggleAllCats(false)">取消全部</button>
     <button class="btn-translate" id="btnTr_${j.id}" onclick="translateSelected(${j.id})">文A 翻譯選取</button>
     <button class="sel-btn sel-btn-white" onclick="whitebgSelected(${j.id})">⬜ 生成白底圖</button>
-    <button class="sel-btn" style="background:#ede7f6;color:#4527a0" onclick="genSceneStub()">🖼 生成情境圖</button>
     <button class="btn-zip" onclick="downloadZipSelected(${j.id})">⬇ ZIP 下載</button>
     <button class="btn-confirm" onclick="confirmSelect(${j.id})">確認選圖</button>
   </div>`;
   return h;
 }
 
-function genSceneStub(){
-  toast("生成情境圖功能即將上線（UI 預覽）");
+function toggleAllCats(checked){
+  ['main','sku','detail','review'].forEach(catId=>toggleAllInCat(catId,checked));
 }
 
 async function whitebgSelected(id){
@@ -2048,57 +2149,50 @@ async function whitebgSelected(id){
 }
 
 function tab3Html(j){
+  const fixNl = (v) => String(v||"").replace(/\\r\\n|\\n/g, "\\n");
   const field = (label, id, val, multiline) => `<div class="copy-field">
     <div class="copy-field-hd"><div class="slabel">${label}</div><button class="copy-btn" style="position:static" onclick='cp(this,document.getElementById("${id}").value)'>複製</button></div>
-    ${multiline?`<textarea id="${id}" style="height:${multiline}px">${esc(val||"")}</textarea>`:`<input type="text" id="${id}" value="${esc(val||"")}">`}
+    ${multiline?`<textarea id="${id}" style="height:${multiline}px">${esc(fixNl(val))}</textarea>`:`<input type="text" id="${id}" value="${esc(val||"")}">`}
   </div>`;
 
-  // ── Pipeline 狀態區塊 ──────────────────────────────────────────
+  // ── Pipeline 狀態卡 ────────────────────────────────────────────
   const log = j.pipeline_log || "";
   const hasFail = log.includes("PIPELINE_FAIL:");
-
   let badge, badgeNote;
   if (j.pipeline_used) {
     badge = `<span style="background:#e8f5e9;color:#2e7d32;border-radius:6px;padding:2px 10px;font-size:12px;font-weight:600">Pipeline 成功</span>`;
     badgeNote = `<span style="font-size:12px;color:#888">5 階段分析完成</span>`;
   } else if (hasFail) {
-    const failLine = log.split('\n').find(l=>l.includes('PIPELINE_FAIL:')) || '';
-    const reason = failLine.replace('PIPELINE_FAIL:','').split('\n')[0].trim().slice(0,80);
+    const failLine = log.split('\\n').find(l=>l.includes('PIPELINE_FAIL:')) || '';
+    const reason = failLine.replace('PIPELINE_FAIL:','').trim().slice(0,70);
     badge = `<span style="background:#fff3e0;color:#e65100;border-radius:6px;padding:2px 10px;font-size:12px;font-weight:600">Fallback 舊版</span>`;
     badgeNote = `<span style="font-size:12px;color:#e65100" title="${esc(reason)}">${esc(reason.slice(0,50))}${reason.length>50?'…':''}</span>`;
   } else {
     badge = `<span style="background:#f5f5f5;color:#999;border-radius:6px;padding:2px 10px;font-size:12px">舊版生成</span>`;
     badgeNote = '';
   }
-
-  // pipeline_log 逐行解析，加色
   let logHtml = '';
   if (log.trim()) {
-    const lines = log.trim().split('\n').filter(l=>l.trim());
+    const lines = log.trim().split('\\n').filter(l=>l.trim());
     const logLines = lines.map(line => {
-      let color = '#555', bg = 'transparent';
-      if (/完成|Pipeline 全部/.test(line)) { color='#2e7d32'; }
-      else if (/失敗|FAIL|error/i.test(line)) { color='#c62828'; bg='#fff8f8'; }
-      else if (/開始|平行/.test(line))  { color='#1565c0'; }
-      return `<div style="padding:1px 4px;color:${color};background:${bg};border-radius:3px;font-size:11px;font-family:monospace">${esc(line)}</div>`;
+      let color = '#555';
+      if (/完成|Pipeline 全部/.test(line)) color = '#2e7d32';
+      else if (/失敗|FAIL/i.test(line))   color = '#c62828';
+      else if (/開始|平行/.test(line))     color = '#1565c0';
+      return `<div style="padding:1px 0;color:${color};font-size:11px;font-family:monospace">${esc(line)}</div>`;
     }).join('');
-    logHtml = `<details style="margin-top:6px">
-      <summary style="font-size:11px;color:#aaa;cursor:pointer;user-select:none">執行 log（${lines.length} 步）</summary>
-      <div style="background:#f8f8f8;border-radius:6px;padding:6px 8px;margin-top:4px;line-height:1.7">${logLines}</div>
-    </details>`;
+    logHtml = `<details style="margin-top:6px"><summary style="font-size:11px;color:#aaa;cursor:pointer">執行 log（${lines.length} 步）</summary>
+      <div style="background:#f8f8f8;border-radius:6px;padding:6px 8px;margin-top:4px;line-height:1.7">${logLines}</div></details>`;
   }
-
-  // 分析 JSON 卡片（摺疊）
   const jsonCard = (title, obj) => {
     if (!obj || !Object.keys(obj).length) return '';
     const rows = Object.entries(obj).map(([k,v]) => {
-      const val = Array.isArray(v) ? v.join('、') : (typeof v==='boolean' ? (v?'是':'否') : String(v));
-      return `<tr><td style="padding:3px 8px;color:#888;white-space:nowrap;vertical-align:top;width:120px">${esc(k)}</td><td style="padding:3px 8px">${esc(val)}</td></tr>`;
+      const val = Array.isArray(v) ? v.join('、') : (typeof v==='boolean'?(v?'是':'否'):String(v));
+      return `<tr><td style="padding:3px 8px;color:#888;white-space:nowrap;vertical-align:top;width:130px">${esc(k)}</td><td style="padding:3px 8px">${esc(val)}</td></tr>`;
     }).join('');
-    return `<details style="margin-bottom:8px;border:1px solid #eee;border-radius:8px;overflow:hidden">
-      <summary style="padding:7px 12px;cursor:pointer;background:#fafafa;font-size:12px;font-weight:600;color:#555">${title}</summary>
-      <table style="width:100%;font-size:12px;border-collapse:collapse">${rows}</table>
-    </details>`;
+    return `<details style="margin-bottom:7px;border:1px solid #eee;border-radius:8px;overflow:hidden">
+      <summary style="padding:6px 12px;cursor:pointer;background:#fafafa;font-size:12px;font-weight:600;color:#555">${title}</summary>
+      <table style="width:100%;font-size:12px;border-collapse:collapse">${rows}</table></details>`;
   };
 
   let h = `<div id="pipelineStatusBlock_${j.id}" style="background:#fafafa;border:1px solid #eee;border-radius:10px;padding:10px 14px;margin-bottom:14px">
@@ -2117,16 +2211,13 @@ function tab3Html(j){
   h += jsonCard("搜尋意圖（Stage 3）", j.search_intent_json);
   h += jsonCard("競品分析（Stage 4）", j.competitor_json);
 
-  h += `<div style="border-top:1px solid #eee;margin:12px 0"></div>`;
+  if (j.analysis_json && Object.keys(j.analysis_json).length) {
+    h += `<div style="border-top:1px solid #eee;margin:10px 0"></div>`;
+  }
   h += field("商品名稱","t3_name",j.ai_name);
-  h += field("蝦皮標題","t3_shopee",j.shopee_title);
-  h += field("官網商品名稱","t3_website",j.website_name);
   h += field("商品描述","t3_desc",j.ai_desc,180);
   h += field("商品特色","t3_features",j.features,100);
-  h += `<div class="copy-field">
-    <div class="copy-field-hd"><div class="slabel">建議售價區間</div></div>
-    <div style="display:flex;gap:8px"><input type="text" id="t3_price_min" placeholder="下限" value="${esc(j.price_min||"")}"><input type="text" id="t3_price_max" placeholder="上限" value="${esc(j.price_max||"")}"></div>
-  </div>`;
+  h += field("SEO 關鍵字（逗號分隔）","t3_kw",j.ai_keywords);
   h += `<div class="edit-bar">
     <button class="btn-save" onclick="saveTab3(${j.id})">儲存文案</button>
   </div>`;
@@ -2136,19 +2227,15 @@ function tab3Html(j){
 async function saveTab3(id){
   const body = {
     ai_name: document.getElementById("t3_name").value.trim(),
-    shopee_title: document.getElementById("t3_shopee").value.trim(),
-    website_name: document.getElementById("t3_website").value.trim(),
     ai_desc: document.getElementById("t3_desc").value.trim(),
     features: document.getElementById("t3_features").value.trim(),
-    price_min: document.getElementById("t3_price_min").value.trim(),
-    price_max: document.getElementById("t3_price_max").value.trim(),
+    ai_keywords: document.getElementById("t3_kw").value.trim(),
   };
   const r = await api("/api/products/"+id,{method:"PUT",body:JSON.stringify(body)});
   if(r.ok){toast("已儲存");openJob(id);} else toast("儲存失敗");
 }
 
 async function regenerateCopy(id, usePipeline){
-  // 鎖定兩個按鈕，顯示 loading 狀態
   const btnOld  = document.getElementById(`regenOld_${id}`);
   const btnPipe = document.getElementById(`regenPipe_${id}`);
   if(btnOld){btnOld.disabled=true;btnOld.textContent='...';}
@@ -2163,14 +2250,8 @@ async function regenerateCopy(id, usePipeline){
     if(btnPipe){btnPipe.disabled=false;btnPipe.textContent='✦ Pipeline';}
     return;
   }
-
-  // 狀態區塊顯示 spinner
   const statusBlock = document.getElementById(`pipelineStatusBlock_${id}`);
-  if(statusBlock){
-    statusBlock.innerHTML = `<div style="display:flex;align-items:center;gap:8px;color:#666;font-size:13px">
-      <span class="spinner"></span> ${esc(label)} 生成中，請稍候...
-    </div>`;
-  }
+  if(statusBlock) statusBlock.innerHTML = `<div style="display:flex;align-items:center;gap:8px;color:#666;font-size:13px"><span class="spinner"></span> ${esc(label)} 生成中，請稍候...</div>`;
   pollRegenerate(id, 0, usePipeline);
 }
 
@@ -2180,12 +2261,9 @@ async function pollRegenerate(id, tries, usePipeline){
   if(j.status === "done"){
     const label = usePipeline ? "Pipeline 分析完成" : "文案已更新";
     toast(label + " — 畫面已更新");
-    if(openId===id){
-      await openJob(id);   // 重新載入所有欄位
-      switchModalTab("tab3");  // 確保停在 AI 商品分析 tab
-    }
+    if(openId===id){await openJob(id);switchModalTab("tab3");}
   } else if(j.status === "error"){
-    toast("生成失敗：" + (j.error_msg || "未知錯誤"));
+    toast("生成失敗：" + (j.error_msg||"未知錯誤"));
     if(openId===id){await openJob(id);switchModalTab("tab3");}
   } else {
     setTimeout(()=>pollRegenerate(id, tries+1, usePipeline), 2000);
@@ -2201,10 +2279,6 @@ function tab4Html(j){
     <textarea placeholder="回答" class="faq-a">${esc(f.a||"")}</textarea>
   </div>`).join("");
   return `<div class="copy-field">
-    <div class="copy-field-hd"><div class="slabel">SEO 關鍵字（逗號分隔）</div><button class="copy-btn" style="position:static" onclick='cp(this,document.getElementById("t4_kw").value)'>複製</button></div>
-    <input type="text" id="t4_kw" value="${esc(j.ai_keywords||"")}">
-  </div>
-  <div class="copy-field">
     <div class="copy-field-hd"><div class="slabel">SEO 描述</div><button class="copy-btn" style="position:static" onclick='cp(this,document.getElementById("t4_seodesc").value)'>複製</button></div>
     <textarea id="t4_seodesc" style="height:70px">${esc(j.seo_desc||"")}</textarea>
   </div>
@@ -2227,18 +2301,42 @@ function removeFaqRow(i){
   if(el) el.remove();
 }
 async function saveTab4(id){
-  const kw=document.getElementById("t4_kw").value.trim();
   const seoDesc=document.getElementById("t4_seodesc").value.trim();
   const faq=[...document.querySelectorAll("#faqList .faq-item")].map(row=>({
     q: row.querySelector(".faq-q").value.trim(),
     a: row.querySelector(".faq-a").value.trim(),
   })).filter(f=>f.q||f.a);
-  const r=await api("/api/products/"+id,{method:"PUT",body:JSON.stringify({ai_keywords:kw,seo_desc:seoDesc,faq})});
+  const r=await api("/api/products/"+id,{method:"PUT",body:JSON.stringify({seo_desc:seoDesc,faq})});
+  if(r.ok){toast("已儲存");openJob(id);} else toast("儲存失敗");
+}
+
+async function saveTab5(id){
+  const body = {
+    shopee_title: document.getElementById("t5_shopee").value.trim(),
+    price_min: document.getElementById("t5_price_min").value.trim(),
+    price_max: document.getElementById("t5_price_max").value.trim(),
+    website_name: document.getElementById("t5_website").value.trim(),
+  };
+  const r = await api("/api/products/"+id,{method:"PUT",body:JSON.stringify(body)});
   if(r.ok){toast("已儲存");openJob(id);} else toast("儲存失敗");
 }
 
 function tab5Html(j){
   let h = `<div class="section"><div class="slabel">上架狀態</div><span class="status-pill">${esc(j.listing_status||"草稿")}</span></div>`;
+  h += `<div class="compare-col-hd">蝦皮資料</div>`;
+  h += `<div class="copy-field"><div class="slabel">蝦皮標題</div><input type="text" id="t5_shopee" value="${esc(j.shopee_title||"")}" placeholder="可手動填寫，或在 AI 文案分頁按重新生成"></div>`;
+  h += `<div class="copy-field"><div class="slabel">建議售價</div><div style="display:flex;gap:8px;align-items:center">NT$ <input type="text" id="t5_price_min" style="width:90px" value="${esc(j.price_min||"")}"> ~ <input type="text" id="t5_price_max" style="width:90px" value="${esc(j.price_max||"")}"></div></div>`;
+  h += `<div class="compare-col-hd" style="margin-top:18px">官網資料</div>`;
+  h += `<div class="copy-field"><div class="slabel">官網商品名稱</div><input type="text" id="t5_website" value="${esc(j.website_name||"")}" placeholder="可手動填寫，或在 AI 文案分頁按重新生成"></div>`;
+  h += `<div class="edit-bar"><button class="btn-save" onclick="saveTab5(${j.id})">儲存上架資料</button></div>`;
+  h += `<div class="compare-col-hd" style="margin-top:18px">匯出</div>`;
+  h += `<div class="section" style="display:flex;gap:8px">
+    <a class="export-btn" href="/api/products/export?format=xlsx&key=${KEY}">⬇ 匯出 Excel</a>
+    <a class="export-btn" href="/api/products/export?format=csv&key=${KEY}">⬇ 匯出 CSV</a>
+  </div>
+  <div style="font-size:12px;color:#bbb;margin-top:6px">目前匯出尚未串接蝦皮 / 官網實際上架，僅供資料整理使用。</div>`;
+  h += `<hr class="divider">`;
+  h += `<div class="compare-col-hd">原始資料</div>`;
   h += `<div class="section"><div class="slabel">平台 / 來源網址</div><div class="rbox">${esc(j.platform)} — <a href="${esc(j.url)}" target="_blank" style="color:#1a73e8;word-break:break-all">${esc(j.url)}</a></div></div>`;
   if(j.raw_title) h+=`<div class="section"><div class="slabel">原始標題</div><div class="rbox">${esc(j.raw_title)}</div></div>`;
   if(j.raw_price) h+=`<div class="section"><div class="slabel">原始價格（人民幣）</div><div class="rbox">¥ ${esc(j.raw_price)}</div></div>`;
@@ -2275,7 +2373,7 @@ function imgCatHtml(catId, label, srcs, labels){
       +`<button class="thumb-act" onclick="event.stopPropagation();setAsMain('${esc(src)}')" title="設為主圖">★</button>`
       +`</div></div>`;
   }).join("");
-  return `<div class="section" id="cat_${catId}"><div class="img-zone-hd"><div class="slabel">${label}（${srcs.length} 張）</div><button class="sel-btn" onclick="toggleAllInCat('${catId}',true)">全選</button><button class="sel-btn" onclick="toggleAllInCat('${catId}',false)">取消</button><button class="sel-btn sel-btn-green" onclick="translateCat('${catId}')">文A 翻譯此區</button><button class="sel-btn sel-btn-white" onclick="whitebgCat('${catId}',openId)">⬜ 生成白底圖</button></div><div class="img-grid">${thumbs}</div></div>`;
+  return `<div class="section" id="cat_${catId}"><div class="img-zone-hd"><div class="slabel">${label}（${srcs.length} 張）</div><button class="sel-btn" onclick="toggleAllInCat('${catId}',true)">全選</button><button class="sel-btn" onclick="toggleAllInCat('${catId}',false)">取消</button></div><div class="img-grid">${thumbs}</div></div>`;
 }
 async function setAsMain(url){
   const r=await api(`/api/products/${_curJobId}/set-main-image`,{method:"POST",body:JSON.stringify({url})});
@@ -2350,13 +2448,6 @@ document.addEventListener('keydown',e=>{
   else if(e.key==='ArrowRight') lbNext();
   else if(e.key==='Escape') lbClose();
 });
-async function translateCat(catId){
-  const el=document.getElementById('cat_'+catId);
-  if(!el) return;
-  const urls=[...el.querySelectorAll('.img-thumb input[type=checkbox]')].map(cb=>cb.dataset.url).filter(Boolean);
-  if(!urls.length){toast('此區沒有圖片');return;}
-  await _doTranslate(_curJobId,urls);
-}
 async function translateSelected(id){
   const urls=[..._selImgs];
   await _doTranslate(id,urls);
@@ -2373,23 +2464,6 @@ async function _doTranslate(id,urls){
     toast('翻譯失敗：'+(r.error||''));
     if(btn){btn.disabled=false;btn.textContent='文A 翻譯選取';}
   }
-}
-async function whitebgCat(catId, id){
-  if(!id){toast('請先開啟商品');return;}
-  const el=document.getElementById('cat_'+catId);
-  if(!el) return;
-  const checked=[...el.querySelectorAll('.img-thumb input[type=checkbox]:checked')].map(cb=>cb.dataset.url).filter(Boolean);
-  const all=[...el.querySelectorAll('.img-thumb input[type=checkbox]')].map(cb=>cb.dataset.url).filter(Boolean);
-  const urls=checked.length?checked:all;
-  if(!urls.length){toast('此區沒有圖片');return;}
-  toast('送出 '+urls.length+' 張，處理中...');
-  try{
-    const r=await api('/api/products/'+id+'/whitebg-selected',{method:'POST',body:JSON.stringify({urls}),headers:{'Content-Type':'application/json'}});
-    if(r.ok){
-      toast('白底圖處理中（'+r.count+' 張）...');
-      pollWhitebg(id, 0);
-    } else { toast('失敗：'+(r.error||'')); }
-  }catch(e){ toast('錯誤：'+e.message); }
 }
 async function pollWhitebg(id, tries){
   if(tries>20){toast('白底圖處理超時，請至 Render log 查看錯誤');return;}
@@ -2477,19 +2551,15 @@ async function doUpload(id){
   }catch(e){ toast('錯誤：'+e.message); }
   finally{ btn.disabled=false; btn.textContent='上傳'; }
 }
-function closeDetail(){
-  openId=null;
-  document.querySelectorAll(".job").forEach(c=>c.classList.remove("selected"));
-  document.getElementById("detailEmpty").style.display="flex";
-  document.getElementById("detailContent").style.display="none";
-}
-
 async function delJob(e,id){
   e.stopPropagation();
   if(!confirm("確定刪除這筆任務？"))return;
   await api("/api/products/"+id,{method:"DELETE"});
   jobs=jobs.filter(j=>j.id!==id);
-  if(openId===id) closeDetail();
+  if(openId===id){
+    openId=null;
+    document.getElementById("detailCol").innerHTML='<div class="detail-empty" id="detailEmpty">👈 點選左側商品查看詳情</div>';
+  }
   render();
   toast("已刪除");
 }
@@ -2509,9 +2579,8 @@ function toast(msg){
 }
 function esc(s){return String(s||"").replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");}
 
-document.getElementById("urlInput").addEventListener("keydown",e=>{if(e.key==="Enter"&&!e.shiftKey){e.preventDefault();submitUrl();}});
+document.getElementById("urlInput").addEventListener("keydown",e=>{if(e.key==="Enter")submitUrl();});
 loadJobs();
-loadStats();
 </script>
 <div id="lbBox" class="lb-overlay hidden" onclick="lbClose()">
   <button class="lb-close" onclick="lbClose()">✕</button>
@@ -2715,7 +2784,7 @@ def api_products_add():
         return jsonify({"error": "請提供商品連結"}), 400
     platform = _detect_platform(url)
     if platform == "unknown":
-        return jsonify({"error": "目前只支援 1688 和 淘寶 連結"}), 400
+        return jsonify({"error": "目前只支援 1688、淘寶、天貓 連結"}), 400
     brand = (data.get("brand") or "").strip()
     job_id = _pj_insert(url, platform, brand)
     if not job_id:
@@ -2728,37 +2797,6 @@ def api_products_list():
     if not ok:
         return jsonify({"error": "unauthorized"}), 403
     return jsonify({"jobs": _pj_list(50)})
-
-@products_bp.route("/api/products/stats", methods=["GET"])
-def api_products_stats():
-    ok, _ = auth_required()
-    if not ok:
-        return jsonify({"error": "unauthorized"}), 403
-    if not DATABASE_URL:
-        return jsonify({"today":0,"pending_img":0,"review":0,"listing":0,"listed":0,"error":0})
-    try:
-        import time as _t
-        from datetime import datetime as _dt
-        midnight = _dt.now().replace(hour=0, minute=0, second=0, microsecond=0)
-        today_ts = int(midnight.timestamp())
-        conn = _pg_conn(); cur = conn.cursor()
-        cur.execute("SELECT COUNT(*) FROM product_jobs WHERE status='done' AND created_at>=%s", (today_ts,))
-        today = cur.fetchone()[0]
-        cur.execute("SELECT COUNT(*) FROM product_jobs WHERE status='done' AND (main_image IS NULL OR main_image='')")
-        pending_img = cur.fetchone()[0]
-        cur.execute("SELECT COUNT(*) FROM product_jobs WHERE COALESCE(listing_status,'草稿')='待審核'")
-        review = cur.fetchone()[0]
-        cur.execute("SELECT COUNT(*) FROM product_jobs WHERE COALESCE(listing_status,'草稿')='草稿' AND status='done'")
-        listing = cur.fetchone()[0]
-        cur.execute("SELECT COUNT(*) FROM product_jobs WHERE COALESCE(listing_status,'')='上架中'")
-        listed = cur.fetchone()[0]
-        cur.execute("SELECT COUNT(*) FROM product_jobs WHERE status='error'")
-        error = cur.fetchone()[0]
-        cur.close(); conn.close()
-        return jsonify({"today":today,"pending_img":pending_img,"review":review,"listing":listing,"listed":listed,"error":error})
-    except Exception as e:
-        import sys; print(f"[stats] {e}", file=sys.stderr)
-        return jsonify({"today":0,"pending_img":0,"review":0,"listing":0,"listed":0,"error":0})
 
 @products_bp.route("/api/products/<int:job_id>", methods=["GET"])
 def api_products_get(job_id):
@@ -2815,7 +2853,6 @@ def api_products_regenerate_copy(job_id):
         return jsonify({"error": "not found"}), 404
     if not job.get("raw_title") and not job.get("raw_desc"):
         return jsonify({"error": "尚無原始商品資料，無法生成文案"}), 400
-    # use_pipeline 可由 query param 或 body 傳入
     data = request.get_json(silent=True) or {}
     up_param = request.args.get("use_pipeline") or data.get("use_pipeline")
     use_pipeline = None
@@ -3664,7 +3701,7 @@ def api_store_scan_create():
         return jsonify({"error": "請提供店鋪/分類頁連結"}), 400
     platform = _detect_platform(url)
     if platform == "unknown":
-        return jsonify({"error": "目前只支援 1688 和 淘寶 連結"}), 400
+        return jsonify({"error": "目前只支援 1688、淘寶、天貓 連結"}), 400
     job_id = _ss_insert(url, platform)
     if not job_id:
         return jsonify({"error": "建立失敗，請確認資料庫連線"}), 500
