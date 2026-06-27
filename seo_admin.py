@@ -3145,7 +3145,7 @@ pre{white-space:pre-wrap;font-family:inherit;font-size:13px;line-height:1.7;back
       </div>
       <div>
         <label>品類</label>
-        <input type="text" id="category" value="{{ prefill_category }}" placeholder="例如：辦公家具">
+        <select id="category"></select>
       </div>
     </div>
 
@@ -3245,6 +3245,7 @@ pre{white-space:pre-wrap;font-family:inherit;font-size:13px;line-height:1.7;back
 </div>
 <script>
 const KEY = {{ key|tojson }};
+const PREFILL_CATEGORY = {{ prefill_category|tojson }};
 const BRAND_RULES = {{ brand_rules_json|safe }};
 
 // 跟後端 _match_brand_rule 同一套比分邏輯：規則欄位留空＝萬用，填了就要完全相符；
@@ -3273,6 +3274,33 @@ function matchBrandRule(brand, category, articleType){
 
 function ruleLabel(r){
   return (r.category || '（全部品類）') + ' / ' + (r.article_type || '全部類型') + '（優先權 ' + (r.priority || 100) + '）';
+}
+
+function populateCategoryDropdown(brand, selected){
+  const sel = document.getElementById('category');
+  const brandN = (brand || '').trim().toLowerCase();
+  const seen = new Set();
+  const cats = [];
+  for (const r of BRAND_RULES) {
+    const rBrand = (r.brand || '').trim().toLowerCase();
+    const cat = (r.category || '').trim();
+    if (brandN && rBrand !== brandN) continue;
+    if (!cat || seen.has(cat)) continue;
+    seen.add(cat); cats.push(cat);
+  }
+  sel.innerHTML = '<option value="">-- 請選擇品類 --</option>';
+  for (const cat of cats) {
+    const opt = document.createElement('option');
+    opt.value = cat; opt.textContent = cat;
+    if (cat === selected) opt.selected = true;
+    sel.appendChild(opt);
+  }
+  if (selected && !seen.has(selected)) {
+    const opt = document.createElement('option');
+    opt.value = selected; opt.textContent = selected;
+    opt.selected = true;
+    sel.appendChild(opt);
+  }
 }
 
 function currentMode(){
@@ -3332,16 +3360,14 @@ function applyBrandRule(){
 }
 
 document.getElementById('brand').addEventListener('change', function(){
-  document.getElementById('category').value = this.selectedOptions[0].dataset.category || '';
+  populateCategoryDropdown(this.value, '');
   applyBrandRule();
 });
-document.getElementById('category').addEventListener('blur', applyBrandRule);
+document.getElementById('category').addEventListener('change', applyBrandRule);
 document.getElementById('article_type').addEventListener('change', applyBrandRule);
 document.getElementById('manual_rule_id').addEventListener('change', applyBrandRule);
 document.querySelectorAll('input[name="brand_rule_mode"]').forEach(el => el.addEventListener('change', applyBrandRule));
-if (document.getElementById('brand').options.length && !document.getElementById('category').value) {
-  document.getElementById('category').value = document.getElementById('brand').selectedOptions[0].dataset.category || '';
-}
+populateCategoryDropdown(document.getElementById('brand').value, PREFILL_CATEGORY);
 applyBrandRule();
 
 async function doAnalyze(){
