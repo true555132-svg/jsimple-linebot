@@ -3159,6 +3159,7 @@ pre{white-space:pre-wrap;font-family:inherit;font-size:13px;line-height:1.7;back
       <div>
         <label>品類</label>
         <select id="category"></select>
+        <input type="text" id="category-custom" placeholder="請輸入品類名稱" style="display:none;margin-top:6px">
       </div>
     </div>
 
@@ -3289,9 +3290,18 @@ function ruleLabel(r){
   return (r.category || '（全部品類）') + ' / ' + (r.article_type || '全部類型') + '（優先權 ' + (r.priority || 100) + '）';
 }
 
+function _getCategoryValue(){
+  const sel = document.getElementById('category');
+  if (sel.value === '__custom__') return document.getElementById('category-custom').value.trim();
+  return sel.value;
+}
+
 function populateCategoryDropdown(brand, selected){
   const sel = document.getElementById('category');
+  const customEl = document.getElementById('category-custom');
   const brandN = (brand || '').trim().toLowerCase();
+
+  // 先抓符合品牌的品類
   const seen = new Set();
   const cats = [];
   for (const r of BRAND_RULES) {
@@ -3301,6 +3311,16 @@ function populateCategoryDropdown(brand, selected){
     if (!cat || seen.has(cat)) continue;
     seen.add(cat); cats.push(cat);
   }
+
+  // 沒找到就退回：顯示所有品類（讓用戶至少能選）
+  if (!cats.length) {
+    for (const r of BRAND_RULES) {
+      const cat = (r.category || '').trim();
+      if (!cat || seen.has(cat)) continue;
+      seen.add(cat); cats.push(cat);
+    }
+  }
+
   sel.innerHTML = '<option value="">-- 請選擇品類 --</option>';
   for (const cat of cats) {
     const opt = document.createElement('option');
@@ -3308,12 +3328,23 @@ function populateCategoryDropdown(brand, selected){
     if (cat === selected) opt.selected = true;
     sel.appendChild(opt);
   }
+
+  // prefill 不在清單中 → 加入並選中
   if (selected && !seen.has(selected)) {
     const opt = document.createElement('option');
     opt.value = selected; opt.textContent = selected;
     opt.selected = true;
     sel.appendChild(opt);
   }
+
+  // 自定輸入選項
+  const customOpt = document.createElement('option');
+  customOpt.value = '__custom__'; customOpt.textContent = '✏ 自定輸入…';
+  sel.appendChild(customOpt);
+
+  // 同步自定輸入框顯示
+  const isCustom = sel.value === '__custom__';
+  customEl.style.display = isCustom ? 'block' : 'none';
 }
 
 function currentMode(){
@@ -3350,7 +3381,7 @@ function applyBrandRule(){
   document.getElementById('manual-rule-wrap').style.display = (mode === 'manual') ? 'block' : 'none';
   const hint = document.getElementById('brand-rule-hint');
   const brand = document.getElementById('brand').value;
-  const category = document.getElementById('category').value.trim();
+  const category = _getCategoryValue();
   const articleType = document.getElementById('article_type').value;
 
   if (mode === 'none') { hint.textContent = '（不套用品牌SEO規則，僅用搜尋意圖＋知識庫＋Prompt生成）'; return; }
@@ -3376,7 +3407,13 @@ document.getElementById('brand').addEventListener('change', function(){
   populateCategoryDropdown(this.value, '');
   applyBrandRule();
 });
-document.getElementById('category').addEventListener('change', applyBrandRule);
+document.getElementById('category').addEventListener('change', function(){
+  const isCustom = this.value === '__custom__';
+  document.getElementById('category-custom').style.display = isCustom ? 'block' : 'none';
+  if (isCustom) { document.getElementById('category-custom').focus(); return; }
+  applyBrandRule();
+});
+document.getElementById('category-custom').addEventListener('input', applyBrandRule);
 document.getElementById('article_type').addEventListener('change', applyBrandRule);
 document.getElementById('manual_rule_id').addEventListener('change', applyBrandRule);
 document.querySelectorAll('input[name="brand_rule_mode"]').forEach(el => el.addEventListener('change', applyBrandRule));
@@ -3385,7 +3422,7 @@ applyBrandRule();
 
 async function doAnalyze(){
   const brand = document.getElementById('brand').value;
-  const category = document.getElementById('category').value.trim();
+  const category = _getCategoryValue();
   const topic = document.getElementById('topic').value.trim();
   if (!topic) { alert('請輸入主題'); return; }
   document.getElementById('btn-analyze').disabled = true;
