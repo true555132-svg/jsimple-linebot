@@ -518,6 +518,9 @@ KNOWLEDGE_TYPES = [
     ("faq", "FAQ"),
     ("case", "案例"),
     ("brand_feature", "品牌特色"),
+    ("guide", "選購建議"),
+    ("restrict", "禁止方向"),
+    ("cta_tips", "CTA詢問資料"),
 ]
 KNOWLEDGE_TYPE_LABELS = dict(KNOWLEDGE_TYPES)
 
@@ -680,7 +683,7 @@ def _knowledge_upsert(brand, category, items):
             continue
         item_brand    = (it.get("brand") or brand or "").strip()
         item_category = (it.get("category") or category or "").strip()
-        ktype    = it.get("type") if it.get("type") in KNOWLEDGE_TYPE_LABELS else "spec"
+        ktype    = (it.get("type") or "spec").strip() or "spec"
         content  = it.get("content") or ""
         tags     = it.get("tags") or ""
         allow_ai = bool(it.get("allow_ai", it.get("ai_citable", True)))
@@ -1235,7 +1238,8 @@ DEFAULT_ANALYZE_PROMPT = """你是台灣SEO/GEO/AEO內容策略專家。
 直接輸出分析內容，不要加開頭結尾的客套話。
 
 分析內容結束後，另起一行，輸出你判斷這個主題最適合的文章類型，格式固定為：
-建議文章類型：（從[[ARTICLE_TYPE_OPTIONS]]裡面選一個最貼切的，只能輸出類型名稱，不要其他文字）"""
+建議文章類型：（從[[ARTICLE_TYPE_OPTIONS]]裡面選一個最貼切的，只能輸出類型名稱，不要其他文字）
+建議主關鍵字：（針對這個主題，輸出1個最重要的SEO主關鍵字，4~10個繁體中文字，不含標點符號）"""
 
 DEFAULT_GENERATE_PROMPT = """你是台灣SEO/GEO/AEO內容策略專家與文案編輯，為「[[BRAND_NAME]]」（[[BRAND_CATEGORY]]）撰寫一篇繁體中文SEO文章。
 
@@ -1356,7 +1360,7 @@ def _analyze_intent_prompt(brand, category, topic, brand_rule=None):
     knowledge_items = _get_knowledge_for_prompt(brand.get('key', ''), category, limit=10)
     tmpl = _get_prompt_template("analyze", DEFAULT_ANALYZE_PROMPT)
     body = _fill_tokens(tmpl,
-        BRAND_NAME=brand.get('name', ''), BRAND_CATEGORY=brand.get('category', ''),
+        BRAND_NAME=brand.get('name', ''), BRAND_CATEGORY=category or brand.get('category', ''),
         BRAND_STYLE=brand.get('style', ''), CATEGORY=category, TOPIC=topic,
         ARTICLE_TYPE_OPTIONS='、'.join(ARTICLE_TYPES),
         ALLOWED_PRODUCTS_BLOCK=_allowed_products_block(brand, knowledge_items, category),
@@ -1379,6 +1383,15 @@ def _extract_suggested_article_type(text):
     suggested = next((t for t in ARTICLE_TYPES if t in raw), "")
     cleaned = (text[:m.start()] + text[m.end():]).strip()
     return cleaned, suggested
+
+def _extract_suggested_main_keyword(text):
+    """從AI分析結果裡拆出「建議主關鍵字：XXX」這一行，回傳(清理後的分析文字, 建議關鍵字)。"""
+    m = re.search(r'建議主關鍵字[：:]\s*([^\n]+)', text)
+    if not m:
+        return text, ""
+    keyword = m.group(1).strip().lstrip('「').rstrip('」').strip()
+    cleaned = (text[:m.start()] + text[m.end():]).strip()
+    return cleaned, keyword
 
 def _resolve_generate_fields(fields, brand_rule):
     """把 fields（用戶表單輸入）和 brand_rule（seo_brand_rules）合併，
@@ -1415,7 +1428,7 @@ def _generate_article_prompt(brand, category, topic, intent_analysis, knowledge_
     resolved, _ = _resolve_generate_fields(fields, brand_rule)
     tmpl = _get_prompt_template("generate", DEFAULT_GENERATE_PROMPT)
     body = _fill_tokens(tmpl,
-        BRAND_NAME=brand.get('name', ''), BRAND_CATEGORY=brand.get('category', ''),
+        BRAND_NAME=brand.get('name', ''), BRAND_CATEGORY=category or brand.get('category', ''),
         BRAND_STYLE=brand.get('style', ''), BRAND_TONE=brand.get('tone', ''),
         CATEGORY=category, TOPIC=topic, ANALYSIS=intent_analysis,
         KNOWLEDGE=_knowledge_block(knowledge_items or []),
@@ -2566,7 +2579,7 @@ textarea{resize:vertical;line-height:1.6}
 </div>
 <script>
 const KEY = {{ key|tojson }};
-const TYPE_LABELS = {spec:"商品規格", faq:"FAQ", brand_feature:"品牌特色", case:"案例"};
+const TYPE_LABELS = {spec:"商品規格", faq:"FAQ", brand_feature:"品牌特色", case:"案例", guide:"選購建議", restrict:"禁止方向", cta_tips:"CTA詢問資料"};
 
 function switchTab(tab){
   document.querySelectorAll('.tab-btn').forEach((b,i)=>b.classList.toggle('active', (tab==='ai'&&i===0)||(tab==='json'&&i===1)));
@@ -2692,7 +2705,7 @@ function doJsonPreview(){
   _jsonItems = items;
   // render preview table
   const tbody = document.getElementById('json-preview-body');
-  const TYPE_MAP = {spec:'商品規格',faq:'FAQ',brand_feature:'品牌特色',case:'案例'};
+  const TYPE_MAP = {spec:'商品規格',faq:'FAQ',brand_feature:'品牌特色',case:'案例',guide:'選購建議',restrict:'禁止方向',cta_tips:'CTA詢問資料'};
   tbody.innerHTML = items.map((it,i) => `<tr>
     <td>${it.brand||'—'}</td><td>${it.category||'—'}</td>
     <td>${TYPE_MAP[it.type]||it.type}</td>
@@ -3390,6 +3403,18 @@ async function doAnalyze(){
       document.getElementById('step-analysis').classList.add('active');
       window._lastBrand = brand; window._lastCategory = category; window._lastTopic = topic;
       window._lastAnalysis = data.analysis;
+      // #2 自動填入主關鍵字
+      const mkEl = document.getElementById('main_keyword');
+      if (!mkEl.value.trim() && data.suggested_main_keyword) {
+        mkEl.value = data.suggested_main_keyword;
+      }
+      // #3 自動填入搜尋意圖（取分析結果前2句）
+      const siEl = document.getElementById('search_intent');
+      if (!siEl.value.trim() && data.analysis) {
+        const sents = data.analysis.replace(/\r\n/g,'\n').split(/(?<=[。！？\n])/);
+        const summary = sents.slice(0,2).join('').replace(/^\s*\d+[\.、．]\s*/,'').trim();
+        if (summary.length > 10) siEl.value = summary.substring(0, 100);
+      }
       // 顯示分析階段的 brand_rule debug 資訊
       if (data.debug) {
         const d = data.debug;
@@ -4276,10 +4301,12 @@ def seo_generator_analyze():
     if err:
         return jsonify({"error": f"AI分析失敗：{err}"}), 200
     analysis, suggested_article_type = _extract_suggested_article_type(text)
+    analysis, suggested_main_keyword = _extract_suggested_main_keyword(analysis)
     rule = brand_rule or {}
     return jsonify({
         "analysis": analysis,
         "suggested_article_type": suggested_article_type,
+        "suggested_main_keyword": suggested_main_keyword,
         "brand_rule_label": _brand_rule_label(brand_rule),
         "debug": {
             "rule_hit":    bool(rule),
