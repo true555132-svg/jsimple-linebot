@@ -3602,6 +3602,7 @@ window.onerror = function(msg, src, line){
 const KEY = {{ key|tojson }};
 const PREFILL_CATEGORY = {{ prefill_category|tojson }};
 const BRAND_RULES = {{ brand_rules_json|safe }};
+(function(){var el=document.createElement('div');el.style.cssText='font-size:11px;color:#aaa;padding:4px 0 0 2px';el.textContent='[debug] BRAND_RULES: '+BRAND_RULES.length+' 筆';var ct=document.querySelector('.container');if(ct)ct.prepend(el);})();
 
 // 跟後端 _match_brand_rule 同一套比分邏輯：規則欄位留空＝萬用，填了就要完全相符；
 // 分數最高的勝出，平手用 priority 決定。不寫死任何品牌/品類/文章類型名稱。
