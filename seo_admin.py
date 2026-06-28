@@ -2235,7 +2235,7 @@ function renderLinks(r){
       + '<span style="color:#0d6efd">'+s.anchor_text+'</span>'
       + '<br><span style="font-size:11px;color:#999">'+s.reason+'</span>'
       + '<br><code id="new-html-'+i+'" style="font-size:11px;background:#f5f5f5;padding:2px 8px;border-radius:4px;display:inline-block;margin-top:4px">'+htmlCode.replace(/</g,'&lt;').replace(/>/g,'&gt;')+'</code>'
-      + '<button onclick="copyCode(\'new-html-'+i+'\')" style="margin-left:8px;padding:2px 8px;font-size:11px;border:1px solid #ccc;border-radius:4px;cursor:pointer;background:#fff">複製 HTML</button>'
+      + '<button onclick="copyCode(\\'new-html-'+i+'\\')" style="margin-left:8px;padding:2px 8px;font-size:11px;border:1px solid #ccc;border-radius:4px;cursor:pointer;background:#fff">複製 HTML</button>'
       + '</div>';
   });
   document.getElementById('links-result').innerHTML = html;
