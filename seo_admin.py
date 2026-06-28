@@ -3590,19 +3590,11 @@ pre{white-space:pre-wrap;font-family:inherit;font-size:13px;line-height:1.7;back
   </div>
 
 </div>
-<script>
-window.onerror = function(msg, src, line){
-  var el = document.getElementById('js-global-err');
-  if (!el){ el=document.createElement('div'); el.id='js-global-err';
-    el.style.cssText='background:#c62828;color:#fff;padding:10px 14px;font-size:12px;font-family:monospace;white-space:pre-wrap;border-radius:8px;margin:12px 0';
-    var ct=document.querySelector('.container'); if(ct) ct.prepend(el); }
-  el.textContent='⚠ JS 錯誤（請截圖回報）：' + msg + '  行' + line; };
-</script>
+<div id="_brd" style="display:none">{{ brand_rules_json|e }}</div>
 <script>
 const KEY = {{ key|tojson }};
 const PREFILL_CATEGORY = {{ prefill_category|tojson }};
-const BRAND_RULES = {{ brand_rules_json|safe }};
-(function(){var el=document.createElement('div');el.style.cssText='font-size:11px;color:#aaa;padding:4px 0 0 2px';el.textContent='[debug] BRAND_RULES: '+BRAND_RULES.length+' 筆';var ct=document.querySelector('.container');if(ct)ct.prepend(el);})();
+const BRAND_RULES = JSON.parse(document.getElementById('_brd').textContent || '[]');
 
 // 跟後端 _match_brand_rule 同一套比分邏輯：規則欄位留空＝萬用，填了就要完全相符；
 // 分數最高的勝出，平手用 priority 決定。不寫死任何品牌/品類/文章類型名稱。
@@ -4744,9 +4736,8 @@ def seo_generator_page():
     except Exception:
         rules = []
     shell = _shell_open(key, "seo-generator", [("AI 生成文章", None)])
-    _safe_json = json.dumps(rules, ensure_ascii=False).replace('</', '<\\/')
     return render_template_string(GENERATOR_HTML, key=key, shell=shell, brands=brands, ai_key_set=bool(ANTHROPIC_API_KEY),
-        article_types=ARTICLE_TYPES, brand_rules_json=_safe_json,
+        article_types=ARTICLE_TYPES, brand_rules_json=json.dumps(rules, ensure_ascii=False),
         prefill_brand=request.args.get("brand", ""), prefill_category=request.args.get("category", ""),
         prefill_topic=request.args.get("topic", ""), prefill_opp_id=request.args.get("opp_id", ""),
         prefill_main_keyword=request.args.get("main_keyword", ""),
