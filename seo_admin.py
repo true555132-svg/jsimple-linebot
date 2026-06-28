@@ -3593,7 +3593,7 @@ pre{white-space:pre-wrap;font-family:inherit;font-size:13px;line-height:1.7;back
 <div id="_brd" style="display:none">{{ brand_rules_json|e }}</div>
 <div id="_dbg" style="background:#1a1a1a;color:#0f0;font-size:11px;font-family:monospace;padding:8px 12px;border-radius:6px;margin:10px 0;white-space:pre-wrap;line-height:1.7"></div>
 <script>
-function _log(msg){ var el=document.getElementById('_dbg'); el.textContent += msg + '\n'; }
+function _log(msg){ var el=document.getElementById('_dbg'); el.textContent += msg + '\\n'; }
 window.onerror = function(msg,src,line){ _log('❌ JS ERROR: ' + msg + ' (line ' + line + ')'); };
 _log('✅ JS 開始載入...');
 const KEY = {{ key|tojson }};
@@ -3812,8 +3812,8 @@ async function doAnalyze(){
       // #3 自動填入搜尋意圖（取分析結果前2句）
       const siEl = document.getElementById('search_intent');
       if (!siEl.value.trim() && data.analysis) {
-        const sents = data.analysis.replace(/\r\n/g,'\n')
-          .replace(/([。！？])/g,'$1').split('')
+        const sents = data.analysis.replace(/\r\n/g,'\\n')
+          .replace(/([。！？])/g,'$1 ').split(' ')
           .map(s=>s.trim()).filter(s=>s.length>4);
         const summary = sents.slice(0,2).join('').replace(/^\s*\d+[.、．]\s*/,'').trim();
         if (summary.length > 10) siEl.value = summary.substring(0, 100);
