@@ -1,0 +1,132 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>批次匯入舊文章 — SEO 管理後台</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#f5f5f5;color:#333}
+.app-shell{display:flex;min-height:100vh}
+.sidebar{width:212px;flex-shrink:0;background:#1a1a1a;color:#fff;display:flex;flex-direction:column;padding:18px 0}
+.sidebar-brand{display:flex;flex-direction:column;padding:0 20px 18px;margin-bottom:6px;border-bottom:1px solid rgba(255,255,255,.08)}
+.sidebar-brand b{font-size:16px;font-weight:800}
+.sidebar-brand span{font-size:11px;color:#999;font-weight:600;margin-top:2px}
+.sidebar nav{display:flex;flex-direction:column;gap:2px;padding:10px}
+.side-link{padding:9px 12px;border-radius:8px;font-size:13px;color:rgba(255,255,255,.7);text-decoration:none;transition:.15s;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.side-link:hover{background:rgba(255,255,255,.08);color:#fff}
+.side-link.active{background:rgba(255,255,255,.12);color:#fff;font-weight:600}
+.main{flex:1;display:flex;flex-direction:column;min-width:0}
+.topbar{background:#fff;padding:13px 24px;font-size:12px;color:#999;border-bottom:1px solid #e8eaed;flex-shrink:0}
+.topbar a{color:#0d6efd;text-decoration:none}
+.topbar a:hover{text-decoration:underline}
+.topbar b{color:#333;font-weight:700}
+.page-content{flex:1;padding:24px}
+.card{background:#fff;border-radius:12px;padding:24px;box-shadow:0 1px 4px rgba(0,0,0,.08);max-width:760px}
+.card h2{font-size:17px;font-weight:700;margin-bottom:6px}
+.card .desc{font-size:13px;color:#666;margin-bottom:20px;line-height:1.6}
+.form-row{margin-bottom:16px}
+label{display:block;font-size:13px;font-weight:600;margin-bottom:6px;color:#444}
+label span{font-size:11px;font-weight:400;color:#999;margin-left:4px}
+select,input[type=text]{width:100%;padding:9px 12px;border:1.5px solid #ddd;border-radius:8px;font-size:14px;color:#333;outline:none;transition:.15s}
+select:focus,input[type=text]:focus{border-color:#0d6efd}
+textarea{width:100%;padding:10px 12px;border:1.5px solid #ddd;border-radius:8px;font-size:13px;color:#333;font-family:inherit;resize:vertical;line-height:1.6;outline:none;transition:.15s}
+textarea:focus{border-color:#0d6efd}
+.format-hint{font-size:11px;color:#888;margin-top:6px;line-height:1.7;background:#f8f9fa;padding:8px 12px;border-radius:6px}
+.format-hint code{background:#e9ecef;padding:1px 5px;border-radius:3px;font-size:11px}
+.btn-submit{margin-top:8px;padding:10px 24px;background:#0d6efd;color:#fff;border:none;border-radius:8px;font-size:14px;font-weight:600;cursor:pointer;transition:.15s}
+.btn-submit:hover{background:#0b5ed7}
+.result-box{margin-top:20px;padding:16px;border-radius:10px;font-size:13px}
+.result-success{background:#e8f5e9;border:1px solid #c8e6c9}
+.result-error{background:#fdecea;border:1px solid #ffcdd2}
+.result-stats{display:flex;gap:16px;flex-wrap:wrap;margin-bottom:12px}
+.stat{text-align:center;min-width:60px}
+.stat-num{font-size:22px;font-weight:800;line-height:1}
+.stat-label{font-size:11px;color:#666;margin-top:3px}
+.num-inserted{color:#2e7d32}
+.num-updated{color:#1565c0}
+.num-skipped{color:#e65100}
+.num-failed{color:#c62828}
+.fail-list{margin-top:10px;font-size:12px;color:#b71c1c;line-height:1.8}
+.fail-list li{margin-left:16px}
+@media(max-width:760px){
+  .app-shell{flex-direction:column}
+  .sidebar{width:100%;flex-direction:row;align-items:center;padding:8px 6px;overflow-x:auto}
+  .sidebar-brand{display:none}
+  .sidebar nav{flex-direction:row;padding:0}
+  .side-link{padding:8px 10px}
+  .page-content{padding:16px}
+}
+</style>
+</head>
+<body>
+<div class="app-shell">
+  <aside class="sidebar">
+    <div class="sidebar-brand"><b>JS</b><span>SEO 內容管理後台</span></div>
+    <nav>
+      {% for slug, label, path in sidebar_items %}
+      <a class="side-link{% if slug == active %} active{% endif %}" href="{{ path }}?key={{ key }}">{{ label }}</a>
+      {% endfor %}
+    </nav>
+  </aside>
+  <div class="main">
+    <div class="topbar">
+      <a href="/admin/seo?key={{ key }}">文章管理</a>
+      <span style="color:#ccc"> › </span>
+      <b>批次匯入舊文章</b>
+    </div>
+    <div class="page-content">
+      <div class="card">
+        <h2>批次匯入舊文章</h2>
+        <p class="desc">
+          把官網既有文章標題貼進來，系統會自動寫入 seo_articles，讓 AI 生成新文章時不會重複主題。<br>
+          支援「一行一標題」或「標題 | URL」格式（URL 這次略過，僅記標題）。
+        </p>
+
+        {% if result %}
+        <div class="result-box {% if result.failed %}result-error{% else %}result-success{% endif %}">
+          <div class="result-stats">
+            <div class="stat"><div class="stat-num num-inserted">{{ result.inserted }}</div><div class="stat-label">新增</div></div>
+            <div class="stat"><div class="stat-num num-updated">{{ result.updated }}</div><div class="stat-label">更新</div></div>
+            <div class="stat"><div class="stat-num num-skipped">{{ result.skipped }}</div><div class="stat-label">略過</div></div>
+            <div class="stat"><div class="stat-num num-failed">{{ result.failed }}</div><div class="stat-label">失敗</div></div>
+          </div>
+          {% if result.errors %}
+          <div class="fail-list">
+            <b>失敗原因：</b>
+            <ul>{% for e in result.errors %}<li>{{ e }}</li>{% endfor %}</ul>
+          </div>
+          {% endif %}
+        </div>
+        {% endif %}
+
+        <form method="POST" action="/admin/seo-article-import?key={{ key }}">
+          <div class="form-row">
+            <label>品牌 <span>brand_key</span></label>
+            <select name="brand">
+              {% for b in brands %}
+              <option value="{{ b.brand_key }}" {% if b.brand_key == (form_brand or 'jsimple') %}selected{% endif %}>{{ b.name }} ({{ b.brand_key }})</option>
+              {% endfor %}
+            </select>
+          </div>
+          <div class="form-row">
+            <label>品類 <span>可空白</span></label>
+            <input type="text" name="category" value="{{ form_category or '' }}" placeholder="例：高架床、穀倉門、燈具…">
+          </div>
+          <div class="form-row">
+            <label>舊文章標題清單 <span>一行一篇</span></label>
+            <textarea name="titles" rows="14" placeholder="穀倉門 VS 傳統門片哪個好？使用情境全面解析&#10;穀倉門是什麼？安裝重點、風格搭配完整指南&#10;&#10;或加上 URL：&#10;穀倉門安裝教學 | https://www.jsimple.tw/blogs/xxx">{{ form_titles or '' }}</textarea>
+            <div class="format-hint">
+              格式 A：一行一標題<br>
+              格式 B：<code>標題 | URL</code>（URL 本次略過，僅記標題）<br>
+              空白行、少於 4 字的標題、欄位名稱列（「標題」「文章」「部落格」）會自動略過。
+            </div>
+          </div>
+          <button type="submit" class="btn-submit">匯入</button>
+        </form>
+      </div>
+    </div>
+  </div>
+</div>
+</body>
+</html>

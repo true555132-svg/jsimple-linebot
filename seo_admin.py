@@ -1620,7 +1620,8 @@ SIDEBAR_ITEMS = [
     ("seo-knowledge",   "📚 知識庫管理",     "/admin/seo-knowledge"),
     ("seo-brand-rules", "🏷️ 品牌SEO規則",   "/admin/seo-brand-rules"),
     ("seo-keyword-map", "🗺️ 關鍵字地圖",    "/admin/seo/keyword-map"),
-    ("seo-settings",    "⚙️ Prompt 設定",   "/admin/seo-settings"),
+    ("seo-settings",       "⚙️ Prompt 設定",    "/admin/seo-settings"),
+    ("seo-article-import", "📥 批次匯入舊文章", "/admin/seo-article-import"),
 ]
 
 SHELL_CLOSE = "</div></div></div>"

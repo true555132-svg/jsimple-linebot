@@ -4015,6 +4015,9 @@ _migrate_pipeline_columns()
 from seo_admin import seo_bp
 app.register_blueprint(seo_bp)
 
+from seo_article_import import seo_article_import_bp
+app.register_blueprint(seo_article_import_bp)
+
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port)
