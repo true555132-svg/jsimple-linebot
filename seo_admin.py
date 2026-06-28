@@ -3492,6 +3492,7 @@ pre{white-space:pre-wrap;font-family:inherit;font-size:13px;line-height:1.7;back
         <label>品類</label>
         <select id="category"></select>
         <input type="text" id="category-custom" placeholder="請輸入品類名稱" style="display:none;margin-top:6px">
+        <div id="cat-hint" style="font-size:11px;color:#aaa;margin-top:3px"></div>
       </div>
     </div>
 
@@ -3631,9 +3632,10 @@ function _getCategoryValue(){
 function populateCategoryDropdown(brand, selected){
   const sel = document.getElementById('category');
   const customEl = document.getElementById('category-custom');
+  const hintEl = document.getElementById('cat-hint');
   const brandN = (brand || '').trim().toLowerCase();
 
-  // 先抓符合品牌的品類
+  // 抓符合品牌的品類
   const seen = new Set();
   const cats = [];
   for (const r of BRAND_RULES) {
@@ -3644,16 +3646,23 @@ function populateCategoryDropdown(brand, selected){
     seen.add(cat); cats.push(cat);
   }
 
-  // 沒找到就退回：顯示所有品類（讓用戶至少能選）
+  sel.innerHTML = '';
+
   if (!cats.length) {
-    for (const r of BRAND_RULES) {
-      const cat = (r.category || '').trim();
-      if (!cat || seen.has(cat)) continue;
-      seen.add(cat); cats.push(cat);
-    }
+    // 此品牌無規則 → 直接切到自定輸入模式
+    const ph = document.createElement('option');
+    ph.value = '__custom__'; ph.textContent = '✏ 手動輸入品類';
+    sel.appendChild(ph);
+    customEl.style.display = 'block';
+    if (selected) customEl.value = selected;
+    if (hintEl) hintEl.textContent = '此品牌尚未建立品類規則，請直接輸入品類名稱';
+    return;
   }
 
-  sel.innerHTML = '<option value="">-- 請選擇品類 --</option>';
+  const ph = document.createElement('option');
+  ph.value = ''; ph.textContent = '-- 請選擇品類 --';
+  sel.appendChild(ph);
+
   for (const cat of cats) {
     const opt = document.createElement('option');
     opt.value = cat; opt.textContent = cat;
@@ -3667,6 +3676,7 @@ function populateCategoryDropdown(brand, selected){
     opt.value = selected; opt.textContent = selected;
     opt.selected = true;
     sel.appendChild(opt);
+    seen.add(selected);
   }
 
   // 自定輸入選項
@@ -3674,9 +3684,9 @@ function populateCategoryDropdown(brand, selected){
   customOpt.value = '__custom__'; customOpt.textContent = '✏ 自定輸入…';
   sel.appendChild(customOpt);
 
-  // 同步自定輸入框顯示
   const isCustom = sel.value === '__custom__';
   customEl.style.display = isCustom ? 'block' : 'none';
+  if (hintEl) hintEl.textContent = '';
 }
 
 function currentMode(){
@@ -3756,7 +3766,12 @@ async function doAnalyze(){
   const brand = document.getElementById('brand').value;
   const category = _getCategoryValue();
   const topic = document.getElementById('topic').value.trim();
-  if (!topic) { alert('請輸入主題'); return; }
+  if (!topic) {
+    const e = document.getElementById('err-analyze');
+    e.textContent = '請先填入主題再分析';
+    e.scrollIntoView({behavior:'smooth', block:'nearest'});
+    return;
+  }
   document.getElementById('btn-analyze').disabled = true;
   document.getElementById('loading-analyze').style.display = 'block';
   document.getElementById('err-analyze').textContent = '';
