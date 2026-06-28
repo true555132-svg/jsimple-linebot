@@ -3591,22 +3591,14 @@ pre{white-space:pre-wrap;font-family:inherit;font-size:13px;line-height:1.7;back
 
 </div>
 <div id="_brd" style="display:none">{{ brand_rules_json|e }}</div>
-<div id="_dbg" style="background:#1a1a1a;color:#0f0;font-size:11px;font-family:monospace;padding:8px 12px;border-radius:6px;margin:10px 0;white-space:pre-wrap;line-height:1.7"></div>
 <script>
-function _log(msg){ var el=document.getElementById('_dbg'); el.textContent += msg + '\\n'; }
-window.onerror = function(msg,src,line){ _log('❌ JS ERROR: ' + msg + ' (line ' + line + ')'); };
-_log('✅ JS 開始載入...');
 const KEY = {{ key|tojson }};
 const PREFILL_CATEGORY = {{ prefill_category|tojson }};
 var BRAND_RULES = [];
 try {
   var _brdEl = document.getElementById('_brd');
-  var _brdText = _brdEl ? _brdEl.textContent : '';
-  _log('📦 _brd textContent 長度: ' + _brdText.length);
-  BRAND_RULES = JSON.parse(_brdText || '[]');
-  _log('✅ BRAND_RULES 載入: ' + BRAND_RULES.length + ' 筆');
-} catch(e) { _log('❌ JSON.parse 失敗: ' + e.message); }
-_log('✅ JS 載入完成');
+  BRAND_RULES = JSON.parse(_brdEl ? _brdEl.textContent : '[]');
+} catch(e) { console.error('BRAND_RULES parse error:', e); }
 
 // 跟後端 _match_brand_rule 同一套比分邏輯：規則欄位留空＝萬用，填了就要完全相符；
 // 分數最高的勝出，平手用 priority 決定。不寫死任何品牌/品類/文章類型名稱。
@@ -3776,11 +3768,9 @@ populateCategoryDropdown(document.getElementById('brand').value, PREFILL_CATEGOR
 applyBrandRule();
 
 async function doAnalyze(){
-  _log('🖱 doAnalyze() 已觸發');
   const brand = document.getElementById('brand').value;
   const category = _getCategoryValue();
   const topic = document.getElementById('topic').value.trim();
-  _log('品牌=' + brand + ' 品類=' + category + ' 主題長度=' + topic.length);
   if (!topic) {
     const e = document.getElementById('err-analyze');
     e.textContent = '請先填入主題再分析';
@@ -3791,12 +3781,10 @@ async function doAnalyze(){
   document.getElementById('loading-analyze').style.display = 'block';
   document.getElementById('err-analyze').textContent = '';
   try {
-    _log('📡 發送 fetch...');
     const res = await fetch('/admin/seo-generator/analyze?key=' + encodeURIComponent(KEY), {
       method: 'POST', headers: {'Content-Type':'application/json'},
       body: JSON.stringify({brand, category, topic})
     });
-    _log('📡 fetch 回應 HTTP ' + res.status);
     const data = await safeJson(res);
     if (data.error) { document.getElementById('err-analyze').textContent = data.error; }
     else {
@@ -3836,7 +3824,7 @@ async function doAnalyze(){
         applyBrandRule();
       }
     }
-  } catch(e) { _log('❌ doAnalyze 錯誤: ' + String(e)); document.getElementById('err-analyze').textContent = String(e); }
+  } catch(e) { document.getElementById('err-analyze').textContent = String(e); }
   document.getElementById('btn-analyze').disabled = false;
   document.getElementById('loading-analyze').style.display = 'none';
 }
