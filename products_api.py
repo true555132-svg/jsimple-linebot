@@ -1570,7 +1570,7 @@ body{font-family:-apple-system,sans-serif;background:#f0f1f5;color:#333}
 .img-form textarea{width:100%;border:1.5px solid #ddd;border-radius:10px;padding:10px;font-size:13px;height:90px;resize:vertical;font-family:-apple-system,sans-serif;outline:none}
 .img-form textarea:focus{border-color:#1a1a1a}
 /* 選圖 UI */
-.img-zone-hd{display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin-bottom:6px}
+.img-zone-hd{display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin-bottom:6px;padding:6px 10px;background:#fafafa;border-radius:8px;border:1px solid #f0f0f0}
 .img-zone-hd .slabel{margin-bottom:0;flex:none}
 .sel-btn{background:#f0f0f0;color:#555;border:none;border-radius:6px;padding:3px 9px;font-size:11px;cursor:pointer;font-family:-apple-system,sans-serif}
 .sel-btn:hover{background:#e0e0e0}
@@ -1589,6 +1589,8 @@ body{font-family:-apple-system,sans-serif;background:#f0f1f5;color:#333}
 .img-size{font-size:9px;color:#999;text-align:center;margin:3px 0 1px;min-height:13px;line-height:1.3}
 .img-label{font-size:9px;color:#666;text-align:center;max-width:120px;overflow:hidden;white-space:nowrap;text-overflow:ellipsis;margin-bottom:2px}
 .thumb-actions{display:flex;justify-content:center;gap:3px;margin-top:3px}
+.cat-collapse-btn{margin-left:auto!important;background:#f5f5f5;color:#888;font-size:10px}
+.cat-collapse-btn:hover{background:#e0e0e0;color:#333}
 .thumb-act{background:#f0f0f0;border:none;border-radius:4px;padding:2px 6px;font-size:11px;cursor:pointer;color:#555;text-decoration:none;display:inline-block;line-height:1.5}
 .thumb-act:hover{background:#ddd;color:#333}
 .sel-action-bar{position:sticky;bottom:0;background:#fff;border-top:1px solid #f0f0f0;padding:12px 0 4px;display:flex;gap:8px;align-items:center;margin-top:12px}
@@ -2081,7 +2083,7 @@ function tab2Html(j){
   const trImgs=j.translated_images||[];
   if(trImgs.length){
     h+=`<div class="translated-sec"><div class="slabel">翻譯完成（${trImgs.length} 張）</div>`
-      +`<div class="img-grid">${trImgs.map((src,i)=>`<div class="img-thumb"><img src="${esc(src)}" loading="lazy" onerror="this.style.display='none'"><div class="thumb-actions"><a href="${esc(src)}" target="_blank" class="thumb-act">⬇</a><button class="thumb-act" onclick="event.stopPropagation();cp(this,'${esc(src)}')">📋</button></div></div>`).join("")}</div>`
+      +`<div class="img-grid">${trImgs.map((src,i)=>`<div class="img-thumb"><img src="${esc(src)}" loading="lazy" onerror="this.style.display='none'"><div class="thumb-actions"><button class="thumb-act" onclick="downloadImg('${esc(src)}')">⬇</button><button class="thumb-act" onclick="event.stopPropagation();cp(this,'${esc(src)}')">📋</button></div></div>`).join("")}</div>`
       +`<button class="sel-btn" style="margin-top:8px" onclick="useTranslated(${j.id})">✓ 以翻譯圖作為輸出</button>`
       +`</div>`;
   }
@@ -2090,7 +2092,7 @@ function tab2Html(j){
   ['main','detail','sku'].forEach(t => {
     const tImgs = piTr['tr_'+t+'_images'] || [];
     if (!tImgs.length) return;
-    h += `<div class="tr-type-sec"><div class="tr-type-label">翻譯圖（${trTypeMap[t]}，${tImgs.length} 張）</div><div class="img-grid">${tImgs.map((src,i)=>`<div class="img-thumb"><img src="${esc(src)}" loading="lazy" onerror="this.style.display='none'"><div class="thumb-actions"><a href="${esc(src)}" target="_blank" class="thumb-act">⬇</a><button class="thumb-act" onclick="event.stopPropagation();cp(this,'${esc(src)}')">📋</button></div></div>`).join("")}</div></div>`;
+    h += `<div class="tr-type-sec"><div class="tr-type-label">翻譯圖（${trTypeMap[t]}，${tImgs.length} 張）</div><div class="img-grid">${tImgs.map((src,i)=>`<div class="img-thumb"><img src="${esc(src)}" loading="lazy" onerror="this.style.display='none'"><div class="thumb-actions"><button class="thumb-act" onclick="downloadImg('${esc(src)}')">⬇</button><button class="thumb-act" onclick="event.stopPropagation();cp(this,'${esc(src)}')">📋</button></div></div>`).join("")}</div></div>`;
   });
   if(!trImgs.length && !['main','detail','sku'].some(t=>(piTr['tr_'+t+'_images']||[]).length)){
     h += `<div style="color:#bbb;font-size:13px;padding:6px 0">尚無翻譯圖片</div>`;
@@ -2367,18 +2369,41 @@ function imgCatHtml(catId, label, srcs, labels){
       +(lbl?`<div class="img-label">${esc(lbl)}</div>`:'')
       +(isMain?`<div class="main-badge">主圖</div>`:'')
       +`<div class="thumb-actions">`
-      +`<a href="${esc(src)}" target="_blank" class="thumb-act" onclick="event.stopPropagation()" title="開新分頁">⬇</a>`
+      +`<button class="thumb-act" onclick="event.stopPropagation();downloadImg('${esc(src)}')" title="下載圖片">⬇</button>`
       +`<button class="thumb-act" onclick="event.stopPropagation();cp(this,'${esc(src)}')" title="複製URL">📋</button>`
       +`<button class="thumb-act" onclick="event.stopPropagation();openLightbox('${esc(src)}')" title="放大檢視">⛶</button>`
       +`<button class="thumb-act" onclick="event.stopPropagation();setAsMain('${esc(src)}')" title="設為主圖">★</button>`
       +`</div></div>`;
   }).join("");
-  return `<div class="section" id="cat_${catId}"><div class="img-zone-hd"><div class="slabel">${label}（${srcs.length} 張）</div><button class="sel-btn" onclick="toggleAllInCat('${catId}',true)">全選</button><button class="sel-btn" onclick="toggleAllInCat('${catId}',false)">取消</button></div><div class="img-grid">${thumbs}</div></div>`;
+  const autoCollapse = (catId==='detail'||catId==='review') && srcs.length>8;
+  return `<div class="section" id="cat_${catId}">`
+    +`<div class="img-zone-hd">`
+    +`<div class="slabel">${label}（${srcs.length} 張）</div>`
+    +`<button class="sel-btn" onclick="toggleAllInCat('${catId}',true)">全選</button>`
+    +`<button class="sel-btn" onclick="toggleAllInCat('${catId}',false)">取消</button>`
+    +`<button class="sel-btn cat-collapse-btn" id="collapseBtn_${catId}" onclick="toggleCatCollapse('${catId}')">${autoCollapse?'▶ 展開':'▼ 收合'}</button>`
+    +`</div>`
+    +`<div class="img-grid" id="grid_${catId}" style="${autoCollapse?'display:none':''}">${thumbs}</div>`
+    +`</div>`;
 }
 async function setAsMain(url){
   const r=await api(`/api/products/${_curJobId}/set-main-image`,{method:"POST",body:JSON.stringify({url})});
   if(r.ok){_curMainImage=url;toast("已設為主圖");openJob(_curJobId);}
   else toast("設定失敗");
+}
+function downloadImg(src){
+  const a=document.createElement('a');
+  a.href=`/api/products/proxy-img?url=${encodeURIComponent(src)}&key=${KEY}`;
+  a.download=src.split('/').pop().replace(/\?.*$/,'').replace(/[^a-zA-Z0-9._-]/g,'_')||'image.jpg';
+  document.body.appendChild(a);a.click();document.body.removeChild(a);
+}
+function toggleCatCollapse(catId){
+  const grid=document.getElementById('grid_'+catId);
+  const btn=document.getElementById('collapseBtn_'+catId);
+  if(!grid)return;
+  const collapsed=grid.style.display==='none';
+  grid.style.display=collapsed?'':'none';
+  if(btn)btn.textContent=collapsed?'▼ 收合':'▶ 展開';
 }
 function imgSizeLoad(img){
   const w=img.naturalWidth, h=img.naturalHeight;
@@ -3590,6 +3615,33 @@ def api_products_images_zip(job_id):
     safe = _re.sub(r'[^\w]', '_', (job.get("ai_name") or "product")[:20])
     return Response(buf.getvalue(), mimetype="application/zip",
         headers={"Content-Disposition": f'attachment; filename="{safe}_images.zip"'})
+
+@products_bp.route("/api/products/proxy-img")
+def api_proxy_img():
+    ok, _ = auth_required()
+    if not ok:
+        return jsonify({"error": "unauthorized"}), 403
+    url = request.args.get("url", "").strip()
+    if not url:
+        return jsonify({"error": "missing url"}), 400
+    allowed = ["alicdn.com", "tbcdn.cn", "aliimg.com", "taobao.com", "1688.com", "supabase.co", "githubusercontent.com"]
+    if not any(d in url for d in allowed):
+        return jsonify({"error": "domain not allowed"}), 403
+    try:
+        req = urllib.request.Request(url, headers={
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+            "Referer": "https://www.1688.com/"
+        })
+        with urllib.request.urlopen(req, timeout=15) as r:
+            data = r.read()
+            ct = r.headers.get("Content-Type", "image/jpeg")
+    except Exception as e:
+        return jsonify({"error": str(e)}), 502
+    filename = url.split("/")[-1].split("?")[0] or "image.jpg"
+    from flask import Response
+    resp = Response(data, content_type=ct)
+    resp.headers["Content-Disposition"] = f'attachment; filename="{filename}"'
+    return resp
 
 # ── 本機 Worker API ───────────────────────────────────────────
 
