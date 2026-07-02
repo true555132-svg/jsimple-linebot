@@ -23,7 +23,7 @@ from pathlib import Path
 
 # ── 設定（根據需要修改）──────────────────────────────────────
 SERVER_URL      = "https://jsimple-linebot.onrender.com"
-API_KEY         = "jsimple2024"
+API_KEY         = "ux5J7hz7ZjrQDEu0zdPInNbg"
 PROFILE_DIR     = str(Path.home() / "jsimple-worker-profile")  # 登入狀態儲存位置
 POLL_SEC        = 5        # 輪詢間隔（秒）
 PAGE_WAIT       = 3000     # 頁面載入等待（ms）

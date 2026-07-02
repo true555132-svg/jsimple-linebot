@@ -1626,10 +1626,26 @@ function mobileBack(){
   document.querySelector('.crm-wrap').classList.remove('mobile-chat');
 }
 
+let _pollTimer = null;
+
+function startPolling(){
+  if(_pollTimer) return;
+  _pollTimer = setInterval(loadConvs, 20000);
+}
+
+function stopPolling(){
+  if(_pollTimer){ clearInterval(_pollTimer); _pollTimer = null; }
+}
+
+document.addEventListener('visibilitychange', ()=>{
+  if(document.hidden){ stopPolling(); }
+  else { loadConvs(); startPolling(); }
+});
+
 async function init(){
   buildTagFilter();
   await loadConvs();
-  setInterval(loadConvs, 8000);
+  if(!document.hidden) startPolling();
 }
 
 function buildTagFilter(){
