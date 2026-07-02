@@ -774,6 +774,68 @@ def _paste_on_white(img_bytes, size=800):
         return None
 
 
+def _has_chinese(text):
+    return any('一' <= c <= '鿿' for c in (text or ""))
+
+
+def _translate_prompt_to_en(prompt):
+    """中文提示詞 → 英文（用 Claude Haiku，失敗回傳原文）。"""
+    if not ANTHROPIC_API_KEY or not _has_chinese(prompt):
+        return prompt
+    try:
+        req_data = json.dumps({
+            "model": "claude-haiku-4-5-20251001",
+            "max_tokens": 200,
+            "messages": [{"role": "user", "content":
+                f'Translate this image background description to English for an AI image generation prompt. '
+                f'Output only the translated text, no explanation:\n{prompt}'}]
+        }).encode()
+        req = urllib.request.Request(
+            "https://api.anthropic.com/v1/messages",
+            data=req_data, method="POST",
+            headers={"x-api-key": ANTHROPIC_API_KEY,
+                     "anthropic-version": "2023-06-01",
+                     "content-type": "application/json"}
+        )
+        with urllib.request.urlopen(req, timeout=20) as r:
+            en = json.loads(r.read().decode())["content"][0]["text"].strip()
+        print(f"[GPT-Image-2] 提示詞翻譯: {prompt[:30]} → {en[:60]}", flush=True)
+        return en
+    except Exception as e:
+        print(f"[GPT-Image-2] 翻譯失敗，使用原文: {e}", flush=True)
+        return prompt
+
+
+def _auto_bg_prompt(product_name, category):
+    """商品名稱 + 類別 → 自動生成英文背景提示詞（Claude Haiku）。"""
+    if not ANTHROPIC_API_KEY or not product_name:
+        return None
+    try:
+        req_data = json.dumps({
+            "model": "claude-haiku-4-5-20251001",
+            "max_tokens": 120,
+            "messages": [{"role": "user", "content":
+                f'Write a short English background scene description for a product photo of: "{product_name}" '
+                f'(category: {category or "general"}). '
+                f'The background should suit e-commerce use (clean, professional, lifestyle). '
+                f'Output only the scene description (1-2 sentences, no quotes).'}]
+        }).encode()
+        req = urllib.request.Request(
+            "https://api.anthropic.com/v1/messages",
+            data=req_data, method="POST",
+            headers={"x-api-key": ANTHROPIC_API_KEY,
+                     "anthropic-version": "2023-06-01",
+                     "content-type": "application/json"}
+        )
+        with urllib.request.urlopen(req, timeout=20) as r:
+            prompt = json.loads(r.read().decode())["content"][0]["text"].strip()
+        print(f"[GPT-Image-2] 自動提示詞: {prompt[:80]}", flush=True)
+        return prompt
+    except Exception as e:
+        print(f"[GPT-Image-2] 自動提示詞失敗: {e}", flush=True)
+        return None
+
+
 def _gpt_image2_bg(transparent_png, scene_prompt):
     """用 gpt-image-2 在去背後的透明 PNG 周圍生成場景背景。
     transparent_png: remove.bg 回傳的 RGBA PNG bytes（產品不透明、背景透明）。
@@ -844,14 +906,23 @@ def _process_images_for_job(job_id):
     if not raw_imgs:
         _pj_update(job_id, img_status="no_images"); return
 
-    # 取品牌的 AI 背景提示詞
+    # 取品牌的 AI 背景提示詞（支援中文自動翻英）
     scene_prompt = None
     brand_key = job.get("brand", "")
     if brand_key:
         bp = _bp_get(brand_key)
-        scene_prompt = (bp.get("image_style") or "").strip() or None
+        raw_prompt = (bp.get("image_style") or "").strip()
+        if raw_prompt:
+            scene_prompt = _translate_prompt_to_en(raw_prompt)
+
+    # 提示詞為空 → 用商品名稱自動分析生成
+    if not scene_prompt and OPENAI_API_KEY:
+        product_name = job.get("ai_name") or job.get("raw_title") or ""
+        category     = job.get("category") or (bp.get("category") if brand_key else "") or ""
+        scene_prompt = _auto_bg_prompt(product_name, category)
+
     if scene_prompt:
-        print(f"[GPT-Image-2] 品牌={brand_key} 背景提示詞: {scene_prompt[:60]}", flush=True)
+        print(f"[GPT-Image-2] 品牌={brand_key} 背景提示詞: {scene_prompt[:80]}", flush=True)
 
     _pj_update(job_id, img_status="processing")
     processed = []
