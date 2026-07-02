@@ -855,104 +855,151 @@ def api_ai_regenerate(task_id):
 AI_IMAGES_HTML = """<!DOCTYPE html>
 <html lang="zh-Hant">
 <head>
-<meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
 <title>AI 圖片中心</title>
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
-body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#f5f5f7;color:#1a1a1a;min-height:100vh}
-.topbar{background:#fff;border-bottom:1px solid #eee;padding:0 24px;height:52px;display:flex;align-items:center;gap:10px;position:sticky;top:0;z-index:100}
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#f4f4f6;color:#1a1a1a;min-height:100vh;font-size:14px}
+.topbar{background:#fff;border-bottom:1px solid #e5e5e5;padding:0 20px;height:50px;display:flex;align-items:center;gap:8px;position:sticky;top:0;z-index:200}
 .topbar a{color:#666;text-decoration:none;font-size:13px}.topbar a:hover{color:#000}
-.topbar .sep{color:#ddd}.topbar h1{font-size:14px;font-weight:700}
-.page{display:grid;grid-template-columns:360px 1fr;gap:0;min-height:calc(100vh - 52px)}
-/* Left */
-.left{background:#fff;border-right:1px solid #eee;padding:18px;overflow-y:auto;display:flex;flex-direction:column;gap:12px;max-height:calc(100vh - 52px);position:sticky;top:52px}
-.sec-title{font-size:11px;font-weight:700;color:#999;letter-spacing:.8px;text-transform:uppercase;padding-bottom:4px;border-bottom:1px solid #f0f0f0;margin-bottom:2px}
-.fl{display:block;font-size:12px;font-weight:500;color:#555;margin-bottom:3px;margin-top:8px}
-.fl:first-child{margin-top:0}
-select,input[type=text],textarea{width:100%;border:1px solid #e0e0e0;border-radius:7px;padding:7px 10px;font-size:13px;font-family:inherit;outline:none;transition:border .15s;resize:vertical;background:#fff}
+.topbar .sep{color:#d0d0d0}.topbar h1{font-size:14px;font-weight:700}
+/* Flow bar */
+.flow-bar{background:#fff;border-bottom:1px solid #e5e5e5;padding:8px 20px;display:flex;align-items:center;gap:6px;flex-wrap:wrap;position:sticky;top:50px;z-index:100}
+.flow-step{font-size:12px;color:#aaa;font-weight:500;padding:4px 10px;border-radius:20px;background:#f4f4f6;white-space:nowrap}
+.flow-step.active{color:#1a1a1a;background:#e0e0e0;font-weight:700}
+.flow-step .bfree{background:#d4edda;color:#155724;padding:1px 5px;border-radius:6px;font-size:10px;font-weight:700;margin-left:3px}
+.flow-step .bcost{background:#fff3cd;color:#856404;padding:1px 5px;border-radius:6px;font-size:10px;font-weight:700;margin-left:3px}
+.flow-arrow{color:#ccc;font-size:12px}
+/* Main grid */
+.main-grid{display:grid;grid-template-columns:30fr 40fr 30fr;align-items:start}
+/* Left column */
+.col-left{background:#fff;border-right:1px solid #e5e5e5;padding:14px;display:flex;flex-direction:column;gap:10px;position:sticky;top:96px;max-height:calc(100vh - 96px);overflow-y:auto}
+.lcard{border:1px solid #ebebeb;border-radius:9px;padding:12px;background:#fafafa}
+.lcard-title{font-size:11px;font-weight:700;color:#555;letter-spacing:.6px;text-transform:uppercase;margin-bottom:9px;display:flex;align-items:center;gap:5px}
+.step-num{width:17px;height:17px;background:#1a1a1a;color:#fff;border-radius:50%;font-size:10px;display:inline-flex;align-items:center;justify-content:center;font-weight:800;flex-shrink:0}
+.fl{display:block;font-size:11px;font-weight:600;color:#555;margin-bottom:2px;margin-top:7px}
+.fl:first-of-type{margin-top:0}
+select,input[type=text],textarea{width:100%;border:1px solid #e0e0e0;border-radius:6px;padding:6px 8px;font-size:12px;font-family:inherit;outline:none;transition:border .15s;background:#fff;color:#1a1a1a}
 select:focus,input:focus,textarea:focus{border-color:#1a1a1a}
-textarea{resize:vertical;min-height:56px}
-.grid2{display:grid;grid-template-columns:1fr 1fr;gap:8px}
-/* Upload */
-.ref-zone{border:1.5px dashed #d8d8d8;border-radius:9px;padding:16px;text-align:center;cursor:pointer;position:relative;background:#fafafa;transition:.15s}
+textarea{resize:vertical;min-height:48px;line-height:1.5}
+.g2{display:grid;grid-template-columns:1fr 1fr;gap:7px}
+.ref-zone{border:1.5px dashed #d0d0d0;border-radius:7px;padding:10px;text-align:center;cursor:pointer;position:relative;background:#fff;transition:.15s;margin-top:2px}
 .ref-zone input{position:absolute;inset:0;opacity:0;cursor:pointer;width:100%;height:100%}
-.ref-zone:hover{border-color:#999;background:#f0f0f0}
-.ref-zone .ri{font-size:20px}.ref-zone .rh{font-size:11px;color:#aaa;margin-top:3px}
-.ref-zone .rn{font-size:11px;font-weight:600;color:#333;margin-top:3px;word-break:break-all}
-/* Buttons */
-.btn-build{width:100%;padding:10px;border:1.5px solid #1a1a1a;background:#fff;color:#1a1a1a;border-radius:8px;font-size:13px;font-weight:700;cursor:pointer;transition:.15s}
-.btn-build:hover{background:#1a1a1a;color:#fff}
-/* Variant cards */
-.variant-grid{display:grid;grid-template-columns:1fr 1fr;gap:10px}
-.variant-card{border:2px solid #eee;border-radius:10px;padding:12px;transition:.15s;cursor:default;background:#fff}
-.variant-card:hover{border-color:#999}
-.variant-card.selected{border-color:#1a1a1a;background:#fafafa}
-.variant-letter{font-size:11px;font-weight:800;background:#1a1a1a;color:#fff;border-radius:5px;padding:2px 7px;display:inline-block;margin-bottom:5px}
-.variant-lbl{font-size:12px;font-weight:700;margin-bottom:6px}
-.variant-prompt{font-size:10px;font-family:monospace;color:#666;background:#f5f5f5;border-radius:5px;padding:6px;max-height:80px;overflow-y:auto;line-height:1.4;white-space:pre-wrap;word-break:break-all}
-.btn-pick{width:100%;margin-top:8px;padding:6px;border:1.5px solid #1a1a1a;background:#fff;border-radius:7px;font-size:12px;font-weight:700;cursor:pointer;transition:.15s}
-.btn-pick:hover{background:#1a1a1a;color:#fff}
-/* Right */
-.right{padding:20px;display:flex;flex-direction:column;gap:16px;overflow-y:auto}
-.card{background:#fff;border-radius:12px;border:1px solid #eee;padding:18px}
-.card-title{font-size:13px;font-weight:700;margin-bottom:12px;display:flex;align-items:center;gap:8px}
-.badge{font-size:10px;font-weight:700;padding:2px 7px;border-radius:5px}
-.badge-info{background:#e8f4fd;color:#0277bd}
-.badge-warn{background:#fff3e0;color:#e65100}
-.prompt-area{width:100%;min-height:260px;border:1px solid #e0e0e0;border-radius:8px;padding:12px;font-size:12px;font-family:'SF Mono',Consolas,monospace;line-height:1.6;resize:vertical;outline:none;background:#fafafa;color:#333}
-.prompt-area:focus{border-color:#1a1a1a;background:#fff}
-.prompt-actions{display:flex;gap:8px;margin-top:8px}
-.btn-sm{padding:7px 14px;border:1px solid #ddd;border-radius:7px;font-size:12px;cursor:pointer;background:#fff;transition:.15s;font-weight:500}
-.btn-sm:hover{border-color:#999}
-.btn-sm.primary{background:#1a1a1a;color:#fff;border-color:#1a1a1a}
-.btn-sm.primary:hover{background:#333}
-/* Gen settings */
-.gen-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-bottom:14px}
-.gen-item label{display:block;font-size:11px;font-weight:600;color:#888;margin-bottom:4px}
-.gen-item select{font-size:12px;padding:6px 8px}
-.btn-gen{width:100%;padding:13px;background:#1a1a1a;color:#fff;border:none;border-radius:10px;font-size:15px;font-weight:700;cursor:pointer;transition:.15s;display:flex;align-items:center;justify-content:center;gap:8px}
-.btn-gen:hover{background:#333}.btn-gen:disabled{background:#bbb;cursor:not-allowed}
-.spin{width:18px;height:18px;border:2.5px solid rgba(255,255,255,.3);border-top-color:#fff;border-radius:50%;animation:spin .7s linear infinite;display:none}
+.ref-zone:hover{border-color:#888;background:#f9f9f9}
+.ref-icon{font-size:16px}.ref-hint{font-size:10px;color:#aaa;margin-top:1px}.ref-name{font-size:10px;font-weight:600;color:#333;margin-top:1px;word-break:break-all}
+/* Middle column */
+.col-mid{padding:14px;display:flex;flex-direction:column;gap:10px;overflow-y:auto}
+.btn-variants-main{width:100%;padding:13px;background:#1a1a1a;color:#fff;border:none;border-radius:10px;font-size:14px;font-weight:700;cursor:pointer;transition:.15s;display:flex;align-items:center;justify-content:center;gap:8px}
+.btn-variants-main:hover{background:#333}.btn-variants-main:disabled{background:#999;cursor:not-allowed}
+.mid-info{font-size:12px;color:#3949ab;background:#e8eaf6;border-radius:8px;padding:10px 13px;line-height:1.65}
+.variant-list{display:flex;flex-direction:column;gap:10px}
+.vcard{border:2px solid #e8e8e8;border-radius:10px;padding:13px;background:#fff;transition:border-color .15s}
+.vcard:hover{border-color:#bbb}
+.vcard.selected{border-color:#e53935;background:#fff9f9}
+.vcard-header{display:flex;align-items:center;gap:7px;margin-bottom:7px}
+.vcard-letter{font-size:10px;font-weight:800;background:#1a1a1a;color:#fff;border-radius:4px;padding:2px 6px;flex-shrink:0}
+.vcard-label{font-size:13px;font-weight:700;flex:1}
+.vcard-size{font-size:10px;color:#888;background:#f0f0f0;padding:2px 6px;border-radius:4px;white-space:nowrap}
+.vcard-meta{display:flex;gap:5px;flex-wrap:wrap;margin-bottom:7px}
+.vtag{font-size:10px;color:#555;background:#f0f0f0;padding:2px 6px;border-radius:8px}
+.vtag-free{background:#fff3e0;color:#e65100;font-weight:700}
+.vcard-preview{display:none;font-size:10px;font-family:Consolas,monospace;color:#555;background:#f7f7f7;border-radius:6px;padding:8px;max-height:120px;overflow-y:auto;line-height:1.5;white-space:pre-wrap;word-break:break-all;margin-bottom:7px}
+.vcard-preview.open{display:block}
+.vcard-btns{display:flex;gap:7px}
+.btn-view{flex:1;padding:5px;border:1px solid #d0d0d0;background:#fff;border-radius:6px;font-size:11px;cursor:pointer;transition:.15s;font-weight:500}
+.btn-view:hover{border-color:#888}
+.btn-pick{flex:2;padding:5px;border:1.5px solid #1a1a1a;background:#fff;border-radius:6px;font-size:12px;font-weight:700;cursor:pointer;transition:.15s}
+.btn-pick:hover,.vcard.selected .btn-pick{background:#1a1a1a;color:#fff}
+/* Right column */
+.col-right{padding:14px;border-left:1px solid #e5e5e5;background:#fff;display:flex;flex-direction:column;gap:10px;position:sticky;top:96px;max-height:calc(100vh - 96px);overflow-y:auto}
+.rp-section{display:none}
+.rp-section.active{display:flex;flex-direction:column;gap:10px}
+.rp-empty{align-items:center;justify-content:center;min-height:260px;text-align:center;border:2px dashed #e0e0e0;border-radius:12px;padding:28px;background:#fafafa}
+.rp-empty-icon{font-size:34px;margin-bottom:8px}
+.rp-empty-title{font-size:14px;font-weight:700;color:#bbb;margin-bottom:6px}
+.rp-empty-hint{font-size:12px;color:#ccc;line-height:1.7}
+.rp-ready-card{border:1.5px solid #e5e5e5;border-radius:10px;padding:15px;display:flex;flex-direction:column;gap:9px}
+.rp-chosen-label{font-size:10px;font-weight:700;color:#888;text-transform:uppercase;letter-spacing:.5px}
+.rp-chosen-name{font-size:15px;font-weight:700}
+.rp-chosen-meta{font-size:12px;color:#666}
+.rp-cost{font-size:12px;font-weight:700;background:#f4f4f6;padding:7px 10px;border-radius:7px;display:flex;align-items:center;gap:6px}
+.rp-warn{font-size:11px;color:#e65100;background:#fff8f0;border-radius:6px;padding:7px 10px;line-height:1.5}
+.btn-gen{width:100%;padding:13px;background:#e53935;color:#fff;border:none;border-radius:10px;font-size:14px;font-weight:700;cursor:pointer;transition:.15s;display:flex;align-items:center;justify-content:center;gap:8px}
+.btn-gen:hover{background:#c62828}.btn-gen:disabled{background:#bbb;cursor:not-allowed}
+.spin{width:15px;height:15px;border:2px solid rgba(255,255,255,.3);border-top-color:#fff;border-radius:50%;animation:spin .7s linear infinite;display:none}
 @keyframes spin{to{transform:rotate(360deg)}}
-/* Result */
-.result-img{width:100%;border-radius:10px;border:1px solid #eee;object-fit:contain;display:block;max-height:520px}
-.result-actions{display:flex;gap:8px;margin-top:12px;flex-wrap:wrap}
-.btn-act{padding:8px 16px;border-radius:8px;font-size:12px;font-weight:600;cursor:pointer;border:1.5px solid #1a1a1a;background:#fff;color:#1a1a1a;text-decoration:none;display:inline-flex;align-items:center;gap:5px}
+.err-box{background:#fff3f3;border:1px solid #ffd0d0;border-radius:7px;padding:8px;font-size:12px;color:#c00;display:none}
+.result-img{width:100%;border-radius:10px;border:1px solid #eee;object-fit:contain;display:block;max-height:380px}
+.result-actions{display:flex;gap:7px;flex-wrap:wrap}
+.btn-act{padding:7px 13px;border-radius:7px;font-size:12px;font-weight:600;cursor:pointer;border:1.5px solid #1a1a1a;background:#fff;color:#1a1a1a;text-decoration:none;display:inline-flex;align-items:center;gap:4px;transition:.15s}
 .btn-act:hover{background:#1a1a1a;color:#fff}
-.btn-act.filled{background:#1a1a1a;color:#fff}
-.btn-act.filled:hover{background:#333}
-.err-box{background:#fff3f3;border:1px solid #ffd0d0;border-radius:8px;padding:10px;font-size:12px;color:#c00;display:none;margin-top:8px}
+.btn-act.filled{background:#1a1a1a;color:#fff}.btn-act.filled:hover{background:#333}
+/* Collapsible prompt edit */
+.prompt-collapse-wrap{background:#fff;border-top:1px solid #e5e5e5;border-bottom:1px solid #e5e5e5}
+.prompt-collapse-btn{width:100%;padding:11px 20px;background:none;border:none;cursor:pointer;text-align:left;font-size:13px;font-weight:700;display:flex;align-items:center;gap:7px;color:#1a1a1a;transition:background .15s}
+.prompt-collapse-btn:hover{background:#f5f5f5}
+.collapse-hint{font-size:11px;color:#aaa;font-weight:400}
+.prompt-collapse-body{padding:0 20px 14px}
+.prompt-area{width:100%;min-height:180px;border:1px solid #e0e0e0;border-radius:8px;padding:11px;font-size:12px;font-family:Consolas,monospace;line-height:1.6;resize:vertical;outline:none;background:#fafafa;color:#333}
+.prompt-area:focus{border-color:#1a1a1a;background:#fff}
+.prompt-actions{display:flex;gap:7px;margin-top:7px;align-items:center}
+.btn-sm{padding:6px 11px;border:1px solid #ddd;border-radius:6px;font-size:12px;cursor:pointer;background:#fff;transition:.15s;font-weight:500}
+.btn-sm:hover{border-color:#888}
 /* History */
-.history-wrap{padding:20px;background:#f5f5f7;border-top:1px solid #eee}
-.history-hd{font-size:14px;font-weight:700;margin-bottom:12px;display:flex;align-items:center;justify-content:space-between}
-.history-hd button{padding:6px 14px;background:#fff;border:1px solid #ddd;border-radius:7px;font-size:12px;cursor:pointer}
-.htable{width:100%;border-collapse:collapse;background:#fff;border-radius:12px;overflow:hidden;border:1px solid #eee}
-.htable th{background:#f7f7f7;font-size:11px;font-weight:700;color:#888;padding:9px 12px;text-align:left;border-bottom:1px solid #eee}
-.htable td{padding:8px 12px;font-size:12px;border-bottom:1px solid #f5f5f5;vertical-align:middle}
-.htable tr:last-child td{border-bottom:none}
-.htable tr:hover td{background:#fafafa}
-.h-thumb{width:48px;height:48px;object-fit:cover;border-radius:6px;border:1px solid #eee}
-.status-done{color:#2e7d32;font-weight:700;font-size:11px}
-.status-fail{color:#c00;font-weight:700;font-size:11px}
-.status-pend{color:#e65100;font-weight:700;font-size:11px}
-.status-draft{color:#5c6bc0;font-weight:700;font-size:11px}
-.h-prompt{color:#888;max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.history-wrap{padding:18px 20px;background:#f4f4f6}
+.history-hd{font-size:14px;font-weight:700;margin-bottom:11px;display:flex;align-items:center;justify-content:space-between}
+.history-hd button{padding:5px 11px;background:#fff;border:1px solid #ddd;border-radius:6px;font-size:12px;cursor:pointer;transition:.15s}
+.history-hd button:hover{border-color:#999}
+.gallery-grid{display:grid;grid-template-columns:repeat(6,1fr);gap:7px;margin-bottom:14px}
+.g-item{aspect-ratio:1;border-radius:8px;overflow:hidden;border:1px solid #e5e5e5;background:#e8e8e8;position:relative}
+.g-item img{width:100%;height:100%;object-fit:cover;display:block}
+.g-item .g-overlay{position:absolute;inset:0;background:rgba(0,0,0,.4);display:flex;align-items:center;justify-content:center;opacity:0;transition:.2s}
+.g-item:hover .g-overlay{opacity:1}
+.g-overlay a{color:#fff;font-size:18px;text-decoration:none}
+.htable{width:100%;border-collapse:collapse;background:#fff;border-radius:10px;overflow:hidden;border:1px solid #e8e8e8;font-size:12px}
+.htable th{background:#f7f7f7;font-size:11px;font-weight:700;color:#888;padding:8px 12px;text-align:left;border-bottom:1px solid #eee}
+.htable td{padding:7px 12px;border-bottom:1px solid #f5f5f5;vertical-align:middle}
+.htable tr:last-child td{border-bottom:none}.htable tr:hover td{background:#fafafa}
+.h-thumb{width:42px;height:42px;object-fit:cover;border-radius:6px;border:1px solid #eee}
+.sd{background:#e8f5e9;color:#2e7d32;font-weight:700;font-size:10px;padding:2px 7px;border-radius:8px}
+.sf{background:#ffebee;color:#c62828;font-weight:700;font-size:10px;padding:2px 7px;border-radius:8px}
+.sp{background:#fff3e0;color:#e65100;font-weight:700;font-size:10px;padding:2px 7px;border-radius:8px}
+.sg{background:#e8eaf6;color:#3949ab;font-weight:700;font-size:10px;padding:2px 7px;border-radius:8px}
 .empty-history{text-align:center;padding:32px;color:#bbb;font-size:13px}
-@media(max-width:760px){.page{grid-template-columns:1fr}.left{max-height:none;position:static}.gen-grid{grid-template-columns:1fr}}
+@media(max-width:900px){
+  .main-grid{grid-template-columns:1fr}
+  .col-left,.col-right{position:static;max-height:none;border:none;border-bottom:1px solid #e5e5e5}
+  .col-right{border-left:none}
+  .gallery-grid{grid-template-columns:repeat(3,1fr)}
+  .flow-bar{position:static;display:none}
+}
 </style>
 </head>
 <body>
+
 <div class="topbar">
   <a href="/admin?key={{ key }}">← 後台</a><span class="sep">/</span>
   <h1>AI 圖片中心</h1>
 </div>
 
-<div class="page">
-<!-- ═══ Left: Form ═══ -->
-<div class="left">
-  <div class="sec-title">品牌 & 用途</div>
+<div class="flow-bar">
+  <div class="flow-step active">① 填商品資料</div>
+  <div class="flow-arrow">→</div>
+  <div class="flow-step">② 產生 4 組 Prompt<span class="bfree">不扣點</span></div>
+  <div class="flow-arrow">→</div>
+  <div class="flow-step">③ 選定方案</div>
+  <div class="flow-arrow">→</div>
+  <div class="flow-step">④ 生成圖片<span class="bcost">才扣點</span></div>
+</div>
 
-  <div>
+<div class="main-grid">
+
+<!-- ══ LEFT COLUMN ══ -->
+<div class="col-left">
+
+  <div class="lcard">
+    <div class="lcard-title"><span class="step-num">1</span>品牌 &amp; 設定</div>
     <label class="fl">品牌</label>
     <select id="brandSel" onchange="onBrandChange()">
       <option value="">— 不選品牌 —</option>
@@ -960,147 +1007,116 @@ textarea{resize:vertical;min-height:56px}
       <option value="{{ b.brand_key }}">{{ b.name }}</option>
       {% endfor %}
     </select>
-  </div>
-
-  <div>
     <label class="fl">圖片用途</label>
     <select id="imageType" onchange="onTypeChange()">
       {% for pt, pv in presets.items() %}
       <option value="{{ pt }}" {% if pt=='shopee_main' %}selected{% endif %}>{{ pv.label }}</option>
       {% endfor %}
     </select>
-  </div>
-
-  <div class="sec-title" style="margin-top:4px">商品資訊</div>
-
-  <div>
-    <label class="fl">商品名稱 *</label>
-    <input type="text" id="productName" placeholder="例：JS 高架床 黑色 單人 6尺">
-  </div>
-
-  <div class="grid2">
-    <div>
-      <label class="fl">SKU</label>
-      <input type="text" id="sku" placeholder="例：JS-B001">
-    </div>
-    <div>
-      <label class="fl">分類</label>
-      <input type="text" id="category" placeholder="例：高架床">
-    </div>
-  </div>
-
-  <div>
-    <label class="fl">尺寸 / 規格</label>
-    <input type="text" id="specs" placeholder="例：單人 90×190cm，床高 150cm">
-  </div>
-
-  <div class="grid2">
-    <div>
-      <label class="fl">材質</label>
-      <input type="text" id="material" placeholder="例：方管鐵管">
-    </div>
-    <div>
-      <label class="fl">顏色</label>
-      <input type="text" id="color" placeholder="例：消光黑">
-    </div>
-  </div>
-
-  <div>
-    <label class="fl">賣點（逗號分隔）</label>
-    <textarea id="sellingPoints" rows="2" placeholder="例：強化螺絲組裝、承重150kg、台灣設計"></textarea>
-  </div>
-
-  <div class="sec-title" style="margin-top:4px">需求</div>
-
-  <div>
-    <label class="fl">這次需求說明</label>
-    <textarea id="userRequest" rows="2" placeholder="例：放在北歐風客廳，木地板，窗邊自然光，呈現空間規劃感"></textarea>
-  </div>
-
-  <div>
-    <label class="fl">參考圖（選填，上傳後套入 AI 編輯）</label>
-    <div class="ref-zone" id="refZone">
-      <input type="file" id="refImg" accept="image/*" onchange="onRefFile(this)">
-      <div class="ri">🖼️</div>
-      <div class="rh">點擊或拖曳參考圖</div>
-      <div class="rn" id="refName"></div>
-    </div>
-  </div>
-
-  <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">
-    <button class="btn-build" onclick="doBuildPrompt()">⚙ 組裝 Prompt</button>
-    <button class="btn-build" onclick="doVariants()" style="background:#1a1a1a;color:#fff">✦ 4 組方案</button>
-  </div>
-</div>
-
-<!-- ═══ Right: Prompt + Generate + Result ═══ -->
-<div class="right">
-
-  <!-- Prompt card -->
-  <div class="card">
-    <div class="card-title">
-      Prompt 預覽
-      <span class="badge badge-info">可手動修改</span>
-    </div>
-    <textarea class="prompt-area" id="promptArea" placeholder="點擊「組裝 Prompt」自動生成，或直接在此輸入..."></textarea>
-    <div class="prompt-actions">
-      <button class="btn-sm" onclick="doBuildPrompt()">⚙ 重新組裝</button>
-      <button class="btn-sm" onclick="copyPromptText()">📋 複製</button>
-      <button class="btn-sm" onclick="document.getElementById('promptArea').value=''">✕ 清空</button>
-      <span id="charCount" style="margin-left:auto;font-size:11px;color:#aaa;align-self:center"></span>
-    </div>
-  </div>
-
-  <!-- 4 組方案預覽（hidden until doVariants） -->
-  <div class="card" id="variantCard" style="display:none">
-    <div class="card-title">4 組方案預覽 <span class="badge badge-info">點擊方案後再生成</span></div>
-    <div style="font-size:12px;color:#5c6bc0;background:#f0f2ff;border-radius:7px;padding:8px 12px;margin-bottom:12px">
-      ℹ️ 這裡只產生 Prompt 方案，不會消耗圖片點數。選擇方案後，按下方「開始生成圖片」才會計費。
-    </div>
-    <div class="variant-grid" id="variantGrid"></div>
-  </div>
-
-  <!-- Generate settings + button -->
-  <div class="card">
-    <div class="card-title">生成設定 <span class="badge badge-warn">每次計費</span></div>
-    <div class="gen-grid">
-      <div class="gen-item">
-        <label>尺寸</label>
+    <div class="g2" style="margin-top:7px">
+      <div>
+        <label class="fl" style="margin-top:0">尺寸</label>
         <select id="genSize">
           {% for s, sl in size_labels.items() %}
           <option value="{{ s }}" {% if s=='1024x1024' %}selected{% endif %}>{{ s }}</option>
           {% endfor %}
         </select>
       </div>
-      <div class="gen-item">
-        <label>品質</label>
+      <div>
+        <label class="fl" style="margin-top:0">品質</label>
         <select id="genQuality">
-          <option value="high" selected>high（高品質）</option>
-          <option value="auto">auto（自動）</option>
-        </select>
-      </div>
-      <div class="gen-item">
-        <label>格式</label>
-        <select id="genFormat">
-          <option value="png" selected>PNG</option>
-          <option value="webp">WebP</option>
-          <option value="jpeg">JPEG</option>
+          <option value="high" selected>high（高）</option>
+          <option value="auto">auto</option>
         </select>
       </div>
     </div>
-    <button class="btn-gen" id="genBtn" onclick="doGenerate()">
-      <div class="spin" id="genSpin"></div>
-      <span id="genBtnText">▶ 開始生成圖片</span>
-    </button>
-    <div style="font-size:11px;color:#e65100;text-align:center;margin-top:6px">
-      ⚠️ 按下後才會呼叫圖片 API 並產生成本
-    </div>
-    <div class="err-box" id="genErr"></div>
+    <label class="fl">輸出格式</label>
+    <select id="genFormat">
+      <option value="png" selected>PNG</option>
+      <option value="webp">WebP</option>
+      <option value="jpeg">JPEG</option>
+    </select>
   </div>
 
-  <!-- Result card (hidden until generated) -->
-  <div class="card" id="resultCard" style="display:none">
-    <div class="card-title">生成結果</div>
+  <div class="lcard">
+    <div class="lcard-title"><span class="step-num">2</span>商品資訊</div>
+    <label class="fl">商品名稱 <span style="color:#e53935">*</span></label>
+    <input type="text" id="productName" placeholder="例：JS 高架床 黑色 單人 6尺">
+    <div class="g2">
+      <div><label class="fl">SKU</label><input type="text" id="sku" placeholder="JS-B001"></div>
+      <div><label class="fl">分類</label><input type="text" id="category" placeholder="高架床"></div>
+    </div>
+    <label class="fl">規格 / 尺寸</label>
+    <input type="text" id="specs" placeholder="例：單人 90×190cm，床高 150cm">
+    <div class="g2">
+      <div><label class="fl">材質</label><input type="text" id="material" placeholder="方管鐵管"></div>
+      <div><label class="fl">顏色</label><input type="text" id="color" placeholder="消光黑"></div>
+    </div>
+    <label class="fl">賣點（逗號分隔）</label>
+    <textarea id="sellingPoints" rows="2" placeholder="強化螺絲、承重150kg、台灣設計"></textarea>
+  </div>
+
+  <div class="lcard">
+    <div class="lcard-title"><span class="step-num">3</span>需求 &amp; 參考圖</div>
+    <label class="fl">這次需求說明</label>
+    <textarea id="userRequest" rows="2" placeholder="例：北歐風客廳，木地板，窗邊自然光"></textarea>
+    <label class="fl">參考圖（選填，上傳後套用 AI 編輯）</label>
+    <div class="ref-zone" id="refZone">
+      <input type="file" id="refImg" accept="image/*" onchange="onRefFile(this)">
+      <div class="ref-icon">🖼️</div>
+      <div class="ref-hint">點擊或拖曳參考圖</div>
+      <div class="ref-name" id="refName"></div>
+    </div>
+  </div>
+
+</div>
+
+<!-- ══ MIDDLE COLUMN ══ -->
+<div class="col-mid">
+
+  <button class="btn-variants-main" id="variantsBtn" onclick="doVariants()">
+    <div class="spin" id="vBtnSpin" style="border-color:rgba(255,255,255,.3);border-top-color:#fff"></div>
+    <span id="vBtnText">✦ 產生 4 組 Prompt 方案（不扣點）</span>
+  </button>
+
+  <div class="mid-info">
+    ℹ️ 點擊上方按鈕，一次生成 A/B/C/D 四組針對不同用途優化的 Prompt。<br>
+    生成方案<strong>不消耗圖片點數</strong>，選定方案後按「開始生成圖片」才計費。
+  </div>
+
+  <div class="variant-list" id="variantList"></div>
+
+</div>
+
+<!-- ══ RIGHT COLUMN ══ -->
+<div class="col-right">
+
+  <div class="rp-section active rp-empty" id="rp-empty">
+    <div class="rp-empty-icon">🎨</div>
+    <div class="rp-empty-title">尚未生成</div>
+    <div class="rp-empty-hint">
+      左側填寫商品資料<br>
+      中間點擊產生 4 組方案<br>
+      選定方案後點擊生成圖片
+    </div>
+  </div>
+
+  <div class="rp-section" id="rp-ready">
+    <div class="rp-ready-card">
+      <div class="rp-chosen-label">已選方案</div>
+      <div class="rp-chosen-name" id="rpReadyName">—</div>
+      <div class="rp-chosen-meta" id="rpReadyMeta"></div>
+      <div class="rp-cost">💰 預估：1 點（生成後才扣除）</div>
+      <div class="rp-warn">⚠️ 按下後才會呼叫圖片 API 並產生成本</div>
+      <button class="btn-gen" id="genBtn" onclick="doGenerate()">
+        <div class="spin" id="genSpin"></div>
+        <span id="genBtnText">▶ 開始生成圖片</span>
+      </button>
+      <div class="err-box" id="genErr"></div>
+    </div>
+  </div>
+
+  <div class="rp-section" id="rp-done">
     <img class="result-img" id="resultImg" src="" alt="生成結果">
     <div class="result-actions">
       <a class="btn-act filled" id="dlBtn" download="ai_result.png">⬇ 下載</a>
@@ -1112,21 +1128,67 @@ textarea{resize:vertical;min-height:56px}
 </div>
 </div>
 
-<!-- ═══ History ═══ -->
+<!-- ══ COLLAPSIBLE PROMPT EDIT ══ -->
+<div class="prompt-collapse-wrap">
+  <button class="prompt-collapse-btn" onclick="togglePromptEdit()">
+    <span id="collapseIcon">▶</span>
+    已選 Prompt / 手動修改
+    <span class="collapse-hint">（默認收合，展開可查看或手動修改）</span>
+  </button>
+  <div class="prompt-collapse-body" id="promptCollapseBody" style="display:none">
+    <textarea class="prompt-area" id="promptArea" placeholder="選擇方案後自動填入，也可直接在此輸入 Prompt..."></textarea>
+    <div class="prompt-actions">
+      <button class="btn-sm" onclick="doBuildPrompt()">⚙ 重新組裝</button>
+      <button class="btn-sm" onclick="copyPromptText()">📋 複製</button>
+      <button class="btn-sm" onclick="document.getElementById('promptArea').value=''">✕ 清空</button>
+      <span id="charCount" style="margin-left:auto;font-size:11px;color:#aaa"></span>
+    </div>
+  </div>
+</div>
+
+<!-- ══ HISTORY ══ -->
 <div class="history-wrap">
   <div class="history-hd">
-    歷史紀錄
+    🗂 歷史紀錄
     <button onclick="loadHistory()">↻ 重新整理</button>
   </div>
+  <div class="gallery-grid" id="galleryGrid"></div>
   <div id="historyArea"><div class="empty-history">尚無生成紀錄</div></div>
 </div>
 
 <script>
-const KEY = '{{ key }}';
-let currentTaskId    = null;
-let selectedDraftId  = null;  // prompt_draft task ID to upgrade on generate success
+const KEY  = '{{ key }}';
+const PMAP = {{ presets | tojson }};
+let currentTaskId   = null;
+let selectedDraftId = null;
 
-// ─ collect form data helper ─
+// ── Right-panel state machine ────────────────────────────────────────────
+function setRpState(s){
+  const states = ['empty','ready','done'];
+  states.forEach(name=>{
+    const el = document.getElementById('rp-'+name);
+    if(!el) return;
+    let cls = 'rp-section';
+    if(name === s)   cls += ' active';
+    if(name === 'empty') cls += ' rp-empty';
+    el.className = cls;
+  });
+}
+
+// ── Collapsible prompt ───────────────────────────────────────────────────
+function togglePromptEdit(){
+  const body = document.getElementById('promptCollapseBody');
+  const icon = document.getElementById('collapseIcon');
+  const open = body.style.display === 'block';
+  body.style.display = open ? 'none' : 'block';
+  icon.textContent   = open ? '▶' : '▼';
+}
+function openPromptEdit(){
+  document.getElementById('promptCollapseBody').style.display = 'block';
+  document.getElementById('collapseIcon').textContent = '▼';
+}
+
+// ── Form data ────────────────────────────────────────────────────────────
 function formData(){
   return {
     brand_key:      document.getElementById('brandSel').value,
@@ -1143,11 +1205,36 @@ function formData(){
   };
 }
 
-// ─ 4 variant cards ─
+// ── Brand / type change ──────────────────────────────────────────────────
+function onBrandChange(){ loadHistory(); }
+function onTypeChange(){
+  const t  = document.getElementById('imageType').value;
+  const sz = PMAP[t] && PMAP[t].default_size;
+  if(sz) document.getElementById('genSize').value = sz;
+}
+
+// ── Ref image ────────────────────────────────────────────────────────────
+const rz = document.getElementById('refZone');
+rz.addEventListener('dragover', e=>{e.preventDefault();rz.style.borderColor='#666';});
+rz.addEventListener('dragleave', ()=>rz.style.borderColor='');
+rz.addEventListener('drop', e=>{
+  e.preventDefault(); rz.style.borderColor='';
+  const f = e.dataTransfer.files[0];
+  if(f && f.type.startsWith('image/')){
+    const dt = new DataTransfer(); dt.items.add(f);
+    document.getElementById('refImg').files = dt.files;
+    document.getElementById('refName').textContent = f.name;
+  }
+});
+function onRefFile(i){ document.getElementById('refName').textContent = i.files[0] ? i.files[0].name : ''; }
+
+// ── Generate 4 variants ──────────────────────────────────────────────────
 async function doVariants(){
-  const btn = document.querySelectorAll('.btn-build')[1];
-  btn.textContent='組裝中…'; btn.disabled=true;
-  document.getElementById('variantCard').style.display='none';
+  const btn  = document.getElementById('variantsBtn');
+  const spin = document.getElementById('vBtnSpin');
+  const txt  = document.getElementById('vBtnText');
+  btn.disabled=true; spin.style.display='block'; txt.textContent='組裝中…';
+  document.getElementById('variantList').innerHTML = '';
   try{
     const r = await fetch('/api/ai-images/prompt-variants?key='+KEY,{
       method:'POST', headers:{'Content-Type':'application/json'},
@@ -1155,62 +1242,58 @@ async function doVariants(){
     });
     const j = await r.json();
     if(!j.ok){ alert('方案生成失敗: '+(j.error||'')); return; }
-    const grid = document.getElementById('variantGrid');
-    grid.innerHTML = j.variants.map(v=>`
-      <div class="variant-card" id="vc_${v.type}">
-        <div><span class="variant-letter">${v.letter}</span></div>
-        <div class="variant-lbl">${v.label}</div>
-        <div style="font-size:10px;color:#999;margin-bottom:4px">${v.size}</div>
-        <div class="variant-prompt">${v.prompt.replace(/</g,'&lt;')}</div>
-        <button class="btn-pick" onclick="pickVariant(${JSON.stringify(v).replace(/"/g,'&quot;')})">選擇此方案 →</button>
-      </div>`).join('');
-    document.getElementById('variantCard').style.display='block';
-    document.getElementById('variantCard').scrollIntoView({behavior:'smooth',block:'start'});
+    const list = document.getElementById('variantList');
+    list.innerHTML = j.variants.map(function(v){
+      const preset = PMAP[v.type] || {};
+      const platform = preset.platform || '';
+      const vj = JSON.stringify(v).replace(/\\/g,'\\\\').replace(/"/g,'&quot;');
+      const promptHtml = v.prompt.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+      return '<div class="vcard" id="vc_'+v.type+'">'
+        +'<div class="vcard-header">'
+        +'<span class="vcard-letter">'+v.letter+'</span>'
+        +'<span class="vcard-label">'+v.label+'</span>'
+        +'<span class="vcard-size">'+v.size+'</span>'
+        +'</div>'
+        +'<div class="vcard-meta">'
+        +(platform?'<span class="vtag">'+platform.slice(0,35)+'</span>':'')
+        +'<span class="vtag vtag-free">此方案 0 點</span>'
+        +'</div>'
+        +'<div class="vcard-preview" id="vp_'+v.type+'">'+promptHtml+'</div>'
+        +'<div class="vcard-btns">'
+        +'<button class="btn-view" onclick="toggleVP(''+v.type+'',this)">查看完整 Prompt</button>'
+        +'<button class="btn-pick" onclick='pickVariant('+vj+')'>選擇此方案 →</button>'
+        +'</div></div>';
+    }).join('');
     loadHistory();
   }catch(e){ alert('連線錯誤: '+e.message); }
-  btn.textContent='✦ 4 組方案'; btn.disabled=false;
+  btn.disabled=false; spin.style.display='none'; txt.textContent='✦ 產生 4 組 Prompt 方案（不扣點）';
 }
 
+function toggleVP(type, btn){
+  const el = document.getElementById('vp_'+type);
+  if(!el) return;
+  el.classList.toggle('open');
+  btn.textContent = el.classList.contains('open') ? '收起 ▲' : '查看完整 Prompt';
+}
+
+// ── Pick variant ──────────────────────────────────────────────────────────
 function pickVariant(v){
   document.getElementById('promptArea').value = v.prompt;
   updateCharCount();
+  openPromptEdit();
   document.getElementById('imageType').value = v.type;
   document.getElementById('genSize').value   = v.size;
-  selectedDraftId = v.task_id || null;  // remember which draft to upgrade
-  document.querySelectorAll('.variant-card').forEach(c=>c.classList.remove('selected'));
-  const card = document.getElementById('vc_'+v.type);
+  selectedDraftId = v.task_id || null;
+  document.querySelectorAll('.vcard').forEach(function(c){c.classList.remove('selected');});
+  var card = document.getElementById('vc_'+v.type);
   if(card) card.classList.add('selected');
-  document.querySelector('.btn-gen').scrollIntoView({behavior:'smooth',block:'center'});
+  document.getElementById('rpReadyName').textContent = v.letter+' — '+v.label;
+  document.getElementById('rpReadyMeta').textContent = '尺寸：'+v.size;
+  setRpState('ready');
 }
 
-// ─ ref image ─
-const rz = document.getElementById('refZone');
-rz.addEventListener('dragover', e=>{e.preventDefault();rz.style.borderColor='#666';});
-rz.addEventListener('dragleave', ()=>rz.style.borderColor='');
-rz.addEventListener('drop', e=>{
-  e.preventDefault(); rz.style.borderColor='';
-  const f=e.dataTransfer.files[0];
-  if(f&&f.type.startsWith('image/')){
-    const dt=new DataTransfer(); dt.items.add(f);
-    document.getElementById('refImg').files=dt.files;
-    document.getElementById('refName').textContent=f.name;
-  }
-});
-function onRefFile(i){document.getElementById('refName').textContent=i.files[0]?.name||'';}
-
-// ─ brand / type change: update default size ─
-function onBrandChange(){}
-function onTypeChange(){
-  const pMap = {{ presets | tojson }};
-  const t = document.getElementById('imageType').value;
-  const sz = pMap[t]?.default_size;
-  if(sz) document.getElementById('genSize').value = sz;
-}
-
-// ─ build prompt ─
+// ── Build single prompt ───────────────────────────────────────────────────
 async function doBuildPrompt(){
-  const btn = document.querySelectorAll('.btn-build')[0];
-  btn.textContent='組裝中…'; btn.disabled=true;
   try{
     const r = await fetch('/api/ai-images/prompt?key='+KEY,{
       method:'POST', headers:{'Content-Type':'application/json'},
@@ -1220,22 +1303,21 @@ async function doBuildPrompt(){
     if(j.ok){
       document.getElementById('promptArea').value = j.prompt;
       updateCharCount();
-      selectedDraftId = j.task_id || null;  // track this draft
+      openPromptEdit();
+      selectedDraftId = j.task_id || null;
       loadHistory();
     } else alert('Prompt 組裝失敗: '+(j.error||''));
   }catch(e){ alert('連線錯誤: '+e.message); }
-  btn.textContent='⚙ 組裝 Prompt'; btn.disabled=false;
 }
 
 function updateCharCount(){
   const v = document.getElementById('promptArea').value;
-  document.getElementById('charCount').textContent = v.length + ' 字元';
+  document.getElementById('charCount').textContent = v.length+' 字元';
 }
 document.getElementById('promptArea').addEventListener('input', updateCharCount);
 
-// ─ generate ─
+// ── Generate image ────────────────────────────────────────────────────────
 async function doGenerate(){
-  // ── 防呆：必填欄位檢查 ──────────────────────────────────────────
   const prompt      = document.getElementById('promptArea').value.trim();
   const productName = document.getElementById('productName').value.trim();
   const brandKey    = document.getElementById('brandSel').value;
@@ -1245,33 +1327,31 @@ async function doGenerate(){
     showGenErr('請先選擇一組 Prompt 方案，或手動輸入 Prompt');
     return;
   }
-  const missing = [];
+  var missing = [];
   if(!productName) missing.push('商品名稱');
   if(!brandKey)    missing.push('品牌');
   if(!imageType)   missing.push('圖片用途');
   if(missing.length){
-    showGenErr('請填寫必填欄位：' + missing.join('、'));
+    showGenErr('請填寫必填欄位：'+missing.join('、'));
     return;
   }
-  // ────────────────────────────────────────────────────────────────
 
   const btn  = document.getElementById('genBtn');
   const spin = document.getElementById('genSpin');
   const txt  = document.getElementById('genBtnText');
   btn.disabled=true; spin.style.display='block'; txt.textContent='生成中…';
   hideGenErr();
-  document.getElementById('resultCard').style.display='none';
 
   const fd = new FormData();
-  fd.append('final_prompt',   prompt);
-  fd.append('brand_key',      brandKey);
-  fd.append('product_name',   productName);
-  fd.append('sku',            document.getElementById('sku').value);
-  fd.append('image_type',     imageType);
-  fd.append('user_request',   document.getElementById('userRequest').value);
-  fd.append('size',           document.getElementById('genSize').value);
-  fd.append('quality',        document.getElementById('genQuality').value);
-  fd.append('output_format',  document.getElementById('genFormat').value);
+  fd.append('final_prompt',  prompt);
+  fd.append('brand_key',     brandKey);
+  fd.append('product_name',  productName);
+  fd.append('sku',           document.getElementById('sku').value);
+  fd.append('image_type',    imageType);
+  fd.append('user_request',  document.getElementById('userRequest').value);
+  fd.append('size',          document.getElementById('genSize').value);
+  fd.append('quality',       document.getElementById('genQuality').value);
+  fd.append('output_format', document.getElementById('genFormat').value);
   if(selectedDraftId) fd.append('draft_task_id', selectedDraftId);
   const refFile = document.getElementById('refImg').files[0];
   if(refFile) fd.append('reference_image', refFile);
@@ -1280,32 +1360,30 @@ async function doGenerate(){
     const r = await fetch('/api/ai-images/generate?key='+KEY,{method:'POST',body:fd});
     const j = await r.json();
     if(j.ok){
-      currentTaskId  = j.task_id;
-      selectedDraftId = null;  // consumed
+      currentTaskId   = j.task_id;
+      selectedDraftId = null;
       document.getElementById('resultImg').src = j.url;
-      document.getElementById('dlBtn').href = j.url;
-      document.getElementById('resultCard').style.display='block';
-      document.getElementById('resultCard').scrollIntoView({behavior:'smooth',block:'start'});
+      document.getElementById('dlBtn').href    = j.url;
+      setRpState('done');
       loadHistory();
     } else {
-      // 失敗：只顯示錯誤，保留所有已填資料與 Prompt
-      showGenErr('生成失敗：' + (j.error||'未知錯誤'));
+      showGenErr('生成失敗：'+(j.error||'未知錯誤'));
     }
   }catch(e){
-    showGenErr('連線錯誤: ' + e.message);
+    showGenErr('連線錯誤: '+e.message);
   }
   btn.disabled=false; spin.style.display='none'; txt.textContent='▶ 開始生成圖片';
 }
 
 function showGenErr(msg){
   const eb = document.getElementById('genErr');
-  eb.textContent = msg; eb.style.display='block';
+  eb.textContent=msg; eb.style.display='block';
 }
 function hideGenErr(){
   document.getElementById('genErr').style.display='none';
 }
 
-// ─ regenerate from current task ─
+// ── Regenerate ────────────────────────────────────────────────────────────
 async function doRegenerate(){
   if(!currentTaskId){ doGenerate(); return; }
   const r = await fetch('/api/ai-images/tasks/'+currentTaskId+'/regenerate?key='+KEY,{method:'POST'});
@@ -1313,23 +1391,22 @@ async function doRegenerate(){
   if(j.ok){
     currentTaskId = j.task_id;
     document.getElementById('resultImg').src = j.url;
-    document.getElementById('dlBtn').href = j.url;
+    document.getElementById('dlBtn').href    = j.url;
+    setRpState('done');
     loadHistory();
   } else alert('重新生成失敗: '+(j.error||''));
 }
 
-// ─ copy ─
+// ── Copy ──────────────────────────────────────────────────────────────────
 function copyPromptText(){
   const v = document.getElementById('promptArea').value;
-  navigator.clipboard.writeText(v).then(()=>alert('Prompt 已複製！'));
+  navigator.clipboard.writeText(v).then(function(){ alert('Prompt 已複製！'); });
 }
-function copyResultPrompt(){
-  copyPromptText();
-}
+function copyResultPrompt(){ copyPromptText(); }
 
-// ─ history ─
+// ── History ───────────────────────────────────────────────────────────────
 async function loadHistory(){
-  const bk = document.getElementById('brandSel').value;
+  const bk  = document.getElementById('brandSel').value;
   const url = '/api/ai-images/tasks?key='+KEY+(bk?'&brand_key='+bk:'');
   try{
     const r = await fetch(url);
@@ -1339,35 +1416,50 @@ async function loadHistory(){
 }
 
 function renderHistory(tasks){
+  // Gallery: up to 6 generated images
+  const genTasks = tasks.filter(function(t){return t.thumb;});
+  const gEl = document.getElementById('galleryGrid');
+  if(genTasks.length){
+    gEl.innerHTML = genTasks.slice(0,6).map(function(t){
+      return '<div class="g-item"><img src="'+t.thumb+'" loading="lazy" alt="'+( t.product_name||'')+'">'
+        +'<div class="g-overlay"><a href="'+t.thumb+'" download>⬇</a></div></div>';
+    }).join('');
+  } else {
+    gEl.innerHTML = '';
+  }
+
+  // Table
   const el = document.getElementById('historyArea');
   if(!tasks.length){ el.innerHTML='<div class="empty-history">尚無生成紀錄</div>'; return; }
-  const statusCls = {generated:'status-done',failed:'status-fail',pending:'status-pend',prompt_draft:'status-draft'};
-  const statusTxt = {generated:'已生成',failed:'失敗',pending:'處理中',prompt_draft:'草稿'};
-  const typeMap = {{ presets | tojson }};
+  const SC = {generated:'sd',failed:'sf',pending:'sp',prompt_draft:'sg'};
+  const ST = {generated:'已生成',failed:'失敗',pending:'處理中',prompt_draft:'草稿'};
   let html = '<table class="htable"><thead><tr>'
     +'<th>縮圖</th><th>品牌</th><th>商品</th><th>用途</th>'
     +'<th>尺寸</th><th>狀態</th><th>時間</th><th>操作</th>'
     +'</tr></thead><tbody>';
-  for(const t of tasks){
-    const sc = statusCls[t.status]||'status-pend';
-    const st = statusTxt[t.status]||t.status;
-    const typeLbl = typeMap[t.image_type]?.label || t.image_type;
-    const dt = t.created_at ? new Date(t.created_at*1000).toLocaleString('zh-TW',{month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'}) : '-';
-    const thumb = t.thumb ? `<img class="h-thumb" src="${t.thumb}" loading="lazy">` : '<div style="width:48px;height:48px;background:#f0f0f0;border-radius:6px"></div>';
-    html += `<tr>
-      <td>${thumb}</td>
-      <td>${t.brand_key||'-'}</td>
-      <td>${t.product_name||'-'}</td>
-      <td>${typeLbl}</td>
-      <td style="font-size:11px">${t.size||'-'}</td>
-      <td><span class="${sc}">${st}</span>${t.error_message?`<br><span style="color:#999;font-size:10px">${t.error_message.slice(0,40)}</span>`:''}</td>
-      <td style="font-size:11px;color:#999">${dt}</td>
-      <td style="white-space:nowrap">
-        ${t.thumb?`<a href="${t.thumb}" download style="font-size:12px;color:#1a1a1a;text-decoration:none;font-weight:600;margin-right:8px">⬇</a>`:''}
-        <button onclick="regenFromHistory(${t.id})" style="font-size:11px;border:1px solid #ddd;background:#fff;border-radius:5px;padding:3px 8px;cursor:pointer">🔄</button>
-      </td>
-    </tr>`;
-  }
+  tasks.forEach(function(t){
+    const sc  = SC[t.status]||'sp';
+    const st  = ST[t.status]||t.status;
+    const lbl = (PMAP[t.image_type]&&PMAP[t.image_type].label)||t.image_type;
+    const dt  = t.created_at ? new Date(t.created_at*1000).toLocaleString('zh-TW',{month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'}) : '-';
+    const thumb = t.thumb
+      ? '<img class="h-thumb" src="'+t.thumb+'" loading="lazy">'
+      : '<div style="width:42px;height:42px;background:#f0f0f0;border-radius:6px"></div>';
+    html += '<tr>'
+      +'<td>'+thumb+'</td>'
+      +'<td>'+(t.brand_key||'-')+'</td>'
+      +'<td style="max-width:110px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+(t.product_name||'-')+'</td>'
+      +'<td>'+lbl+'</td>'
+      +'<td style="font-size:11px;white-space:nowrap">'+(t.size||'-')+'</td>'
+      +'<td><span class="'+sc+'">'+st+'</span>'
+      +(t.error_message?'<br><span style="color:#999;font-size:10px">'+t.error_message.slice(0,40)+'</span>':'')
+      +'</td>'
+      +'<td style="font-size:11px;color:#999;white-space:nowrap">'+dt+'</td>'
+      +'<td style="white-space:nowrap">'
+      +(t.thumb?'<a href="'+t.thumb+'" download style="font-size:12px;color:#1a1a1a;text-decoration:none;font-weight:600;margin-right:7px">⬇</a>':'')
+      +'<button onclick="regenFromHistory('+t.id+')" style="font-size:11px;border:1px solid #ddd;background:#fff;border-radius:5px;padding:3px 7px;cursor:pointer">🔄</button>'
+      +'</td></tr>';
+  });
   html += '</tbody></table>';
   el.innerHTML = html;
 }
@@ -1378,13 +1470,13 @@ async function regenFromHistory(tid){
   if(j.ok){
     currentTaskId = j.task_id;
     document.getElementById('resultImg').src = j.url;
-    document.getElementById('dlBtn').href = j.url;
-    document.getElementById('resultCard').style.display='block';
+    document.getElementById('dlBtn').href    = j.url;
+    setRpState('done');
     loadHistory();
   } else alert('重新生成失敗: '+(j.error||''));
 }
 
-// init
+// ── Init ──────────────────────────────────────────────────────────────────
 onTypeChange();
 loadHistory();
 </script>
