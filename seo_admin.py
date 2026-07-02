@@ -11,7 +11,7 @@ import os, json, time, threading, urllib.request, re
 from flask import Blueprint, request, jsonify, render_template_string, redirect, abort
 
 DATABASE_URL          = os.getenv("DATABASE_URL", "")
-ADMIN_PASSWORD        = os.getenv("ADMIN_PASSWORD", "jsimple2024")
+ADMIN_PASSWORD        = os.getenv("ADMIN_PASSWORD", "")
 ANTHROPIC_API_KEY     = os.getenv("ANTHROPIC_API_KEY", "")
 GA4_CREDENTIALS_JSON  = os.getenv("GA4_CREDENTIALS_JSON", "")
 GA4_CREDENTIALS_FILE  = os.getenv("GA4_CREDENTIALS_FILE", r"C:\Users\user\jsimple-ga-credentials.json")

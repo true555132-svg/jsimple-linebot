@@ -31,15 +31,15 @@ from knowledge_base import (
 app = Flask(__name__)
 app.config['MAX_CONTENT_LENGTH'] = 50 * 1024 * 1024  # 50MB
 
-LINE_CHANNEL_SECRET       = os.getenv("LINE_CHANNEL_SECRET", "ed4319138fed1c6db548b60327e2d69d")
-LINE_CHANNEL_ACCESS_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN", "S/R1BB9ByxtJ5CXr4kbbj51Xkz7S9kfxYIjzYsqDvjzAYHXLc6aOJQq6eDO5j7Me3SVGrkkpPeX0OH5tUHYnjGyO/S4WDRYlOWoIPIJplSUUCNX0FmeCnPhizFaUSnPNIw2uyvV016cyuO1jtO5dZQdB04t89/1O/w1cDnyilFU=")
-FB_PAGE_ACCESS_TOKEN      = os.getenv("FB_PAGE_ACCESS_TOKEN", "EAALpgIiggJkBRQRZCRKJVGJr8y6gqvoOjiZAVdqBnXwf5ebL3EwdC0S02dB11KZBOtPigUYsvm9KgDgtB3ndo97Vc9h82g4yZCyRzEm9SSHg34CAzY9ZBuEuD0F8Ben3RIp6EI8ogXANcV4nVcmnzzmv2b13XiY6gvffykwgbrydDs7ouZAdgPX8xUVuoLSZBoWNB6f")
-FB_VERIFY_TOKEN           = "jsimple2024"
-ADMIN_PASSWORD            = os.getenv("ADMIN_PASSWORD", "jsimple2024")
+LINE_CHANNEL_SECRET       = os.getenv("LINE_CHANNEL_SECRET", "")
+LINE_CHANNEL_ACCESS_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN", "")
+FB_PAGE_ACCESS_TOKEN      = os.getenv("FB_PAGE_ACCESS_TOKEN", "")
+FB_VERIFY_TOKEN           = os.getenv("FB_VERIFY_TOKEN", "")
+ADMIN_PASSWORD            = os.getenv("ADMIN_PASSWORD", "")
 GITHUB_TOKEN              = os.getenv("GITHUB_TOKEN", "")
 GITHUB_REPO               = "true555132-svg/jsimple-linebot"
 GITHUB_FILE               = "knowledge_base.py"
-RENDER_DEPLOY_HOOK        = os.getenv("RENDER_DEPLOY_HOOK", "https://api.render.com/deploy/srv-d7k3ri9j2pic73dpbe10?key=08mC1cciu1E")
+RENDER_DEPLOY_HOOK        = os.getenv("RENDER_DEPLOY_HOOK", "")
 
 configuration = Configuration(access_token=LINE_CHANNEL_ACCESS_TOKEN)
 handler = WebhookHandler(LINE_CHANNEL_SECRET)
@@ -49,7 +49,7 @@ LOGS_FILE = "logs.json"
 DATABASE_URL = os.getenv("DATABASE_URL", "")
 GOOGLE_SHEET_ID = os.getenv("GOOGLE_SHEET_ID", "")
 GOOGLE_SERVICE_ACCOUNT_JSON = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON", "")
-SUPABASE_URL = os.getenv("SUPABASE_URL", "https://lrslleetqyaerstrlbap.supabase.co")
+SUPABASE_URL = os.getenv("SUPABASE_URL", "")
 SUPABASE_SERVICE_KEY = os.getenv("SUPABASE_SERVICE_KEY", "")
 SUPABASE_BUCKET = "chat-images"
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")

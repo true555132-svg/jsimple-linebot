@@ -25,12 +25,13 @@ def _to_tw(text):
 # ── 設定（從環境變數，與 app.py 一致）────────────────────────────
 DATABASE_URL         = os.getenv("DATABASE_URL", "")
 ANTHROPIC_API_KEY    = os.getenv("ANTHROPIC_API_KEY", "")
-SUPABASE_URL         = os.getenv("SUPABASE_URL", "https://lrslleetqyaerstrlbap.supabase.co")
+OPENAI_API_KEY       = os.getenv("OPENAI_API_KEY", "")
+SUPABASE_URL         = os.getenv("SUPABASE_URL", "")
 SUPABASE_SERVICE_KEY = os.getenv("SUPABASE_SERVICE_KEY", "")
 SUPABASE_BUCKET      = "chat-images"
 GITHUB_TOKEN         = os.getenv("GITHUB_TOKEN", "")
 GITHUB_REPO          = "true555132-svg/jsimple-linebot"
-ADMIN_PASSWORD       = os.getenv("ADMIN_PASSWORD", "jsimple2024")
+ADMIN_PASSWORD       = os.getenv("ADMIN_PASSWORD", "")
 
 _db_lock = threading.Lock()
 
@@ -773,10 +774,63 @@ def _paste_on_white(img_bytes, size=800):
         return None
 
 
-def _process_to_white_bg(img_bytes, size=800):
-    """Try remove.bg API first; fall back to simple white canvas paste."""
+def _gpt_image2_bg(transparent_png, scene_prompt):
+    """用 gpt-image-2 在去背後的透明 PNG 周圍生成場景背景。
+    transparent_png: remove.bg 回傳的 RGBA PNG bytes（產品不透明、背景透明）。
+    回傳 JPEG bytes，失敗回傳 None。
+    """
+    import sys
+    if not OPENAI_API_KEY:
+        return None
+    try:
+        import requests as _req
+        from PIL import Image as _Im
+        # 縮放至 1024x1024（置中，透明填補），符合 API 限制
+        img = _Im.open(io.BytesIO(transparent_png)).convert("RGBA")
+        img.thumbnail((1024, 1024), _Im.LANCZOS)
+        canvas = _Im.new("RGBA", (1024, 1024), (0, 0, 0, 0))
+        offset = ((1024 - img.width) // 2, (1024 - img.height) // 2)
+        canvas.paste(img, offset)
+        buf = io.BytesIO()
+        canvas.save(buf, format="PNG")
+        png_bytes = buf.getvalue()
+
+        r = _req.post(
+            "https://api.openai.com/v1/images/edits",
+            headers={"Authorization": f"Bearer {OPENAI_API_KEY}"},
+            files={"image": ("product.png", png_bytes, "image/png")},
+            data={
+                "model": "gpt-image-2",
+                "prompt": scene_prompt,
+                "n": "1",
+                "size": "1024x1024",
+                "response_format": "b64_json",
+            },
+            timeout=90,
+        )
+        if r.status_code == 200:
+            b64 = r.json()["data"][0]["b64_json"]
+            result_img = _Im.open(io.BytesIO(base64.b64decode(b64))).convert("RGB")
+            out = io.BytesIO()
+            result_img.save(out, format="JPEG", quality=92, optimize=True)
+            print("[GPT-Image-2] ✅ 背景生成成功", flush=True)
+            return out.getvalue()
+        print(f"[GPT-Image-2] ❌ {r.status_code}: {r.text[:300]}", file=sys.stderr)
+        return None
+    except Exception as e:
+        import sys as _sys
+        print(f"[GPT-Image-2] exception: {e}", file=_sys.stderr)
+        return None
+
+
+def _process_to_white_bg(img_bytes, size=800, scene_prompt=None):
+    """去背 → gpt-image-2 場景背景（有提示詞時）；否則貼白底。"""
     removed = _removebg_api(img_bytes)
     if removed:
+        if scene_prompt and OPENAI_API_KEY:
+            result = _gpt_image2_bg(removed, scene_prompt)
+            if result:
+                return result
         result = _paste_on_white(removed, size)
         if result:
             return result
@@ -789,12 +843,22 @@ def _process_images_for_job(job_id):
     raw_imgs = job.get("raw_images", [])
     if not raw_imgs:
         _pj_update(job_id, img_status="no_images"); return
+
+    # 取品牌的 AI 背景提示詞
+    scene_prompt = None
+    brand_key = job.get("brand", "")
+    if brand_key:
+        bp = _bp_get(brand_key)
+        scene_prompt = (bp.get("image_style") or "").strip() or None
+    if scene_prompt:
+        print(f"[GPT-Image-2] 品牌={brand_key} 背景提示詞: {scene_prompt[:60]}", flush=True)
+
     _pj_update(job_id, img_status="processing")
     processed = []
     for i, url in enumerate(raw_imgs[:10]):
         img_bytes = _download_image(url)
         if not img_bytes: continue
-        result = _process_to_white_bg(img_bytes)
+        result = _process_to_white_bg(img_bytes, scene_prompt=scene_prompt)
         if not result: continue
         filename = f"products/{job_id}_{i+1}.jpg"
         pub_url, _ = upload_image_to_supabase(filename, result, "image/jpeg")
@@ -2704,8 +2768,8 @@ input[type=text]:focus,textarea:focus{border-color:#1a1a1a}
   <textarea id="style_{{ p.brand_key }}" rows="3">{{ p.style }}</textarea>
   <label>SEO 關鍵字方向</label>
   <textarea id="seo_direction_{{ p.brand_key }}" rows="2">{{ p.seo_direction }}</textarea>
-  <label>圖片風格</label>
-  <textarea id="image_style_{{ p.brand_key }}" rows="2">{{ p.image_style }}</textarea>
+  <label>AI 背景提示詞（英文，留空則輸出白底）</label>
+  <textarea id="image_style_{{ p.brand_key }}" rows="2" placeholder="e.g. clean modern bedroom with warm wood floor and soft natural light">{{ p.image_style }}</textarea>
   <label>自訂 Prompt（選填）</label>
   <textarea id="custom_prompt_{{ p.brand_key }}" rows="3">{{ p.custom_prompt }}</textarea>
   <input type="hidden" id="name_{{ p.brand_key }}" value="{{ p.name }}">
