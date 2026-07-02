@@ -371,7 +371,7 @@ def _get_brand(brand_key):
         return {}
 
 
-def _create_task(d):
+def _create_task(d, status="pending"):
     if not _DB:
         return None
     try:
@@ -382,7 +382,7 @@ def _create_task(d):
                 (brand_key, product_name, sku, image_type, user_request,
                  final_prompt, negative_prompt, model, size, quality,
                  output_format, input_image_urls_json, status, created_at, updated_at)
-            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'pending',%s,%s)
+            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
             RETURNING id
         """, (
             d.get("brand_key",""), d.get("product_name",""), d.get("sku",""),
@@ -390,7 +390,7 @@ def _create_task(d):
             d.get("final_prompt",""), d.get("negative_prompt",""),
             d.get("model",""), d.get("size",""), d.get("quality",""),
             d.get("output_format",""), json.dumps(d.get("input_image_urls",[])),
-            now, now,
+            status, now, now,
         ))
         tid = cur.fetchone()[0]
         conn.commit(); cur.close(); conn.close()
@@ -633,6 +633,8 @@ def api_ai_prompt():
         return jsonify({"ok": False, "error": "unauthorized"}), 403
     d = request.get_json(force=True) or {}
     try:
+        image_type = d.get("image_type", "shopee_main")
+        size       = d.get("size", "1024x1024")
         prompt = build_image_prompt(
             brand_key=d.get("brand_key",""),
             product_name=d.get("product_name",""),
@@ -642,11 +644,75 @@ def api_ai_prompt():
             material=d.get("material",""),
             color=d.get("color",""),
             selling_points=d.get("selling_points",""),
-            image_type=d.get("image_type","shopee_main"),
+            image_type=image_type,
             user_request=d.get("user_request",""),
-            size=d.get("size","1024x1024"),
+            size=size,
         )
-        return jsonify({"ok": True, "prompt": prompt})
+        # Save prompt_draft so history tracks exploration
+        task_id = _create_task({
+            "brand_key": d.get("brand_key",""),
+            "product_name": d.get("product_name",""),
+            "sku": d.get("sku",""),
+            "image_type": image_type,
+            "user_request": d.get("user_request",""),
+            "final_prompt": prompt,
+            "model": IMAGE_MODEL, "size": size, "quality": "", "output_format": "",
+        }, status="prompt_draft")
+        return jsonify({"ok": True, "prompt": prompt, "task_id": task_id})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)})
+
+
+# 4 組方案預覽 — 一次組出 A/B/C/D，不呼叫 OpenAI
+_VARIANT_TYPES = [
+    ("product_white_bg",  "A"),
+    ("product_scene_bg",  "B"),
+    ("website_banner",    "C"),
+    ("fb_ad",             "D"),
+]
+
+@ai_images_bp.route("/api/ai-images/prompt-variants", methods=["POST"])
+def api_ai_prompt_variants():
+    ok, _ = auth_required()
+    if not ok:
+        return jsonify({"ok": False, "error": "unauthorized"}), 403
+    d = request.get_json(force=True) or {}
+    try:
+        variants = []
+        for vtype, letter in _VARIANT_TYPES:
+            preset = _PRESETS.get(vtype, {})
+            size   = preset.get("default_size", "1024x1024")
+            prompt = build_image_prompt(
+                brand_key=d.get("brand_key",""),
+                product_name=d.get("product_name",""),
+                sku=d.get("sku",""),
+                category=d.get("category",""),
+                specs=d.get("specs",""),
+                material=d.get("material",""),
+                color=d.get("color",""),
+                selling_points=d.get("selling_points",""),
+                image_type=vtype,
+                user_request=d.get("user_request",""),
+                size=size,
+            )
+            task_id = _create_task({
+                "brand_key": d.get("brand_key",""),
+                "product_name": d.get("product_name",""),
+                "sku": d.get("sku",""),
+                "image_type": vtype,
+                "user_request": d.get("user_request",""),
+                "final_prompt": prompt,
+                "model": IMAGE_MODEL, "size": size, "quality": "", "output_format": "",
+            }, status="prompt_draft")
+            variants.append({
+                "letter": letter,
+                "type": vtype,
+                "label": preset.get("label", vtype),
+                "size": size,
+                "prompt": prompt,
+                "task_id": task_id,
+            })
+        return jsonify({"ok": True, "variants": variants})
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)})
 
@@ -705,7 +771,7 @@ def api_ai_generate():
             _update_task(task_id, "failed", error=f"Upload failed: {err}")
             return jsonify({"ok": False, "error": f"圖片上傳失敗: {err}"})
 
-        _update_task(task_id, "done",
+        _update_task(task_id, "generated",
                      output_urls=[pub_url], supabase_paths=[path], usage=usage)
         return jsonify({"ok": True, "url": pub_url, "task_id": task_id, "usage": usage})
 
@@ -766,7 +832,7 @@ def api_ai_regenerate(task_id):
         if not pub_url:
             _update_task(new_id, "failed", error=f"Upload failed: {err}")
             return jsonify({"ok": False, "error": f"上傳失敗: {err}"})
-        _update_task(new_id, "done", output_urls=[pub_url], supabase_paths=[path], usage=usage)
+        _update_task(new_id, "generated", output_urls=[pub_url], supabase_paths=[path], usage=usage)
         return jsonify({"ok": True, "url": pub_url, "task_id": new_id})
     except Exception as e:
         msg = str(e)
@@ -805,6 +871,16 @@ textarea{resize:vertical;min-height:56px}
 /* Buttons */
 .btn-build{width:100%;padding:10px;border:1.5px solid #1a1a1a;background:#fff;color:#1a1a1a;border-radius:8px;font-size:13px;font-weight:700;cursor:pointer;transition:.15s}
 .btn-build:hover{background:#1a1a1a;color:#fff}
+/* Variant cards */
+.variant-grid{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+.variant-card{border:2px solid #eee;border-radius:10px;padding:12px;transition:.15s;cursor:default;background:#fff}
+.variant-card:hover{border-color:#999}
+.variant-card.selected{border-color:#1a1a1a;background:#fafafa}
+.variant-letter{font-size:11px;font-weight:800;background:#1a1a1a;color:#fff;border-radius:5px;padding:2px 7px;display:inline-block;margin-bottom:5px}
+.variant-lbl{font-size:12px;font-weight:700;margin-bottom:6px}
+.variant-prompt{font-size:10px;font-family:monospace;color:#666;background:#f5f5f5;border-radius:5px;padding:6px;max-height:80px;overflow-y:auto;line-height:1.4;white-space:pre-wrap;word-break:break-all}
+.btn-pick{width:100%;margin-top:8px;padding:6px;border:1.5px solid #1a1a1a;background:#fff;border-radius:7px;font-size:12px;font-weight:700;cursor:pointer;transition:.15s}
+.btn-pick:hover{background:#1a1a1a;color:#fff}
 /* Right */
 .right{padding:20px;display:flex;flex-direction:column;gap:16px;overflow-y:auto}
 .card{background:#fff;border-radius:12px;border:1px solid #eee;padding:18px}
@@ -848,6 +924,7 @@ textarea{resize:vertical;min-height:56px}
 .status-done{color:#2e7d32;font-weight:700;font-size:11px}
 .status-fail{color:#c00;font-weight:700;font-size:11px}
 .status-pend{color:#e65100;font-weight:700;font-size:11px}
+.status-draft{color:#5c6bc0;font-weight:700;font-size:11px}
 .h-prompt{color:#888;max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .empty-history{text-align:center;padding:32px;color:#bbb;font-size:13px}
 @media(max-width:760px){.page{grid-template-columns:1fr}.left{max-height:none;position:static}.gen-grid{grid-template-columns:1fr}}
@@ -939,7 +1016,10 @@ textarea{resize:vertical;min-height:56px}
     </div>
   </div>
 
-  <button class="btn-build" onclick="doBuildPrompt()">⚙ 組裝 Prompt</button>
+  <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">
+    <button class="btn-build" onclick="doBuildPrompt()">⚙ 組裝 Prompt</button>
+    <button class="btn-build" onclick="doVariants()" style="background:#1a1a1a;color:#fff">✦ 4 組方案</button>
+  </div>
 </div>
 
 <!-- ═══ Right: Prompt + Generate + Result ═══ -->
@@ -958,6 +1038,12 @@ textarea{resize:vertical;min-height:56px}
       <button class="btn-sm" onclick="document.getElementById('promptArea').value=''">✕ 清空</button>
       <span id="charCount" style="margin-left:auto;font-size:11px;color:#aaa;align-self:center"></span>
     </div>
+  </div>
+
+  <!-- 4 組方案預覽（hidden until doVariants） -->
+  <div class="card" id="variantCard" style="display:none">
+    <div class="card-title">4 組方案預覽 <span class="badge badge-info">點擊方案後再生成</span></div>
+    <div class="variant-grid" id="variantGrid"></div>
   </div>
 
   <!-- Generate settings + button -->
@@ -1022,6 +1108,66 @@ textarea{resize:vertical;min-height:56px}
 const KEY = '{{ key }}';
 let currentTaskId = null;
 
+// ─ collect form data helper ─
+function formData(){
+  return {
+    brand_key:      document.getElementById('brandSel').value,
+    product_name:   document.getElementById('productName').value,
+    sku:            document.getElementById('sku').value,
+    category:       document.getElementById('category').value,
+    specs:          document.getElementById('specs').value,
+    material:       document.getElementById('material').value,
+    color:          document.getElementById('color').value,
+    selling_points: document.getElementById('sellingPoints').value,
+    image_type:     document.getElementById('imageType').value,
+    user_request:   document.getElementById('userRequest').value,
+    size:           document.getElementById('genSize').value,
+  };
+}
+
+// ─ 4 variant cards ─
+async function doVariants(){
+  const btn = document.querySelectorAll('.btn-build')[1];
+  btn.textContent='組裝中…'; btn.disabled=true;
+  document.getElementById('variantCard').style.display='none';
+  try{
+    const r = await fetch('/api/ai-images/prompt-variants?key='+KEY,{
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify(formData()),
+    });
+    const j = await r.json();
+    if(!j.ok){ alert('方案生成失敗: '+(j.error||'')); return; }
+    const grid = document.getElementById('variantGrid');
+    grid.innerHTML = j.variants.map(v=>`
+      <div class="variant-card" id="vc_${v.type}">
+        <div><span class="variant-letter">${v.letter}</span></div>
+        <div class="variant-lbl">${v.label}</div>
+        <div style="font-size:10px;color:#999;margin-bottom:4px">${v.size}</div>
+        <div class="variant-prompt">${v.prompt.replace(/</g,'&lt;')}</div>
+        <button class="btn-pick" onclick="pickVariant(${JSON.stringify(v).replace(/"/g,'&quot;')})">選擇此方案 →</button>
+      </div>`).join('');
+    document.getElementById('variantCard').style.display='block';
+    document.getElementById('variantCard').scrollIntoView({behavior:'smooth',block:'start'});
+    loadHistory();
+  }catch(e){ alert('連線錯誤: '+e.message); }
+  btn.textContent='✦ 4 組方案'; btn.disabled=false;
+}
+
+function pickVariant(v){
+  // fill prompt textarea
+  document.getElementById('promptArea').value = v.prompt;
+  updateCharCount();
+  // sync selectors
+  document.getElementById('imageType').value = v.type;
+  document.getElementById('genSize').value   = v.size;
+  // highlight selected card
+  document.querySelectorAll('.variant-card').forEach(c=>c.classList.remove('selected'));
+  const card = document.getElementById('vc_'+v.type);
+  if(card) card.classList.add('selected');
+  // scroll to generate section
+  document.querySelector('.btn-gen').scrollIntoView({behavior:'smooth',block:'center'});
+}
+
 // ─ ref image ─
 const rz = document.getElementById('refZone');
 rz.addEventListener('dragover', e=>{e.preventDefault();rz.style.borderColor='#666';});
@@ -1048,29 +1194,18 @@ function onTypeChange(){
 
 // ─ build prompt ─
 async function doBuildPrompt(){
-  const btn = document.querySelector('.btn-build');
+  const btn = document.querySelectorAll('.btn-build')[0];
   btn.textContent='組裝中…'; btn.disabled=true;
   try{
     const r = await fetch('/api/ai-images/prompt?key='+KEY,{
       method:'POST', headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({
-        brand_key:    document.getElementById('brandSel').value,
-        product_name: document.getElementById('productName').value,
-        sku:          document.getElementById('sku').value,
-        category:     document.getElementById('category').value,
-        specs:        document.getElementById('specs').value,
-        material:     document.getElementById('material').value,
-        color:        document.getElementById('color').value,
-        selling_points: document.getElementById('sellingPoints').value,
-        image_type:   document.getElementById('imageType').value,
-        user_request: document.getElementById('userRequest').value,
-        size:         document.getElementById('genSize').value,
-      })
+      body: JSON.stringify(formData()),
     });
     const j = await r.json();
     if(j.ok){
       document.getElementById('promptArea').value = j.prompt;
       updateCharCount();
+      loadHistory();
     } else alert('Prompt 組裝失敗: '+(j.error||''));
   }catch(e){ alert('連線錯誤: '+e.message); }
   btn.textContent='⚙ 組裝 Prompt'; btn.disabled=false;
@@ -1163,8 +1298,8 @@ async function loadHistory(){
 function renderHistory(tasks){
   const el = document.getElementById('historyArea');
   if(!tasks.length){ el.innerHTML='<div class="empty-history">尚無生成紀錄</div>'; return; }
-  const statusCls = {done:'status-done',failed:'status-fail',pending:'status-pend'};
-  const statusTxt = {done:'完成','failed':'失敗',pending:'處理中'};
+  const statusCls = {generated:'status-done',failed:'status-fail',pending:'status-pend',prompt_draft:'status-draft'};
+  const statusTxt = {generated:'已生成',failed:'失敗',pending:'處理中',prompt_draft:'草稿'};
   const typeMap = {{ presets | tojson }};
   let html = '<table class="htable"><thead><tr>'
     +'<th>縮圖</th><th>品牌</th><th>商品</th><th>用途</th>'
