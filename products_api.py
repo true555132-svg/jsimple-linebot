@@ -2971,214 +2971,294 @@ IMAGE_BG_HTML = """<!DOCTYPE html>
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
 body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#f5f5f7;color:#1a1a1a;min-height:100vh}
-.topbar{background:#fff;border-bottom:1px solid #e8e8e8;padding:0 24px;height:56px;display:flex;align-items:center;gap:16px}
-.topbar a{color:#555;text-decoration:none;font-size:14px}
-.topbar a:hover{color:#1a1a1a}
-.topbar .sep{color:#ccc}
-.topbar h1{font-size:16px;font-weight:600}
-.wrap{max-width:1100px;margin:0 auto;padding:28px 20px;display:grid;grid-template-columns:380px 1fr;gap:24px;align-items:start}
-.card{background:#fff;border-radius:14px;padding:24px;box-shadow:0 1px 4px rgba(0,0,0,.07)}
-h2{font-size:15px;font-weight:600;margin-bottom:18px}
-label{display:block;font-size:13px;font-weight:500;color:#555;margin-bottom:5px;margin-top:14px}
-label:first-of-type{margin-top:0}
-textarea,select,input[type=text]{width:100%;border:1px solid #e0e0e0;border-radius:8px;padding:9px 11px;font-size:14px;font-family:inherit;resize:vertical;outline:none;transition:border .2s}
-textarea:focus,select:focus,input:focus{border-color:#1a1a1a}
-.drop-zone{border:2px dashed #d0d0d0;border-radius:12px;padding:40px 20px;text-align:center;cursor:pointer;transition:all .2s;background:#fafafa;position:relative}
-.drop-zone:hover,.drop-zone.drag{border-color:#1a1a1a;background:#f0f0f0}
+.topbar{background:#fff;border-bottom:1px solid #e8e8e8;padding:0 24px;height:54px;display:flex;align-items:center;gap:12px}
+.topbar a{color:#666;text-decoration:none;font-size:14px}.topbar a:hover{color:#000}
+.topbar .sep{color:#ccc}.topbar h1{font-size:15px;font-weight:600}
+.page{display:grid;grid-template-columns:340px 1fr;height:calc(100vh - 54px);overflow:hidden}
+.left{background:#fff;border-right:1px solid #eee;padding:20px;overflow-y:auto;display:flex;flex-direction:column;gap:14px}
+.panel-title{font-size:12px;font-weight:700;color:#999;letter-spacing:.8px;text-transform:uppercase;margin-bottom:2px}
+.drop-zone{border:2px dashed #d8d8d8;border-radius:12px;padding:24px 16px;text-align:center;cursor:pointer;transition:.2s;background:#fafafa;position:relative;min-height:130px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:5px}
 .drop-zone input{position:absolute;inset:0;opacity:0;cursor:pointer;width:100%;height:100%}
-.drop-zone .icon{font-size:32px;margin-bottom:8px}
-.drop-zone .hint{font-size:13px;color:#888}
-.drop-zone .fname{font-size:13px;font-weight:600;color:#1a1a1a;margin-top:6px}
-.preview-thumb{width:100%;max-height:160px;object-fit:contain;border-radius:8px;margin-top:10px;border:1px solid #eee;display:none}
-.toggle-row{display:flex;align-items:center;gap:10px;margin-top:14px;padding:12px;background:#f7f7f7;border-radius:10px}
-.toggle-row input[type=checkbox]{width:16px;height:16px;cursor:pointer;accent-color:#1a1a1a}
-.toggle-row span{font-size:13px;color:#444;line-height:1.4}
-.btn{width:100%;padding:12px;border:none;border-radius:10px;font-size:15px;font-weight:600;cursor:pointer;transition:.2s;margin-top:18px}
-.btn-primary{background:#1a1a1a;color:#fff}
-.btn-primary:hover{background:#333}
-.btn-primary:disabled{background:#bbb;cursor:not-allowed}
-.result-card{background:#fff;border-radius:14px;padding:24px;box-shadow:0 1px 4px rgba(0,0,0,.07);min-height:400px;display:flex;flex-direction:column}
-.result-empty{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;color:#bbb;gap:10px}
-.result-empty .icon{font-size:48px}
-.compare{display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-top:4px}
-.compare-img{text-align:center}
-.compare-img img{width:100%;border-radius:10px;border:1px solid #eee;object-fit:contain;max-height:380px}
-.compare-label{font-size:12px;color:#888;margin-bottom:6px}
-.result-actions{margin-top:16px;display:flex;gap:10px}
-.btn-dl{flex:1;padding:10px;background:#1a1a1a;color:#fff;border:none;border-radius:8px;font-size:14px;font-weight:600;cursor:pointer;text-align:center;text-decoration:none;display:flex;align-items:center;justify-content:center;gap:6px}
-.btn-dl:hover{background:#333}
-.btn-retry{flex:1;padding:10px;background:#fff;color:#1a1a1a;border:1.5px solid #1a1a1a;border-radius:8px;font-size:14px;font-weight:600;cursor:pointer}
-.spinner{display:none;flex-direction:column;align-items:center;justify-content:center;flex:1;gap:14px}
-.spin{width:40px;height:40px;border:3px solid #eee;border-top-color:#1a1a1a;border-radius:50%;animation:spin .8s linear infinite}
+.drop-zone:hover,.drop-zone.drag{border-color:#1a1a1a;background:#f0f0f0}
+.drop-zone .dz-icon{font-size:26px}.drop-zone .dz-hint{font-size:11px;color:#aaa;line-height:1.4}
+.drop-zone .dz-name{font-size:11px;font-weight:600;color:#333;word-break:break-all}
+.thumb-row{display:flex;align-items:center;gap:10px;background:#f7f7f7;border-radius:8px;padding:8px;display:none}
+.thumb-row img{width:52px;height:52px;border-radius:6px;object-fit:contain;border:1px solid #eee;background:repeating-conic-gradient(#e8e8e8 0% 25%,#fff 0% 50%) 0 0/12px 12px}
+.thumb-row .tinfo{font-size:11px;color:#666;flex:1;overflow:hidden}
+.thumb-row .tinfo .tname{font-weight:600;color:#333;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.fl{display:block;font-size:12px;font-weight:500;color:#666;margin-bottom:3px}
+select,textarea{width:100%;border:1px solid #e0e0e0;border-radius:8px;padding:7px 10px;font-size:13px;font-family:inherit;outline:none;transition:border .2s;resize:vertical}
+select:focus,textarea:focus{border-color:#1a1a1a}
+.toggle{display:flex;align-items:center;gap:8px;padding:9px 10px;background:#f7f7f7;border-radius:8px;cursor:pointer;user-select:none}
+.toggle input[type=checkbox]{width:15px;height:15px;cursor:pointer;accent-color:#1a1a1a;flex-shrink:0}
+.toggle span{font-size:12px;color:#444;line-height:1.4}
+.btn-primary{width:100%;padding:11px;border:none;border-radius:10px;background:#1a1a1a;color:#fff;font-size:14px;font-weight:600;cursor:pointer;transition:.15s}
+.btn-primary:hover{background:#333}.btn-primary:disabled{background:#bbb;cursor:not-allowed}
+.err{background:#fff3f3;border:1px solid #ffd0d0;border-radius:8px;padding:9px;font-size:12px;color:#c00;display:none}
+.right{overflow-y:auto;padding:24px;display:flex;flex-direction:column;gap:22px}
+.empty-state{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:12px;color:#ccc;text-align:center;min-height:300px}
+.empty-state .ei{font-size:48px;line-height:1}.empty-state p{font-size:14px;line-height:1.6}
+.section-card{background:#fff;border-radius:14px;border:1px solid #eee;padding:18px}
+.section-hd{font-size:13px;font-weight:600;display:flex;align-items:center;gap:8px;margin-bottom:14px}
+.badge{display:inline-block;font-size:10px;padding:2px 7px;border-radius:5px;font-weight:700}
+.badge-free{background:#e8f5e9;color:#2e7d32}.badge-paid{background:#fff3e0;color:#e65100}
+.cutout-row{display:flex;gap:14px;align-items:center;margin-bottom:18px}
+.cutout-thumb{width:100px;height:100px;border-radius:10px;object-fit:contain;border:1.5px dashed #ddd;background:repeating-conic-gradient(#e8e8e8 0% 25%,#fff 0% 50%) 0 0/14px 14px;flex-shrink:0}
+.cutout-desc{font-size:12px;color:#777;line-height:1.7}
+.swatches{display:grid;grid-template-columns:repeat(5,1fr);gap:8px}
+.swatch{border-radius:9px;aspect-ratio:1;cursor:pointer;border:2.5px solid transparent;transition:.12s;position:relative;overflow:hidden}
+.swatch:hover{transform:scale(1.07);border-color:#aaa}.swatch.active{border-color:#1a1a1a;box-shadow:0 0 0 2px rgba(0,0,0,.6)}
+.swatch .sl{position:absolute;bottom:0;left:0;right:0;font-size:9px;text-align:center;padding:2px;background:rgba(0,0,0,.32);color:#fff}
+.preview-area{margin-top:14px;display:none}
+.preview-wrap{border-radius:12px;overflow:hidden;background:#e8e8e8;position:relative;min-height:80px}
+.preview-wrap img{width:100%;display:block;max-height:400px;object-fit:contain}
+.preview-loading{position:absolute;inset:0;background:rgba(255,255,255,.82);display:flex;align-items:center;justify-content:center;flex-direction:column;gap:8px}
+.spin{width:32px;height:32px;border:3px solid #eee;border-top-color:#1a1a1a;border-radius:50%;animation:spin .7s linear infinite}
 @keyframes spin{to{transform:rotate(360deg)}}
-.spinner p{font-size:13px;color:#888}
-.err{background:#fff3f3;border:1px solid #ffd0d0;border-radius:8px;padding:12px;font-size:13px;color:#c00;margin-top:10px;display:none}
-@media(max-width:760px){.wrap{grid-template-columns:1fr}.compare{grid-template-columns:1fr}}
+.dl-row{display:flex;gap:10px;margin-top:10px}
+.btn-dl{flex:1;padding:9px;background:#1a1a1a;color:#fff;border:none;border-radius:8px;font-size:12px;font-weight:600;cursor:pointer;text-decoration:none;display:flex;align-items:center;justify-content:center;gap:5px}
+.btn-dl:hover{background:#333}
+.btn-outline{flex:1;padding:9px;background:#fff;color:#1a1a1a;border:1.5px solid #d0d0d0;border-radius:8px;font-size:12px;font-weight:600;cursor:pointer}
+.btn-outline:hover{border-color:#1a1a1a}
+.ai-row{display:flex;gap:8px;align-items:flex-end;margin-bottom:10px}
+.ai-row textarea{flex:1;height:68px}
+.btn-ai{padding:9px 16px;border:none;border-radius:8px;background:#1a1a1a;color:#fff;font-size:13px;font-weight:600;cursor:pointer;flex-shrink:0;transition:.15s}
+.btn-ai:hover{background:#333}.btn-ai:disabled{background:#bbb;cursor:not-allowed}
+.compare{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+.compare-img .cl{font-size:11px;color:#999;margin-bottom:5px}
+.compare-img img{width:100%;border-radius:10px;border:1px solid #eee;object-fit:contain;max-height:320px}
+@media(max-width:720px){.page{grid-template-columns:1fr;height:auto;overflow:visible}.left{height:auto}.compare{grid-template-columns:1fr}}
 </style>
 </head>
 <body>
 <div class="topbar">
-  <a href="/admin?key={{ key }}">← 後台</a>
-  <span class="sep">/</span>
+  <a href="/admin?key={{ key }}">← 後台</a><span class="sep">/</span>
   <h1>AI 背景生成</h1>
 </div>
-<div class="wrap">
-  <!-- 左側設定 -->
-  <div class="card">
-    <h2>圖片設定</h2>
-    <label>上傳商品圖（去背圖效果最佳）</label>
+<div class="page">
+
+  <!-- ═══ Left panel ═══ -->
+  <div class="left">
+    <div class="panel-title">Step 1 — 上傳商品圖</div>
+
     <div class="drop-zone" id="dropZone">
-      <input type="file" id="fileInput" accept="image/*" onchange="onFileSelect(this)">
-      <div class="icon">🖼</div>
-      <div class="hint">點擊或拖曳圖片到這裡<br>JPG / PNG / WebP</div>
-      <div class="fname" id="fname"></div>
+      <input type="file" id="fileInput" accept="image/*" onchange="onFile(this)">
+      <div class="dz-icon">🖼️</div>
+      <div class="dz-hint">點擊或拖曳圖片<br>JPG / PNG / WebP</div>
+      <div class="dz-name" id="fname"></div>
     </div>
-    <img id="previewThumb" class="preview-thumb">
+    <div class="thumb-row" id="thumbRow">
+      <img id="origThumb" src="">
+      <div class="tinfo"><div class="tname" id="thumbName"></div><div>已選取，按下方按鈕開始去背</div></div>
+    </div>
 
-    <label>AI 背景提示詞（中英文均可）</label>
-    <textarea id="prompt" rows="3" placeholder="例：現代北歐臥室，木質地板，柔和自然光&#10;或：clean modern living room with soft window light"></textarea>
+    <hr style="border:none;border-top:1px solid #f0f0f0">
 
-    <label>快速套用品牌預設</label>
-    <select id="brandSel" onchange="loadBrandPrompt(this.value)">
+    <div class="panel-title">選填 — 套用品牌設定</div>
+    <select id="brandSel" onchange="loadBrand(this.value)">
       <option value="">— 不套用品牌 —</option>
       {% for p in profiles %}
-      <option value="{{ p.brand_key }}" data-prompt="{{ p.image_style }}" data-composite="{{ 'true' if p.bg_composite else 'false' }}">{{ p.name }}</option>
+      <option value="{{ p.brand_key }}" data-prompt="{{ p.image_style or '' }}" data-composite="{{ 'true' if p.bg_composite else 'false' }}">{{ p.name }}</option>
       {% endfor %}
     </select>
 
-    <div class="toggle-row">
-      <input type="checkbox" id="skipRemovebg">
-      <span>圖片已去背（跳過 remove.bg，直接生成背景）</span>
-    </div>
-    <div class="toggle-row">
-      <input type="checkbox" id="composite">
-      <span>安全合成模式（產品像素 100% 不變，只換背景）</span>
+    <div>
+      <label class="fl">AI 提示詞（中英文均可）</label>
+      <textarea id="prompt" rows="2" placeholder="例：現代木質客廳 自然光&#10;modern nordic bedroom"></textarea>
     </div>
 
-    <button class="btn btn-primary" id="genBtn" onclick="generate()" disabled>生成 AI 背景</button>
+    <label class="toggle">
+      <input type="checkbox" id="composite">
+      <span>安全合成模式（產品像素 100% 不變）</span>
+    </label>
+    <label class="toggle">
+      <input type="checkbox" id="skipRmbg">
+      <span>圖片已去背，跳過 remove.bg</span>
+    </label>
+
+    <button class="btn-primary" id="rmbgBtn" onclick="doRemoveBg()" disabled>Step 1 — 去背 ＆ 載入</button>
     <div class="err" id="errBox"></div>
   </div>
 
-  <!-- 右側結果 -->
-  <div class="result-card" id="resultCard">
-    <div class="result-empty" id="emptyState">
-      <div class="icon">✨</div>
-      <div>上傳圖片後按「生成 AI 背景」</div>
+  <!-- ═══ Right panel ═══ -->
+  <div class="right" id="rightPanel">
+    <div class="empty-state" id="emptyState">
+      <div class="ei">✨</div>
+      <p>上傳商品圖片<br>按「去背 ＆ 載入」開始</p>
     </div>
-    <div class="spinner" id="spinner">
-      <div class="spin"></div>
-      <p id="spinnerMsg">去背中...</p>
-    </div>
-    <div id="resultView" style="display:none">
-      <div style="font-size:15px;font-weight:600;margin-bottom:14px">生成結果</div>
-      <div class="compare">
-        <div class="compare-img">
-          <div class="compare-label">原圖</div>
-          <img id="origImg">
-        </div>
-        <div class="compare-img">
-          <div class="compare-label">AI 背景</div>
-          <img id="resultImg">
+
+    <!-- Step 2: 快速場景 -->
+    <div class="section-card" id="step2Card" style="display:none">
+      <div class="section-hd">Step 2 — 快速場景 <span class="badge badge-free">免費 · 即時</span></div>
+      <div class="cutout-row">
+        <img class="cutout-thumb" id="cutoutImg" src="">
+        <div class="cutout-desc">
+          去背完成 ✅<br>點擊下方色塊立即套用場景。<br>
+          <span style="color:#999;font-size:11px">· 快速場景：免費合成<br>· AI 場景：下方輸入提示詞生成</span>
         </div>
       </div>
-      <div class="result-actions">
-        <a class="btn-dl" id="dlBtn" download="ai_bg_result.jpg">⬇ 下載圖片</a>
-        <button class="btn-retry" onclick="resetResult()">重新生成</button>
+      <div class="swatches">
+        <div class="swatch" style="background:#fff;border:1px solid #ddd" data-bg="white"    onclick="qc(this,'white')"  ><div class="sl">純白</div></div>
+        <div class="swatch" style="background:#f2f2f2"                    data-bg="grey"     onclick="qc(this,'grey')"   ><div class="sl">淺灰</div></div>
+        <div class="swatch" style="background:#f5f0e8"                    data-bg="cream"    onclick="qc(this,'cream')"  ><div class="sl">奶油</div></div>
+        <div class="swatch" style="background:#e8f2f8"                    data-bg="blue"     onclick="qc(this,'blue')"   ><div class="sl">天空</div></div>
+        <div class="swatch" style="background:#1e1e1e"                    data-bg="dark"     onclick="qc(this,'dark')"   ><div class="sl" style="background:rgba(255,255,255,.2)">深色</div></div>
+        <div class="swatch" style="background:linear-gradient(135deg,#ffecd2,#fcb69f)" data-bg="warm"   onclick="qc(this,'warm')"  ><div class="sl">暖橙</div></div>
+        <div class="swatch" style="background:linear-gradient(135deg,#a8edea,#fed6e3)" data-bg="cool"   onclick="qc(this,'cool')"  ><div class="sl">清涼</div></div>
+        <div class="swatch" style="background:linear-gradient(135deg,#d4fc79,#96e6a1)" data-bg="green"  onclick="qc(this,'green')" ><div class="sl">清新</div></div>
+        <div class="swatch" style="background:linear-gradient(135deg,#667eea,#764ba2)" data-bg="purple" onclick="qc(this,'purple')"><div class="sl">質感</div></div>
+        <div class="swatch" style="background:linear-gradient(135deg,#2c3e50,#4ca1af)" data-bg="ocean"  onclick="qc(this,'ocean')" ><div class="sl">深海</div></div>
+      </div>
+      <div class="preview-area" id="previewArea">
+        <div class="preview-wrap" id="previewWrap">
+          <img id="previewImg" src="">
+          <div class="preview-loading" id="prevLoad" style="display:none"><div class="spin"></div><span style="font-size:11px;color:#666">合成中…</span></div>
+        </div>
+        <div class="dl-row">
+          <a class="btn-dl" id="quickDl" download="result.jpg">⬇ 下載</a>
+          <button class="btn-outline" onclick="clearPreview()">換場景</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Step 3: AI 生成 -->
+    <div class="section-card" id="aiCard" style="display:none">
+      <div class="section-hd">Step 3 — AI 場景生成 <span class="badge badge-paid">每次計費</span></div>
+      <div class="ai-row">
+        <textarea id="aiPrompt" placeholder="例：現代北歐臥室，木地板，窗邊自然光&#10;clean studio with white marble floor"></textarea>
+        <button class="btn-ai" id="aiBtn" onclick="doAi()">生成</button>
+      </div>
+      <div class="err" id="aiErr"></div>
+      <div id="aiResult" style="display:none">
+        <div class="compare">
+          <div class="compare-img"><div class="cl">去背原圖</div><img id="aiOrigImg"></div>
+          <div class="compare-img"><div class="cl">AI 場景</div><img id="aiResultImg"></div>
+        </div>
+        <div class="dl-row">
+          <a class="btn-dl" id="aiDl" download="ai_result.jpg">⬇ 下載 AI 結果</a>
+          <button class="btn-outline" onclick="resetAi()">重新生成</button>
+        </div>
       </div>
     </div>
   </div>
 </div>
 
 <script>
-const KEY = '{{ key }}';
-let selectedFile = null;
+const KEY='{{ key }}';
+let selectedFile=null,transparentUrl=null;
 
-const dropZone = document.getElementById('dropZone');
-dropZone.addEventListener('dragover', e => { e.preventDefault(); dropZone.classList.add('drag'); });
-dropZone.addEventListener('dragleave', () => dropZone.classList.remove('drag'));
-dropZone.addEventListener('drop', e => {
-  e.preventDefault(); dropZone.classList.remove('drag');
-  const f = e.dataTransfer.files[0];
-  if (f && f.type.startsWith('image/')) setFile(f);
-});
-
-function onFileSelect(input) { if (input.files[0]) setFile(input.files[0]); }
-
-function setFile(f) {
-  selectedFile = f;
-  document.getElementById('fname').textContent = f.name;
-  document.getElementById('genBtn').disabled = false;
-  const reader = new FileReader();
-  reader.onload = e => {
-    const t = document.getElementById('previewThumb');
-    t.src = e.target.result; t.style.display = 'block';
+// ─ drop zone ─
+const dz=document.getElementById('dropZone');
+dz.addEventListener('dragover',e=>{e.preventDefault();dz.classList.add('drag');});
+dz.addEventListener('dragleave',()=>dz.classList.remove('drag'));
+dz.addEventListener('drop',e=>{e.preventDefault();dz.classList.remove('drag');const f=e.dataTransfer.files[0];if(f&&f.type.startsWith('image/'))setFile(f);});
+function onFile(i){if(i.files[0])setFile(i.files[0]);}
+function setFile(f){
+  selectedFile=f;
+  document.getElementById('fname').textContent=f.name;
+  document.getElementById('thumbName').textContent=f.name;
+  document.getElementById('rmbgBtn').disabled=false;
+  const r=new FileReader();
+  r.onload=e=>{
+    document.getElementById('origThumb').src=e.target.result;
+    document.getElementById('thumbRow').style.display='flex';
+    dz.style.display='none';
   };
-  reader.readAsDataURL(f);
+  r.readAsDataURL(f);
 }
 
-function loadBrandPrompt(bk) {
-  const opt = document.querySelector('#brandSel option[value="'+bk+'"]');
-  if (!opt) return;
-  const p = opt.dataset.prompt || '';
-  const c = opt.dataset.composite === 'true';
-  if (p) document.getElementById('prompt').value = p;
-  document.getElementById('composite').checked = c;
+// ─ brand ─
+function loadBrand(bk){
+  const o=document.querySelector('#brandSel option[value="'+bk+'"]');
+  if(!o)return;
+  if(o.dataset.prompt){document.getElementById('prompt').value=o.dataset.prompt;document.getElementById('aiPrompt').value=o.dataset.prompt;}
+  document.getElementById('composite').checked=(o.dataset.composite==='true');
 }
 
-function showErr(msg) {
-  const el = document.getElementById('errBox');
-  el.textContent = msg; el.style.display = 'block';
-}
+// ─ util ─
+function showErr(id,m){const e=document.getElementById(id);e.textContent=m;e.style.display='block';}
+function hideErr(id){document.getElementById(id).style.display='none';}
 
-function resetResult() {
-  document.getElementById('resultView').style.display = 'none';
-  document.getElementById('emptyState').style.display = 'flex';
-  document.getElementById('errBox').style.display = 'none';
-}
-
-async function generate() {
-  if (!selectedFile) return;
-  document.getElementById('errBox').style.display = 'none';
-  document.getElementById('emptyState').style.display = 'none';
-  document.getElementById('resultView').style.display = 'none';
-  const spinner = document.getElementById('spinner');
-  spinner.style.display = 'flex';
-  document.getElementById('genBtn').disabled = true;
-
-  const origUrl = URL.createObjectURL(selectedFile);
-  document.getElementById('origImg').src = origUrl;
-
-  const fd = new FormData();
-  fd.append('image', selectedFile);
-  fd.append('prompt', document.getElementById('prompt').value.trim());
-  fd.append('composite', document.getElementById('composite').checked ? '1' : '0');
-  fd.append('skip_removebg', document.getElementById('skipRemovebg').checked ? '1' : '0');
-
-  const msgs = ['去背中...', 'AI 生成背景中...', '合成處理中...', '快好了...'];
-  let mi = 0;
-  const msgEl = document.getElementById('spinnerMsg');
-  const msgTimer = setInterval(() => { mi = (mi+1) % msgs.length; msgEl.textContent = msgs[mi]; }, 4000);
-
-  try {
-    const r = await fetch('/api/image-bg/process?key='+KEY, { method:'POST', body: fd });
-    const j = await r.json();
-    clearInterval(msgTimer);
-    spinner.style.display = 'none';
-    if (!j.ok) { showErr(j.error || '生成失敗'); document.getElementById('emptyState').style.display='flex'; }
-    else {
-      document.getElementById('resultImg').src = j.url;
-      const dl = document.getElementById('dlBtn');
-      dl.href = j.url; dl.download = 'ai_bg_result.jpg';
-      document.getElementById('resultView').style.display = 'block';
+// ─ Step 1: remove bg ─
+async function doRemoveBg(){
+  if(!selectedFile)return;
+  hideErr('errBox');
+  const btn=document.getElementById('rmbgBtn');
+  btn.disabled=true;btn.textContent='去背中…';
+  document.getElementById('emptyState').style.display='none';
+  document.getElementById('step2Card').style.display='none';
+  document.getElementById('aiCard').style.display='none';
+  const fd=new FormData();
+  fd.append('image',selectedFile);
+  fd.append('skip_removebg',document.getElementById('skipRmbg').checked?'1':'0');
+  try{
+    const r=await fetch('/api/image-bg/removebg-only?key='+KEY,{method:'POST',body:fd});
+    const j=await r.json();
+    if(!j.ok){showErr('errBox',j.error||'去背失敗');document.getElementById('emptyState').style.display='flex';}
+    else{
+      transparentUrl=j.transparent_url;
+      document.getElementById('cutoutImg').src=j.transparent_url;
+      document.getElementById('aiPrompt').value=document.getElementById('prompt').value;
+      document.getElementById('step2Card').style.display='block';
+      document.getElementById('aiCard').style.display='block';
     }
-  } catch(e) {
-    clearInterval(msgTimer);
-    spinner.style.display = 'none';
-    showErr('連線錯誤：' + e.message);
-    document.getElementById('emptyState').style.display = 'flex';
-  }
-  document.getElementById('genBtn').disabled = false;
+  }catch(e){showErr('errBox','連線錯誤: '+e.message);document.getElementById('emptyState').style.display='flex';}
+  btn.disabled=false;btn.textContent='Step 1 — 去背 ＆ 載入';
 }
+
+// ─ Step 2: quick composite ─
+let qcBusy=false;
+async function qc(el,bgType){
+  if(!transparentUrl||qcBusy)return;
+  document.querySelectorAll('.swatch').forEach(s=>s.classList.remove('active'));
+  el.classList.add('active');
+  const pa=document.getElementById('previewArea');
+  pa.style.display='block';
+  document.getElementById('prevLoad').style.display='flex';
+  qcBusy=true;
+  try{
+    const r=await fetch('/api/image-bg/quick-composite?key='+KEY,{
+      method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({transparent_url:transparentUrl,bg_type:bgType})
+    });
+    const j=await r.json();
+    if(j.ok){
+      document.getElementById('previewImg').src=j.url;
+      document.getElementById('quickDl').href=j.url;
+    }
+  }catch(e){}
+  document.getElementById('prevLoad').style.display='none';
+  qcBusy=false;
+}
+function clearPreview(){
+  document.querySelectorAll('.swatch').forEach(s=>s.classList.remove('active'));
+  document.getElementById('previewArea').style.display='none';
+}
+
+// ─ Step 3: AI generate ─
+async function doAi(){
+  if(!transparentUrl)return;
+  const p=document.getElementById('aiPrompt').value.trim()||document.getElementById('prompt').value.trim();
+  const btn=document.getElementById('aiBtn');
+  btn.disabled=true;btn.textContent='生成中…';
+  hideErr('aiErr');
+  document.getElementById('aiResult').style.display='none';
+  try{
+    const r=await fetch('/api/image-bg/ai-generate?key='+KEY,{
+      method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({transparent_url:transparentUrl,prompt:p,composite:document.getElementById('composite').checked})
+    });
+    const j=await r.json();
+    if(j.ok){
+      document.getElementById('aiOrigImg').src=transparentUrl;
+      document.getElementById('aiResultImg').src=j.url;
+      document.getElementById('aiDl').href=j.url;
+      document.getElementById('aiResult').style.display='block';
+    }else showErr('aiErr',j.error||'AI 生成失敗');
+  }catch(e){showErr('aiErr','連線錯誤: '+e.message);}
+  btn.disabled=false;btn.textContent='生成';
+}
+function resetAi(){document.getElementById('aiResult').style.display='none';hideErr('aiErr');}
 </script>
 </body>
 </html>"""
@@ -3193,57 +3273,141 @@ def admin_image_bg():
     return render_template_string(IMAGE_BG_HTML, key=key, profiles=profiles)
 
 
-@products_bp.route("/api/image-bg/process", methods=["POST"])
-def api_image_bg_process():
-    import sys
+@products_bp.route("/api/image-bg/removebg-only", methods=["POST"])
+def api_image_bg_removebg():
+    import sys, io
     ok, _ = auth_required()
     if not ok:
         return jsonify({"ok": False, "error": "unauthorized"}), 403
     f = request.files.get("image")
     if not f:
         return jsonify({"ok": False, "error": "未上傳圖片"})
-    prompt_raw     = request.form.get("prompt", "").strip()
-    composite      = request.form.get("composite", "0") == "1"
-    skip_removebg  = request.form.get("skip_removebg", "0") == "1"
-
+    skip = request.form.get("skip_removebg", "0") == "1"
     try:
         img_bytes = f.read()
-
-        # 去背
-        if skip_removebg:
+        if skip:
             transparent = img_bytes
         else:
             transparent = _removebg_api(img_bytes)
             if not transparent:
-                transparent = img_bytes  # fallback 原圖
+                return jsonify({"ok": False, "error": "remove.bg 去背失敗，請確認 API 金鑰"})
+        ts = int(time.time())
+        fname = f"image-bg/transparent_{ts}.png"
+        pub_url, err = upload_image_to_supabase(fname, transparent, "image/png")
+        if not pub_url:
+            return jsonify({"ok": False, "error": f"上傳去背圖失敗：{err}"})
+        return jsonify({"ok": True, "transparent_url": pub_url})
+    except Exception as e:
+        print(f"[removebg-only] {e}", file=sys.stderr)
+        return jsonify({"ok": False, "error": str(e)})
 
-        # 提示詞：中文自動翻英；空白則自動生成
+
+# preset bg definitions for quick-composite
+_BG_PRESETS = {
+    "white":  {"solid": (255, 255, 255)},
+    "grey":   {"solid": (242, 242, 242)},
+    "cream":  {"solid": (245, 240, 232)},
+    "blue":   {"solid": (232, 242, 248)},
+    "dark":   {"solid": (30, 30, 30)},
+    "warm":   {"gradient": [(255, 236, 210), (252, 182, 159)]},
+    "cool":   {"gradient": [(168, 237, 234), (254, 214, 227)]},
+    "green":  {"gradient": [(212, 252, 121), (150, 230, 161)]},
+    "purple": {"gradient": [(102, 126, 234), (118, 75, 162)]},
+    "ocean":  {"gradient": [(44, 62, 80), (76, 161, 175)]},
+}
+
+def _make_preset_bg(bg_type, size=1024):
+    from PIL import Image
+    preset = _BG_PRESETS.get(bg_type, {"solid": (255, 255, 255)})
+    if "solid" in preset:
+        bg = Image.new("RGB", (size, size), preset["solid"])
+    else:
+        c1, c2 = preset["gradient"]
+        bg = Image.new("RGB", (size, size))
+        from PIL import ImageDraw
+        draw = ImageDraw.Draw(bg)
+        for i in range(size):
+            t = i / size
+            r = int(c1[0] + (c2[0] - c1[0]) * t)
+            g = int(c1[1] + (c2[1] - c1[1]) * t)
+            b = int(c1[2] + (c2[2] - c1[2]) * t)
+            draw.line([(0, i), (size, i)], fill=(r, g, b))
+    return bg
+
+
+@products_bp.route("/api/image-bg/quick-composite", methods=["POST"])
+def api_image_bg_quick():
+    import sys, io, requests as _req
+    ok, _ = auth_required()
+    if not ok:
+        return jsonify({"ok": False, "error": "unauthorized"}), 403
+    data = request.get_json(force=True)
+    transparent_url = data.get("transparent_url", "")
+    bg_type = data.get("bg_type", "white")
+    if not transparent_url:
+        return jsonify({"ok": False, "error": "缺少 transparent_url"})
+    try:
+        from PIL import Image
+        import io as _io
+        r = _req.get(transparent_url, timeout=20)
+        fg = Image.open(_io.BytesIO(r.content)).convert("RGBA")
+        size = max(fg.size)
+        size = max(size, 800)
+        bg = _make_preset_bg(bg_type, size).convert("RGBA")
+        # centre product on background
+        offset = ((size - fg.width) // 2, (size - fg.height) // 2)
+        bg.paste(fg, offset, fg)
+        out = _io.BytesIO()
+        bg.convert("RGB").save(out, format="JPEG", quality=92)
+        out.seek(0)
+        ts = int(time.time())
+        fname = f"image-bg/quick_{bg_type}_{ts}.jpg"
+        pub_url, err = upload_image_to_supabase(fname, out.read(), "image/jpeg")
+        if not pub_url:
+            return jsonify({"ok": False, "error": f"上傳失敗：{err}"})
+        return jsonify({"ok": True, "url": pub_url})
+    except Exception as e:
+        print(f"[quick-composite] {e}", file=sys.stderr)
+        return jsonify({"ok": False, "error": str(e)})
+
+
+@products_bp.route("/api/image-bg/ai-generate", methods=["POST"])
+def api_image_bg_ai():
+    import sys, io, requests as _req
+    ok, _ = auth_required()
+    if not ok:
+        return jsonify({"ok": False, "error": "unauthorized"}), 403
+    data = request.get_json(force=True)
+    transparent_url = data.get("transparent_url", "")
+    prompt_raw = data.get("prompt", "").strip()
+    composite = data.get("composite", False)
+    if not transparent_url:
+        return jsonify({"ok": False, "error": "缺少 transparent_url"})
+    if not OPENAI_API_KEY:
+        return jsonify({"ok": False, "error": "未設定 OPENAI_API_KEY"})
+    try:
+        r = _req.get(transparent_url, timeout=20)
+        transparent = r.content
+        # translate / auto-generate prompt
         if prompt_raw:
             prompt_en = _translate_prompt_to_en(prompt_raw)
         else:
             prompt_en = _auto_bg_prompt("product", "general")
-
         result = None
-        if prompt_en and OPENAI_API_KEY:
-            if composite:
-                result = _gpt_image2_composite_bg(transparent, prompt_en)
-            else:
-                result = _gpt_image2_bg(transparent, prompt_en)
-
+        if composite:
+            result = _gpt_image2_composite_bg(transparent, prompt_en)
+        else:
+            result = _gpt_image2_bg(transparent, prompt_en)
         if not result:
-            result = _paste_on_white(transparent)
-
-        if not result:
-            return jsonify({"ok": False, "error": "圖片處理失敗"})
-
-        filename = f"image-bg/{int(time.time())}.jpg"
-        pub_url, err = upload_image_to_supabase(filename, result, "image/jpeg")
+            return jsonify({"ok": False, "error": "AI 生成失敗，請稍後再試"})
+        ts = int(time.time())
+        fname = f"image-bg/ai_{ts}.jpg"
+        pub_url, err = upload_image_to_supabase(fname, result, "image/jpeg")
         if not pub_url:
             return jsonify({"ok": False, "error": f"上傳失敗：{err}"})
-
         return jsonify({"ok": True, "url": pub_url})
     except Exception as e:
-        print(f"[image-bg] {e}", file=sys.stderr)
+        print(f"[ai-generate] {e}", file=sys.stderr)
         return jsonify({"ok": False, "error": str(e)})
 
 
