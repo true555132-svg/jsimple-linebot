@@ -648,7 +648,7 @@ def api_ai_prompt():
             user_request=d.get("user_request",""),
             size=size,
         )
-        # Save prompt_draft so history tracks exploration
+        print("[AI_IMAGES] prompt only, no OpenAI image API call", file=sys.stderr)
         task_id = _create_task({
             "brand_key": d.get("brand_key",""),
             "product_name": d.get("product_name",""),
@@ -712,6 +712,7 @@ def api_ai_prompt_variants():
                 "prompt": prompt,
                 "task_id": task_id,
             })
+        print(f"[AI_IMAGES] prompt only, no OpenAI image API call (variants x{len(variants)})", file=sys.stderr)
         return jsonify({"ok": True, "variants": variants})
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)})
@@ -734,7 +735,7 @@ def api_ai_generate():
 
     final_prompt = (d.get("final_prompt") or "").strip()
     if not final_prompt:
-        return jsonify({"ok": False, "error": "請先組裝 Prompt 再生成"})
+        return jsonify({"ok": False, "error": "請先選擇一組 Prompt 方案，或手動輸入 Prompt"})
     if not OPENAI_API_KEY:
         return jsonify({"ok": False, "error": "未設定 OPENAI_API_KEY"})
 
@@ -748,6 +749,11 @@ def api_ai_generate():
     out_fmt      = d.get("output_format", "png") or "png"
     neg_prompt   = d.get("negative_prompt", "")
     model        = IMAGE_MODEL
+    # ID of the prompt_draft task that was selected (to upgrade its status)
+    try:
+        draft_task_id = int(d.get("draft_task_id") or 0)
+    except (ValueError, TypeError):
+        draft_task_id = 0
 
     task_id = _create_task({
         "brand_key": brand_key, "product_name": product_name, "sku": sku,
@@ -757,6 +763,7 @@ def api_ai_generate():
     })
 
     try:
+        print("[AI_IMAGES] generate image, OpenAI image API called", file=sys.stderr)
         if ref_bytes:
             img_bytes, usage = _openai_edit(final_prompt, ref_bytes, quality, model)
         else:
@@ -773,11 +780,15 @@ def api_ai_generate():
 
         _update_task(task_id, "generated",
                      output_urls=[pub_url], supabase_paths=[path], usage=usage)
+        # Upgrade the originating prompt_draft task to generated too
+        if draft_task_id:
+            _update_task(draft_task_id, "generated",
+                         output_urls=[pub_url], supabase_paths=[path], usage=usage)
         return jsonify({"ok": True, "url": pub_url, "task_id": task_id, "usage": usage})
 
     except Exception as e:
         msg = str(e)
-        print(f"[AI Images] generate error: {msg}", file=sys.stderr)
+        print(f"[AI_IMAGES] generate error: {msg}", file=sys.stderr)
         _update_task(task_id, "failed", error=msg)
         return jsonify({"ok": False, "error": msg})
 
@@ -1043,6 +1054,9 @@ textarea{resize:vertical;min-height:56px}
   <!-- 4 組方案預覽（hidden until doVariants） -->
   <div class="card" id="variantCard" style="display:none">
     <div class="card-title">4 組方案預覽 <span class="badge badge-info">點擊方案後再生成</span></div>
+    <div style="font-size:12px;color:#5c6bc0;background:#f0f2ff;border-radius:7px;padding:8px 12px;margin-bottom:12px">
+      ℹ️ 這裡只產生 Prompt 方案，不會消耗圖片點數。選擇方案後，按下方「開始生成圖片」才會計費。
+    </div>
     <div class="variant-grid" id="variantGrid"></div>
   </div>
 
@@ -1078,6 +1092,9 @@ textarea{resize:vertical;min-height:56px}
       <div class="spin" id="genSpin"></div>
       <span id="genBtnText">▶ 開始生成圖片</span>
     </button>
+    <div style="font-size:11px;color:#e65100;text-align:center;margin-top:6px">
+      ⚠️ 按下後才會呼叫圖片 API 並產生成本
+    </div>
     <div class="err-box" id="genErr"></div>
   </div>
 
@@ -1106,7 +1123,8 @@ textarea{resize:vertical;min-height:56px}
 
 <script>
 const KEY = '{{ key }}';
-let currentTaskId = null;
+let currentTaskId    = null;
+let selectedDraftId  = null;  // prompt_draft task ID to upgrade on generate success
 
 // ─ collect form data helper ─
 function formData(){
@@ -1154,17 +1172,14 @@ async function doVariants(){
 }
 
 function pickVariant(v){
-  // fill prompt textarea
   document.getElementById('promptArea').value = v.prompt;
   updateCharCount();
-  // sync selectors
   document.getElementById('imageType').value = v.type;
   document.getElementById('genSize').value   = v.size;
-  // highlight selected card
+  selectedDraftId = v.task_id || null;  // remember which draft to upgrade
   document.querySelectorAll('.variant-card').forEach(c=>c.classList.remove('selected'));
   const card = document.getElementById('vc_'+v.type);
   if(card) card.classList.add('selected');
-  // scroll to generate section
   document.querySelector('.btn-gen').scrollIntoView({behavior:'smooth',block:'center'});
 }
 
@@ -1205,6 +1220,7 @@ async function doBuildPrompt(){
     if(j.ok){
       document.getElementById('promptArea').value = j.prompt;
       updateCharCount();
+      selectedDraftId = j.task_id || null;  // track this draft
       loadHistory();
     } else alert('Prompt 組裝失敗: '+(j.error||''));
   }catch(e){ alert('連線錯誤: '+e.message); }
@@ -1219,25 +1235,44 @@ document.getElementById('promptArea').addEventListener('input', updateCharCount)
 
 // ─ generate ─
 async function doGenerate(){
-  const prompt = document.getElementById('promptArea').value.trim();
-  if(!prompt){ alert('請先組裝或輸入 Prompt'); return; }
-  const btn = document.getElementById('genBtn');
+  // ── 防呆：必填欄位檢查 ──────────────────────────────────────────
+  const prompt      = document.getElementById('promptArea').value.trim();
+  const productName = document.getElementById('productName').value.trim();
+  const brandKey    = document.getElementById('brandSel').value;
+  const imageType   = document.getElementById('imageType').value;
+
+  if(!prompt){
+    showGenErr('請先選擇一組 Prompt 方案，或手動輸入 Prompt');
+    return;
+  }
+  const missing = [];
+  if(!productName) missing.push('商品名稱');
+  if(!brandKey)    missing.push('品牌');
+  if(!imageType)   missing.push('圖片用途');
+  if(missing.length){
+    showGenErr('請填寫必填欄位：' + missing.join('、'));
+    return;
+  }
+  // ────────────────────────────────────────────────────────────────
+
+  const btn  = document.getElementById('genBtn');
   const spin = document.getElementById('genSpin');
   const txt  = document.getElementById('genBtnText');
   btn.disabled=true; spin.style.display='block'; txt.textContent='生成中…';
-  document.getElementById('genErr').style.display='none';
+  hideGenErr();
   document.getElementById('resultCard').style.display='none';
 
   const fd = new FormData();
   fd.append('final_prompt',   prompt);
-  fd.append('brand_key',      document.getElementById('brandSel').value);
-  fd.append('product_name',   document.getElementById('productName').value);
+  fd.append('brand_key',      brandKey);
+  fd.append('product_name',   productName);
   fd.append('sku',            document.getElementById('sku').value);
-  fd.append('image_type',     document.getElementById('imageType').value);
+  fd.append('image_type',     imageType);
   fd.append('user_request',   document.getElementById('userRequest').value);
   fd.append('size',           document.getElementById('genSize').value);
   fd.append('quality',        document.getElementById('genQuality').value);
   fd.append('output_format',  document.getElementById('genFormat').value);
+  if(selectedDraftId) fd.append('draft_task_id', selectedDraftId);
   const refFile = document.getElementById('refImg').files[0];
   if(refFile) fd.append('reference_image', refFile);
 
@@ -1245,21 +1280,29 @@ async function doGenerate(){
     const r = await fetch('/api/ai-images/generate?key='+KEY,{method:'POST',body:fd});
     const j = await r.json();
     if(j.ok){
-      currentTaskId = j.task_id;
-      const img = document.getElementById('resultImg');
-      img.src = j.url;
+      currentTaskId  = j.task_id;
+      selectedDraftId = null;  // consumed
+      document.getElementById('resultImg').src = j.url;
       document.getElementById('dlBtn').href = j.url;
       document.getElementById('resultCard').style.display='block';
+      document.getElementById('resultCard').scrollIntoView({behavior:'smooth',block:'start'});
       loadHistory();
     } else {
-      const eb = document.getElementById('genErr');
-      eb.textContent = '生成失敗：'+(j.error||''); eb.style.display='block';
+      // 失敗：只顯示錯誤，保留所有已填資料與 Prompt
+      showGenErr('生成失敗：' + (j.error||'未知錯誤'));
     }
   }catch(e){
-    const eb = document.getElementById('genErr');
-    eb.textContent='連線錯誤: '+e.message; eb.style.display='block';
+    showGenErr('連線錯誤: ' + e.message);
   }
   btn.disabled=false; spin.style.display='none'; txt.textContent='▶ 開始生成圖片';
+}
+
+function showGenErr(msg){
+  const eb = document.getElementById('genErr');
+  eb.textContent = msg; eb.style.display='block';
+}
+function hideGenErr(){
+  document.getElementById('genErr').style.display='none';
 }
 
 // ─ regenerate from current task ─
