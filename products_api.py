@@ -869,13 +869,16 @@ def _gpt_image2_bg(transparent_png, scene_prompt):
                 "prompt": scene_prompt,
                 "n": "1",
                 "size": "1024x1024",
-                "response_format": "b64_json",
             },
             timeout=90,
         )
         if r.status_code == 200:
-            b64 = r.json()["data"][0]["b64_json"]
-            result_img = _Im.open(io.BytesIO(base64.b64decode(b64))).convert("RGB")
+            item = r.json()["data"][0]
+            if item.get("b64_json"):
+                img_bytes_out = base64.b64decode(item["b64_json"])
+            else:
+                img_bytes_out = _req.get(item["url"], timeout=30).content
+            result_img = _Im.open(io.BytesIO(img_bytes_out)).convert("RGB")
             out = io.BytesIO()
             result_img.save(out, format="JPEG", quality=92, optimize=True)
             print("[GPT-Image-2] ✅ 背景生成成功", flush=True)
@@ -908,15 +911,18 @@ def _gpt_image2_composite_bg(transparent_png, scene_prompt, size=1024):
                 "prompt": scene_prompt + ", no products, empty scene, photorealistic",
                 "n": 1,
                 "size": f"{size}x{size}",
-                "response_format": "b64_json",
             },
             timeout=90,
         )
         if r.status_code != 200:
             print(f"[Composite] ❌ 背景生成失敗 {r.status_code}: {r.text[:200]}", file=sys.stderr)
             return None
-        bg = _Im.open(io.BytesIO(base64.b64decode(
-            r.json()["data"][0]["b64_json"]))).convert("RGBA").resize((size, size))
+        item = r.json()["data"][0]
+        if item.get("b64_json"):
+            bg_bytes = base64.b64decode(item["b64_json"])
+        else:
+            bg_bytes = _req.get(item["url"], timeout=30).content
+        bg = _Im.open(io.BytesIO(bg_bytes)).convert("RGBA").resize((size, size))
 
         # Step 2: 去背產品置中貼上（產品像素 100% 保留）
         product = _Im.open(io.BytesIO(transparent_png)).convert("RGBA")
