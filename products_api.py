@@ -56,6 +56,7 @@ def _migrate_pipeline_columns():
         "copy_length TEXT DEFAULT ''",
         "faq_strategy TEXT DEFAULT ''",
         "aeo_rules TEXT DEFAULT ''",
+        "bg_composite BOOLEAN DEFAULT FALSE",
     ]
     try:
         import sys
@@ -207,11 +208,12 @@ def _bp_all():
         return [{"brand_key": k, **v, "custom_prompt": "", "image_style": "", "seo_direction": "", "enabled": True} for k, v in BRAND_PROFILES.items()]
     try:
         conn = _pg_conn(); cur = conn.cursor()
-        cur.execute("SELECT brand_key,name,category,style,tone,custom_prompt,COALESCE(image_style,''),COALESCE(seo_direction,''),COALESCE(enabled,TRUE) FROM brand_profiles ORDER BY brand_key")
+        cur.execute("SELECT brand_key,name,category,style,tone,custom_prompt,COALESCE(image_style,''),COALESCE(seo_direction,''),COALESCE(enabled,TRUE),COALESCE(bg_composite,FALSE) FROM brand_profiles ORDER BY brand_key")
         rows = cur.fetchall(); cur.close(); conn.close()
         return [{"brand_key": r[0], "name": r[1], "category": r[2],
                  "style": r[3], "tone": r[4], "custom_prompt": r[5] or "",
-                 "image_style": r[6] or "", "seo_direction": r[7] or "", "enabled": bool(r[8])} for r in rows]
+                 "image_style": r[6] or "", "seo_direction": r[7] or "", "enabled": bool(r[8]),
+                 "bg_composite": bool(r[9])} for r in rows]
     except Exception:
         return [{"brand_key": k, **v, "custom_prompt": "", "image_style": "", "seo_direction": "", "enabled": True} for k, v in BRAND_PROFILES.items()]
 
@@ -220,28 +222,29 @@ def _bp_get(brand_key):
         return BRAND_PROFILES.get(brand_key, {})
     try:
         conn = _pg_conn(); cur = conn.cursor()
-        cur.execute("SELECT name,category,style,tone,custom_prompt,COALESCE(image_style,''),COALESCE(seo_direction,''),COALESCE(enabled,TRUE) FROM brand_profiles WHERE brand_key=%s", (brand_key,))
+        cur.execute("SELECT name,category,style,tone,custom_prompt,COALESCE(image_style,''),COALESCE(seo_direction,''),COALESCE(enabled,TRUE),COALESCE(bg_composite,FALSE) FROM brand_profiles WHERE brand_key=%s", (brand_key,))
         row = cur.fetchone(); cur.close(); conn.close()
         if row:
             return {"name": row[0], "category": row[1], "style": row[2],
                     "tone": row[3], "custom_prompt": row[4] or "",
-                    "image_style": row[5] or "", "seo_direction": row[6] or "", "enabled": bool(row[7])}
+                    "image_style": row[5] or "", "seo_direction": row[6] or "",
+                    "enabled": bool(row[7]), "bg_composite": bool(row[8])}
     except Exception:
         pass
     return BRAND_PROFILES.get(brand_key, {})
 
-def _bp_save(brand_key, name, category, style, tone, custom_prompt="", image_style="", seo_direction="", enabled=True):
+def _bp_save(brand_key, name, category, style, tone, custom_prompt="", image_style="", seo_direction="", enabled=True, bg_composite=False):
     if not DATABASE_URL:
         return False
     try:
         conn = _pg_conn(); cur = conn.cursor()
         cur.execute("""
-            INSERT INTO brand_profiles(brand_key,name,category,style,tone,custom_prompt,image_style,seo_direction,enabled,updated_at)
-            VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+            INSERT INTO brand_profiles(brand_key,name,category,style,tone,custom_prompt,image_style,seo_direction,enabled,bg_composite,updated_at)
+            VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
             ON CONFLICT(brand_key) DO UPDATE
-            SET name=%s,category=%s,style=%s,tone=%s,custom_prompt=%s,image_style=%s,seo_direction=%s,enabled=%s,updated_at=%s
-        """, (brand_key, name, category, style, tone, custom_prompt, image_style, seo_direction, enabled, time.time(),
-              name, category, style, tone, custom_prompt, image_style, seo_direction, enabled, time.time()))
+            SET name=%s,category=%s,style=%s,tone=%s,custom_prompt=%s,image_style=%s,seo_direction=%s,enabled=%s,bg_composite=%s,updated_at=%s
+        """, (brand_key, name, category, style, tone, custom_prompt, image_style, seo_direction, enabled, bg_composite, time.time(),
+              name, category, style, tone, custom_prompt, image_style, seo_direction, enabled, bg_composite, time.time()))
         conn.commit(); cur.close(); conn.close()
         return True
     except Exception as e:
@@ -885,12 +888,60 @@ def _gpt_image2_bg(transparent_png, scene_prompt):
         return None
 
 
-def _process_to_white_bg(img_bytes, size=800, scene_prompt=None):
-    """去背 → gpt-image-2 場景背景（有提示詞時）；否則貼白底。"""
+def _gpt_image2_composite_bg(transparent_png, scene_prompt, size=1024):
+    """安全合成模式：gpt-image-2 純文字生成背景 → PIL 貼上去背產品。
+    產品像素 100% 保留，不經過 AI edit，背景由 prompt 生成。
+    """
+    import sys
+    if not OPENAI_API_KEY:
+        return None
+    try:
+        import requests as _req
+        from PIL import Image as _Im
+        # Step 1: 純文字生成背景
+        r = _req.post(
+            "https://api.openai.com/v1/images/generations",
+            headers={"Authorization": f"Bearer {OPENAI_API_KEY}",
+                     "Content-Type": "application/json"},
+            json={
+                "model": "gpt-image-2",
+                "prompt": scene_prompt + ", no products, empty scene, photorealistic",
+                "n": 1,
+                "size": f"{size}x{size}",
+                "response_format": "b64_json",
+            },
+            timeout=90,
+        )
+        if r.status_code != 200:
+            print(f"[Composite] ❌ 背景生成失敗 {r.status_code}: {r.text[:200]}", file=sys.stderr)
+            return None
+        bg = _Im.open(io.BytesIO(base64.b64decode(
+            r.json()["data"][0]["b64_json"]))).convert("RGBA").resize((size, size))
+
+        # Step 2: 去背產品置中貼上（產品像素 100% 保留）
+        product = _Im.open(io.BytesIO(transparent_png)).convert("RGBA")
+        product.thumbnail((size, size), _Im.LANCZOS)
+        offset = ((size - product.width) // 2, (size - product.height) // 2)
+        bg.paste(product, offset, mask=product.split()[3])
+
+        out = io.BytesIO()
+        bg.convert("RGB").save(out, format="JPEG", quality=92, optimize=True)
+        print("[Composite] ✅ 安全合成完成（產品像素未經 AI 修改）", flush=True)
+        return out.getvalue()
+    except Exception as e:
+        print(f"[Composite] exception: {e}", file=sys.stderr)
+        return None
+
+
+def _process_to_white_bg(img_bytes, size=800, scene_prompt=None, bg_composite=False):
+    """去背 → AI 背景（edit 或 composite 模式）；否則貼白底。"""
     removed = _removebg_api(img_bytes)
     if removed:
         if scene_prompt and OPENAI_API_KEY:
-            result = _gpt_image2_bg(removed, scene_prompt)
+            if bg_composite:
+                result = _gpt_image2_composite_bg(removed, scene_prompt)
+            else:
+                result = _gpt_image2_bg(removed, scene_prompt)
             if result:
                 return result
         result = _paste_on_white(removed, size)
@@ -906,30 +957,34 @@ def _process_images_for_job(job_id):
     if not raw_imgs:
         _pj_update(job_id, img_status="no_images"); return
 
-    # 取品牌的 AI 背景提示詞（支援中文自動翻英）
+    # 取品牌的 AI 背景提示詞（支援中文自動翻英）與合成模式
     scene_prompt = None
+    bg_composite = False
     brand_key = job.get("brand", "")
+    bp = {}
     if brand_key:
         bp = _bp_get(brand_key)
         raw_prompt = (bp.get("image_style") or "").strip()
         if raw_prompt:
             scene_prompt = _translate_prompt_to_en(raw_prompt)
+        bg_composite = bool(bp.get("bg_composite", False))
 
     # 提示詞為空 → 用商品名稱自動分析生成
     if not scene_prompt and OPENAI_API_KEY:
         product_name = job.get("ai_name") or job.get("raw_title") or ""
-        category     = job.get("category") or (bp.get("category") if brand_key else "") or ""
+        category     = job.get("category") or bp.get("category", "") or ""
         scene_prompt = _auto_bg_prompt(product_name, category)
 
     if scene_prompt:
-        print(f"[GPT-Image-2] 品牌={brand_key} 背景提示詞: {scene_prompt[:80]}", flush=True)
+        mode_label = "安全合成" if bg_composite else "AI Edit"
+        print(f"[GPT-Image-2] 品牌={brand_key} 模式={mode_label} 提示詞: {scene_prompt[:80]}", flush=True)
 
     _pj_update(job_id, img_status="processing")
     processed = []
     for i, url in enumerate(raw_imgs[:10]):
         img_bytes = _download_image(url)
         if not img_bytes: continue
-        result = _process_to_white_bg(img_bytes, scene_prompt=scene_prompt)
+        result = _process_to_white_bg(img_bytes, scene_prompt=scene_prompt, bg_composite=bg_composite)
         if not result: continue
         filename = f"products/{job_id}_{i+1}.jpg"
         pub_url, _ = upload_image_to_supabase(filename, result, "image/jpeg")
@@ -2839,8 +2894,12 @@ input[type=text]:focus,textarea:focus{border-color:#1a1a1a}
   <textarea id="style_{{ p.brand_key }}" rows="3">{{ p.style }}</textarea>
   <label>SEO 關鍵字方向</label>
   <textarea id="seo_direction_{{ p.brand_key }}" rows="2">{{ p.seo_direction }}</textarea>
-  <label>AI 背景提示詞（英文，留空則輸出白底）</label>
-  <textarea id="image_style_{{ p.brand_key }}" rows="2" placeholder="e.g. clean modern bedroom with warm wood floor and soft natural light">{{ p.image_style }}</textarea>
+  <label>AI 背景提示詞（中英文均可，留空則自動依商品分析）</label>
+  <textarea id="image_style_{{ p.brand_key }}" rows="2" placeholder="e.g. 現代北歐臥室，木質地板，柔和自然光">{{ p.image_style }}</textarea>
+  <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-weight:normal;margin-top:6px">
+    <input type="checkbox" id="bg_composite_{{ p.brand_key }}" {% if p.bg_composite %}checked{% endif %}>
+    <span>安全合成模式（產品像素 100% 不變，只換背景）</span>
+  </label>
   <label>自訂 Prompt（選填）</label>
   <textarea id="custom_prompt_{{ p.brand_key }}" rows="3">{{ p.custom_prompt }}</textarea>
   <input type="hidden" id="name_{{ p.brand_key }}" value="{{ p.name }}">
@@ -2866,6 +2925,7 @@ function fields(bk){
     custom_prompt: document.getElementById('custom_prompt_'+bk).value.trim(),
     image_style:   document.getElementById('image_style_'+bk).value.trim(),
     seo_direction: document.getElementById('seo_direction_'+bk).value.trim(),
+    bg_composite:  document.getElementById('bg_composite_'+bk).checked,
     enabled:       document.getElementById('enabled_'+bk).checked,
   };
 }
@@ -2928,6 +2988,7 @@ def api_brand_profiles_save(brand_key):
         data.get("image_style", ""),
         data.get("seo_direction", ""),
         bool(data.get("enabled", True)),
+        bool(data.get("bg_composite", False)),
     )
     return jsonify({"ok": success})
 
