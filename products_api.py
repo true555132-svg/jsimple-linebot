@@ -782,16 +782,26 @@ def _has_chinese(text):
 
 
 def _translate_prompt_to_en(prompt):
-    """中文提示詞 → 英文（用 Claude Haiku，失敗回傳原文）。"""
-    if not ANTHROPIC_API_KEY or not _has_chinese(prompt):
+    """中文或短句提示詞 → 翻譯 + 擴充成高品質英文 gpt-image-2 提示詞。"""
+    if not ANTHROPIC_API_KEY:
         return prompt
     try:
         req_data = json.dumps({
             "model": "claude-haiku-4-5-20251001",
-            "max_tokens": 200,
+            "max_tokens": 300,
             "messages": [{"role": "user", "content":
-                f'Translate this image background description to English for an AI image generation prompt. '
-                f'Output only the translated text, no explanation:\n{prompt}'}]
+                f'You are an expert AI image generation prompt writer for gpt-image-2.\n'
+                f'The user described a product photo background: "{prompt}"\n\n'
+                f'Your task:\n'
+                f'1. Translate to English if needed\n'
+                f'2. Expand into a rich scene description that includes:\n'
+                f'   - Specific setting / environment\n'
+                f'   - Lighting quality (e.g. soft natural light, warm studio lighting, golden hour)\n'
+                f'   - Surface material (e.g. white marble countertop, warm oak wood table)\n'
+                f'   - Mood and atmosphere\n'
+                f'   - Photography style (e.g. clean product shot, lifestyle editorial)\n'
+                f'3. Under 80 words, flowing prose, no bullet points\n'
+                f'4. Output ONLY the enhanced English prompt, nothing else'}]
         }).encode()
         req = urllib.request.Request(
             "https://api.anthropic.com/v1/messages",
@@ -802,26 +812,30 @@ def _translate_prompt_to_en(prompt):
         )
         with urllib.request.urlopen(req, timeout=20) as r:
             en = json.loads(r.read().decode())["content"][0]["text"].strip()
-        print(f"[GPT-Image-2] 提示詞翻譯: {prompt[:30]} → {en[:60]}", flush=True)
+        print(f"[GPT-Image-2] 提示詞增強: {prompt[:30]} → {en[:80]}", flush=True)
         return en
     except Exception as e:
-        print(f"[GPT-Image-2] 翻譯失敗，使用原文: {e}", flush=True)
+        print(f"[GPT-Image-2] 提示詞增強失敗，使用原文: {e}", flush=True)
         return prompt
 
 
 def _auto_bg_prompt(product_name, category):
-    """商品名稱 + 類別 → 自動生成英文背景提示詞（Claude Haiku）。"""
+    """商品名稱 + 類別 → 自動生成高品質英文背景提示詞（Claude Haiku）。"""
     if not ANTHROPIC_API_KEY or not product_name:
         return None
     try:
         req_data = json.dumps({
             "model": "claude-haiku-4-5-20251001",
-            "max_tokens": 120,
+            "max_tokens": 300,
             "messages": [{"role": "user", "content":
-                f'Write a short English background scene description for a product photo of: "{product_name}" '
-                f'(category: {category or "general"}). '
-                f'The background should suit e-commerce use (clean, professional, lifestyle). '
-                f'Output only the scene description (1-2 sentences, no quotes).'}]
+                f'You are an expert AI image generation prompt writer for gpt-image-2.\n'
+                f'Write a rich product photography background scene for: "{product_name}" (category: {category or "general"}).\n\n'
+                f'Requirements:\n'
+                f'- Suit e-commerce / lifestyle photography\n'
+                f'- Include: environment, lighting quality, surface material, mood, camera style\n'
+                f'- Under 80 words, flowing prose\n'
+                f'- Output ONLY the English prompt, nothing else\n\n'
+                f'Example quality: "A sleek chair rests on warm white oak flooring beside a floor-to-ceiling window, bathed in soft morning light. The minimal Scandinavian living room features neutral tones and clean lines, shot in an editorial lifestyle photography style with shallow depth of field."'}]
         }).encode()
         req = urllib.request.Request(
             "https://api.anthropic.com/v1/messages",
