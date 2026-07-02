@@ -2718,6 +2718,19 @@ body{font-family:-apple-system,sans-serif;background:#f5f5f5;color:#333}
       <span class="arrow">›</span>
     </div>
   </a>
+  <a class="card" href="/admin/ai-images?key={{ key }}">
+    <div class="card-left">
+      <div class="icon" style="background:#e8eaf6">🎨</div>
+      <div>
+        <div class="card-title">AI 圖片中心</div>
+        <div class="card-sub">品牌記憶 × Prompt 組裝 × gpt-image-2 生成</div>
+      </div>
+    </div>
+    <div style="display:flex;align-items:center;gap:10px">
+      <span style="font-size:11px;background:#e8eaf6;color:#3949ab;padding:3px 8px;border-radius:8px;font-weight:700">NEW</span>
+      <span class="arrow">›</span>
+    </div>
+  </a>
   <a class="card" href="/admin/image-bg?key={{ key }}">
     <div class="card-left">
       <div class="icon" style="background:#f3e5f5">✨</div>
@@ -2727,7 +2740,6 @@ body{font-family:-apple-system,sans-serif;background:#f5f5f5;color:#333}
       </div>
     </div>
     <div style="display:flex;align-items:center;gap:10px">
-      <span style="font-size:11px;background:#e8f5e9;color:#2e7d32;padding:3px 8px;border-radius:8px;font-weight:700">新功能</span>
       <span class="arrow">›</span>
     </div>
   </a>
@@ -4033,6 +4045,10 @@ app.register_blueprint(seo_bp)
 
 from seo_article_import import seo_article_import_bp
 app.register_blueprint(seo_article_import_bp)
+
+# ═══ AI 圖片中心 Blueprint ════════════════════════════════════════════
+from ai_images_api import ai_images_bp
+app.register_blueprint(ai_images_bp)
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
