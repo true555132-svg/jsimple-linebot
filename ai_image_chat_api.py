@@ -72,9 +72,14 @@ def _chat_migrate():
 def _brands_list():
     try:
         conn = _pg_conn(); cur = conn.cursor()
-        cur.execute("SELECT brand_key, name FROM brand_profiles ORDER BY brand_key")
+        cur.execute(
+            "SELECT brand_key, name, style_keywords, color_style, negative_rules "
+            "FROM brand_profiles ORDER BY brand_key"
+        )
         rows = cur.fetchall(); cur.close(); conn.close()
-        return [{"brand_key": r[0], "name": r[1]} for r in rows]
+        return [{"brand_key": r[0], "name": r[1],
+                 "style_keywords": r[2] or "", "color_style": r[3] or "",
+                 "negative_rules": r[4] or ""} for r in rows]
     except Exception:
         return []
 
@@ -273,7 +278,7 @@ def page_ai_image_chat():
     if not ok:
         return render_template_string(LOGIN_HTML, next="/admin/ai-image-chat", error=None)
     brands = _brands_list()
-    return render_template_string(AI_IMAGE_CHAT_HTML, key=key, brands=brands)
+    return render_template_string(AI_IMAGE_CHAT_HTML, key=key, brands=brands, brands_data=brands)
 
 
 @ai_image_chat_bp.route("/api/ai-image-chat/sessions", methods=["GET"])
@@ -558,6 +563,23 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
 .btn-send:hover{background:#333}.btn-send:disabled{background:#aaa;cursor:not-allowed}
 .spin{width:14px;height:14px;border:2px solid rgba(255,255,255,.3);border-top-color:#fff;border-radius:50%;animation:spin .7s linear infinite;display:none}
 @keyframes spin{to{transform:rotate(360deg)}}
+/* Cost banner */
+.cost-banner{background:#fff8e1;border-bottom:1px solid #ffe082;padding:7px 18px;font-size:12px;color:#5d4037;display:flex;align-items:baseline;gap:6px;flex-shrink:0;flex-wrap:wrap}
+.cost-banner .cb-sub{color:#888;font-size:11px}
+.cost-banner .cb-sub a{color:#3949ab;text-decoration:none}
+.cost-banner .cb-sub a:hover{text-decoration:underline}
+/* Brand hint */
+.brand-hint{background:#e8eaf6;border-radius:7px;padding:7px 11px;margin-bottom:7px;display:none;align-items:flex-start;gap:7px}
+.bh-body{display:flex;flex-direction:column;gap:4px;flex:1}
+.bh-name{font-size:12px;color:#3949ab;font-weight:700}
+.bh-tags{display:flex;gap:5px;flex-wrap:wrap}
+.bh-tag{font-size:10px;background:rgba(57,73,171,.12);color:#3949ab;padding:2px 8px;border-radius:8px;max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+/* Input error */
+.input-err{font-size:12px;color:#e53935;margin-top:5px;padding-left:2px;display:none}
+/* Fail bubble */
+.fail-bubble{background:#fff3f3;border:1px solid #ffcdd2;color:#c62828}
+.fail-badge{display:inline-block;font-size:10px;font-weight:700;background:#e53935;color:#fff;padding:2px 7px;border-radius:6px;margin-right:6px;vertical-align:middle}
+.fail-detail{font-size:12px;color:#c62828;margin-top:5px;line-height:1.5}
 @media(max-width:700px){
   .sidebar{width:100%;height:auto;max-height:160px}
   .chat-layout{flex-direction:column}
@@ -570,6 +592,11 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
 <div class="topbar">
   <a href="/admin?key={{ key }}">← 後台</a><span class="sep">/</span>
   <h1>AI 對話生成</h1>
+</div>
+
+<div class="cost-banner">
+  ⚠️ 此頁為快速生圖模式，送出後會直接呼叫圖片 API 並產生成本。
+  <span class="cb-sub">若要先免費比較 4 組 Prompt 方案，請使用<a href="/admin/ai-images?key={{ key }}">AI 圖片中心</a>。</span>
 </div>
 
 <div class="chat-layout">
@@ -616,11 +643,18 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
         <span id="refFileName" class="ref-fname"></span>
         <button onclick="clearRef()">✕</button>
       </div>
+      <div class="brand-hint" id="brandHint">
+        <span style="font-size:16px">🏷️</span>
+        <div class="bh-body">
+          <div class="bh-name">已套用品牌記憶：<span id="bhName"></span></div>
+          <div class="bh-tags" id="bhTags"></div>
+        </div>
+      </div>
       <div class="input-opts">
         <label class="opt-icon" title="上傳參考圖">
           📎<input type="file" id="refImgInput" accept="image/*" onchange="onRefSelect(this)">
         </label>
-        <select id="chatBrand" class="opt-sel">
+        <select id="chatBrand" class="opt-sel" onchange="onBrandChange()">
           <option value="">一般模式</option>
           {% for b in brands %}
           <option value="{{ b.brand_key }}">{{ b.name }}</option>
@@ -645,19 +679,37 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
       <div class="input-row">
         <textarea class="chat-input" id="chatInput" rows="2"
           placeholder="請描述你想生成的圖片... 例：幫我做一張朗德太陽能壁燈的情境圖"
-          onkeydown="onInputKey(event)"></textarea>
+          onkeydown="onInputKey(event)" oninput="clearInputErr()"></textarea>
         <button class="btn-send" id="sendBtn" onclick="sendMessage()">
           <div class="spin" id="sendSpin"></div>
           <span id="sendBtnText">送出</span>
         </button>
       </div>
+      <div class="input-err" id="inputErr"></div>
     </div>
   </div>
 </div>
 
 <script>
-const KEY = '{{ key }}';
+const KEY        = '{{ key }}';
+const BRANDS_DATA = {{ brands_data | tojson }};
 let currentSessionId = null;
+
+// ── Brand hint (item 4) ───────────────────────────────────────────────
+function onBrandChange(){
+  const bk   = document.getElementById('chatBrand').value;
+  const hint = document.getElementById('brandHint');
+  if(!bk){ hint.style.display='none'; return; }
+  const bd = BRANDS_DATA.find(b=>b.brand_key===bk);
+  if(!bd){ hint.style.display='none'; return; }
+  document.getElementById('bhName').textContent = bd.name;
+  const tags = [];
+  if(bd.style_keywords) tags.push('風格：'+(bd.style_keywords.slice(0,28)+(bd.style_keywords.length>28?'…':'')));
+  if(bd.color_style)    tags.push('色系：'+(bd.color_style.slice(0,28)+(bd.color_style.length>28?'…':'')));
+  if(bd.negative_rules) tags.push('禁止：'+(bd.negative_rules.slice(0,30)+(bd.negative_rules.length>30?'…':'')));
+  document.getElementById('bhTags').innerHTML = tags.map(t=>`<span class="bh-tag">${t}</span>`).join('');
+  hint.style.display = 'flex';
+}
 
 // ── Sidebar ──────────────────────────────────────────────────────────
 async function loadSessions(){
@@ -758,13 +810,23 @@ function renderUserMsg(m){
 }
 
 function renderAIMsg(m){
+  if(m.status === 'failed'){
+    return `<div class="msg-row ai-row">
+      <div class="ai-avatar">🤖</div>
+      <div class="ai-content">
+        <div class="msg-bubble ai-bubble fail-bubble">
+          <span class="fail-badge">⚠️ 生成失敗</span>
+          <div class="fail-detail">${esc(m.message_text)}</div>
+        </div>
+      </div>
+    </div>`;
+  }
   const cards = (m.image_urls||[]).map((url,i)=>renderImgCard(url, m.prompt_text, m.id, i)).join('');
-  const errNote = m.status==='failed' ? '<div style="font-size:11px;color:#e53935;margin-top:4px">⚠️ 生成失敗</div>' : '';
   return `<div class="msg-row ai-row">
     <div class="ai-avatar">🤖</div>
     <div class="ai-content">
       <div class="msg-bubble ai-bubble">${esc(m.message_text).replace(/\\n/g,'<br>')}</div>
-      ${errNote}${cards}
+      ${cards}
     </div>
   </div>`;
 }
@@ -809,10 +871,31 @@ function scrollBottom(){
   if(el) el.scrollTop = el.scrollHeight;
 }
 
+// ── Input error helpers ───────────────────────────────────────────────
+function showInputErr(msg){
+  const el = document.getElementById('inputErr');
+  el.textContent = msg; el.style.display = 'block';
+}
+function clearInputErr(){
+  document.getElementById('inputErr').style.display = 'none';
+}
+
 // ── Send ─────────────────────────────────────────────────────────────
 async function sendMessage(){
   const text = document.getElementById('chatInput').value.trim();
-  if(!text) return;
+  // Item 3: empty message block
+  if(!text){
+    showInputErr('請輸入想生成的圖片內容');
+    document.getElementById('chatInput').focus();
+    return;
+  }
+  clearInputErr();
+
+  const count = parseInt(document.getElementById('chatCount').value) || 1;
+  // Item 2: cost confirmation for count > 1
+  if(count > 1){
+    if(!confirm(`將生成 ${count} 張圖片，會依張數產生成本，確定送出嗎？`)) return;
+  }
 
   if(!currentSessionId){
     await createSession();
@@ -824,7 +907,6 @@ async function sendMessage(){
   const brand     = document.getElementById('chatBrand').value;
   const size      = document.getElementById('chatSize').value;
   const quality   = document.getElementById('chatQuality').value;
-  const count     = document.getElementById('chatCount').value;
 
   // Append user bubble
   const ws = document.getElementById('welcomeScreen');
