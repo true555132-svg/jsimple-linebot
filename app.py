@@ -2727,7 +2727,19 @@ body{font-family:-apple-system,sans-serif;background:#f5f5f5;color:#333}
       </div>
     </div>
     <div style="display:flex;align-items:center;gap:10px">
-      <span style="font-size:11px;background:#e8eaf6;color:#3949ab;padding:3px 8px;border-radius:8px;font-weight:700">NEW</span>
+      <span class="arrow">›</span>
+    </div>
+  </a>
+  <a class="card" href="/admin/ai-image-chat?key={{ key }}">
+    <div class="card-left">
+      <div class="icon" style="background:#fce4ec">💬</div>
+      <div>
+        <div class="card-title">AI 對話生成</div>
+        <div class="card-sub">像 ChatGPT 一樣輸入文字，直接生成圖片</div>
+      </div>
+    </div>
+    <div style="display:flex;align-items:center;gap:10px">
+      <span style="font-size:11px;background:#fce4ec;color:#c62828;padding:3px 8px;border-radius:8px;font-weight:700">NEW</span>
       <span class="arrow">›</span>
     </div>
   </a>
@@ -4049,6 +4061,10 @@ app.register_blueprint(seo_article_import_bp)
 # ═══ AI 圖片中心 Blueprint ════════════════════════════════════════════
 from ai_images_api import ai_images_bp
 app.register_blueprint(ai_images_bp)
+
+# ═══ AI 對話生成 Blueprint ════════════════════════════════════════════
+from ai_image_chat_api import ai_image_chat_bp
+app.register_blueprint(ai_image_chat_bp)
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
