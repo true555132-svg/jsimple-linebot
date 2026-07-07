@@ -1827,7 +1827,7 @@ function renderMsgs(msgs){
       // admin sent file - show link from log
       content = `<span>📎 ${escHtml(fileMatch[1])}</span>`;
     } else if(m.image_url){
-      const imgUrl = m.image_url.startsWith('/api/line-image/') ? m.image_url+'?admin_key='+KEY : m.image_url;
+      const imgUrl = m.image_url;
       const isVid=/\.(mp4|mov|avi|webm|m4v)(\?|$)/i.test(imgUrl);
       const isFile=/\/(files)\//i.test(imgUrl) || /\.(pdf|doc|docx|xls|xlsx|ppt|pptx|zip|rar|txt|csv)(\?|$)/i.test(imgUrl);
       if(isVid) content=`<video src="${imgUrl}" controls style="max-width:220px;border-radius:12px;display:block"></video>`;
@@ -3533,20 +3533,19 @@ def admin_inbox():
 
 @app.route("/api/line-image/<msg_id>")
 def proxy_line_image(msg_id):
-    ok, _ = auth_required()
-    if not ok:
-        from flask import abort as _abort; _abort(403)
+    from flask import Response
     dl_url = f"https://api-data.line.me/v2/bot/message/{msg_id}/content"
     req = urllib.request.Request(dl_url, headers={"Authorization": f"Bearer {LINE_CHANNEL_ACCESS_TOKEN}"})
     try:
-        from flask import Response
         with urllib.request.urlopen(req, timeout=15) as r:
             data = r.read()
             content_type = r.headers.get("Content-Type", "image/jpeg")
-        return Response(data, content_type=content_type)
+        resp = Response(data, content_type=content_type)
+        resp.headers["Cache-Control"] = "max-age=86400"
+        return resp
     except Exception as e:
-        print(f"[LINE IMAGE PROXY ERROR] msg_id={msg_id} error={e}", flush=True)
-        from flask import abort as _abort; _abort(404)
+        print(f"[LINE IMAGE PROXY ERROR] msg_id={msg_id} err={e}", flush=True)
+        return Response(b"", status=404)
 
 @app.route("/api/messages")
 def api_messages():
