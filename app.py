@@ -3599,6 +3599,26 @@ def proxy_line_image(msg_id):
         print(f"[LINE IMAGE PROXY ERR] msg_id={msg_id} err={e}", flush=True)
         return Response(b"", status=404)
 
+@app.route("/api/diag-line/<msg_id>")
+def diag_line(msg_id):
+    ok, _ = auth_required()
+    if not ok: return jsonify({"error":"unauthorized"}), 403
+    result = {"msg_id": msg_id, "db": False, "line_api": None, "line_error": None, "token_prefix": LINE_CHANNEL_ACCESS_TOKEN[:10]+"..."}
+    data, ct = _get_line_image(msg_id)
+    result["db"] = bool(data)
+    try:
+        dl_url = f"https://api-data.line.me/v2/bot/message/{msg_id}/content"
+        req = urllib.request.Request(dl_url, headers={"Authorization": f"Bearer {LINE_CHANNEL_ACCESS_TOKEN}"})
+        with urllib.request.urlopen(req, timeout=10) as r:
+            body = r.read()
+            result["line_api"] = "ok"
+            result["size"] = len(body)
+            result["content_type"] = r.headers.get("Content-Type","?")
+    except Exception as e:
+        result["line_api"] = "error"
+        result["line_error"] = str(e)
+    return jsonify(result)
+
 @app.route("/api/messages")
 def api_messages():
     ok, _ = auth_required()
