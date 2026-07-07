@@ -3593,7 +3593,8 @@ def proxy_line_image(msg_id):
         return resp
     except Exception as e:
         print(f"[LINE IMAGE PROXY ERR] msg_id={msg_id} err={e}", flush=True)
-        return Response(b"", status=404)
+        svg = '<svg xmlns="http://www.w3.org/2000/svg" width="160" height="56"><rect width="160" height="56" rx="8" fill="#f0f0f0"/><text x="80" y="33" font-size="12" fill="#bbb" text-anchor="middle" font-family="sans-serif">圖片已過期</text></svg>'
+        return Response(svg.encode("utf-8"), content_type="image/svg+xml; charset=utf-8")
 
 @app.route("/api/diag-line/<msg_id>")
 def diag_line(msg_id):
