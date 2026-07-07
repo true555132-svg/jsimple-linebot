@@ -216,6 +216,14 @@ def _init_messages_db():
                 )
             """)
             cur.execute("CREATE INDEX IF NOT EXISTS idx_scan_items_job ON store_scan_items(scan_job_id)")
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS line_images (
+                    msg_id       TEXT PRIMARY KEY,
+                    data         BYTEA NOT NULL,
+                    content_type TEXT DEFAULT 'image/jpeg',
+                    created_at   FLOAT DEFAULT 0
+                )
+            """)
             conn.commit()
             cur.close()
             conn.close()
@@ -223,6 +231,33 @@ def _init_messages_db():
         import sys; print(f"[DB Init Error] {e}", file=sys.stderr)
 
 _init_messages_db()
+
+def _save_line_image(msg_id, data, content_type="image/jpeg"):
+    if not DATABASE_URL: return
+    try:
+        import psycopg2
+        with _db_lock:
+            conn = _pg_conn(); cur = conn.cursor()
+            cur.execute(
+                "INSERT INTO line_images (msg_id,data,content_type,created_at) VALUES(%s,%s,%s,%s) ON CONFLICT(msg_id) DO NOTHING",
+                (msg_id, psycopg2.Binary(data), content_type, time.time())
+            )
+            conn.commit(); cur.close(); conn.close()
+        print(f"[LINE IMG STORED] msg_id={msg_id} size={len(data)}", flush=True)
+    except Exception as e:
+        print(f"[LINE IMG SAVE ERR] {e}", flush=True)
+
+def _get_line_image(msg_id):
+    if not DATABASE_URL: return None, None
+    try:
+        with _db_lock:
+            conn = _pg_conn(); cur = conn.cursor()
+            cur.execute("SELECT data, content_type FROM line_images WHERE msg_id=%s", (msg_id,))
+            row = cur.fetchone(); cur.close(); conn.close()
+            if row: return bytes(row[0]), row[1] or "image/jpeg"
+    except Exception as e:
+        print(f"[LINE IMG GET ERR] {e}", flush=True)
+    return None, None
 
 # ── Supabase 客戶資料存取 ─────────────────────────────────
 
@@ -718,6 +753,17 @@ def handle_line_image(event):
     log_message({"time": now, "platform": "LINE", "user_id": user_id,
                  "msg": "[圖片]", "intent": "image", "reply": "", "replied": False,
                  "image_url": image_url, "quote_token": qt})
+    def _dl():
+        try:
+            dl_url = f"https://api-data.line.me/v2/bot/message/{msg_id}/content"
+            req = urllib.request.Request(dl_url, headers={"Authorization": f"Bearer {LINE_CHANNEL_ACCESS_TOKEN}"})
+            with urllib.request.urlopen(req, timeout=15) as r:
+                data = r.read()
+                ct = r.headers.get("Content-Type", "image/jpeg")
+            _save_line_image(msg_id, data, ct)
+        except Exception as e:
+            print(f"[LINE IMG DL ERR] msg_id={msg_id} err={e}", flush=True)
+    threading.Thread(target=_dl, daemon=True).start()
 
 @handler.add(MessageEvent, message=StickerMessageContent)
 def handle_line_sticker(event):
@@ -3534,25 +3580,24 @@ def admin_inbox():
 @app.route("/api/line-image/<msg_id>")
 def proxy_line_image(msg_id):
     from flask import Response
-    import urllib.error
-    dl_url = f"https://api-data.line.me/v2/bot/message/{msg_id}/content"
-    req = urllib.request.Request(dl_url, headers={"Authorization": f"Bearer {LINE_CHANNEL_ACCESS_TOKEN}"})
-    try:
-        with urllib.request.urlopen(req, timeout=15) as r:
-            data = r.read()
-            content_type = r.headers.get("Content-Type", "image/jpeg")
-        resp = Response(data, content_type=content_type)
+    data, ct = _get_line_image(msg_id)
+    if data:
+        resp = Response(data, content_type=ct)
         resp.headers["Cache-Control"] = "max-age=86400"
         return resp
-    except urllib.error.HTTPError as e:
-        err_body = ""
-        try: err_body = e.read().decode()
-        except: pass
-        print(f"[LINE IMAGE PROXY] HTTP {e.code} msg_id={msg_id} body={err_body[:200]}", flush=True)
-        return Response(f"LINE API error {e.code}: {err_body[:200]}", status=502, content_type="text/plain")
+    try:
+        dl_url = f"https://api-data.line.me/v2/bot/message/{msg_id}/content"
+        req = urllib.request.Request(dl_url, headers={"Authorization": f"Bearer {LINE_CHANNEL_ACCESS_TOKEN}"})
+        with urllib.request.urlopen(req, timeout=15) as r:
+            data = r.read()
+            ct = r.headers.get("Content-Type", "image/jpeg")
+        threading.Thread(target=_save_line_image, args=(msg_id, data, ct), daemon=True).start()
+        resp = Response(data, content_type=ct)
+        resp.headers["Cache-Control"] = "max-age=86400"
+        return resp
     except Exception as e:
-        print(f"[LINE IMAGE PROXY] ERROR msg_id={msg_id} err={e}", flush=True)
-        return Response(f"proxy error: {e}", status=502, content_type="text/plain")
+        print(f"[LINE IMAGE PROXY ERR] msg_id={msg_id} err={e}", flush=True)
+        return Response(b"", status=404)
 
 @app.route("/api/messages")
 def api_messages():
