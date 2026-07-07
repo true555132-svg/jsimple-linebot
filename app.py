@@ -14,7 +14,7 @@ from flask import Flask, request, abort, render_template_string, redirect, jsoni
 from linebot.v3 import WebhookHandler
 from linebot.v3.exceptions import InvalidSignatureError
 from linebot.v3.messaging import (
-    Configuration, ApiClient, MessagingApi,
+    Configuration, ApiClient, MessagingApi, MessagingApiBlob,
     ReplyMessageRequest, TextMessage, ImageMessage
 )
 from linebot.v3.webhooks import MessageEvent, TextMessageContent, ImageMessageContent, StickerMessageContent
@@ -755,12 +755,10 @@ def handle_line_image(event):
                  "image_url": image_url, "quote_token": qt})
     def _dl():
         try:
-            dl_url = f"https://api-data.line.me/v2/bot/message/{msg_id}/content"
-            req = urllib.request.Request(dl_url, headers={"Authorization": f"Bearer {LINE_CHANNEL_ACCESS_TOKEN}"})
-            with urllib.request.urlopen(req, timeout=15) as r:
-                data = r.read()
-                ct = r.headers.get("Content-Type", "image/jpeg")
-            _save_line_image(msg_id, data, ct)
+            with ApiClient(configuration) as api_client:
+                blob = MessagingApiBlob(api_client)
+                data = blob.get_message_content(msg_id)
+            _save_line_image(msg_id, bytes(data), "image/jpeg")
         except Exception as e:
             print(f"[LINE IMG DL ERR] msg_id={msg_id} err={e}", flush=True)
     threading.Thread(target=_dl, daemon=True).start()
@@ -3586,13 +3584,11 @@ def proxy_line_image(msg_id):
         resp.headers["Cache-Control"] = "max-age=86400"
         return resp
     try:
-        dl_url = f"https://api-data.line.me/v2/bot/message/{msg_id}/content"
-        req = urllib.request.Request(dl_url, headers={"Authorization": f"Bearer {LINE_CHANNEL_ACCESS_TOKEN}"})
-        with urllib.request.urlopen(req, timeout=15) as r:
-            data = r.read()
-            ct = r.headers.get("Content-Type", "image/jpeg")
-        threading.Thread(target=_save_line_image, args=(msg_id, data, ct), daemon=True).start()
-        resp = Response(data, content_type=ct)
+        with ApiClient(configuration) as api_client:
+            blob = MessagingApiBlob(api_client)
+            data = bytes(blob.get_message_content(msg_id))
+        threading.Thread(target=_save_line_image, args=(msg_id, data, "image/jpeg"), daemon=True).start()
+        resp = Response(data, content_type="image/jpeg")
         resp.headers["Cache-Control"] = "max-age=86400"
         return resp
     except Exception as e:
@@ -3607,13 +3603,11 @@ def diag_line(msg_id):
     data, ct = _get_line_image(msg_id)
     result["db"] = bool(data)
     try:
-        dl_url = f"https://api-data.line.me/v2/bot/message/{msg_id}/content"
-        req = urllib.request.Request(dl_url, headers={"Authorization": f"Bearer {LINE_CHANNEL_ACCESS_TOKEN}"})
-        with urllib.request.urlopen(req, timeout=10) as r:
-            body = r.read()
-            result["line_api"] = "ok"
-            result["size"] = len(body)
-            result["content_type"] = r.headers.get("Content-Type","?")
+        with ApiClient(configuration) as api_client:
+            blob = MessagingApiBlob(api_client)
+            body = bytes(blob.get_message_content(msg_id))
+        result["line_api"] = "ok"
+        result["size"] = len(body)
     except Exception as e:
         result["line_api"] = "error"
         result["line_error"] = str(e)
