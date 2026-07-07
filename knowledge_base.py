@@ -345,7 +345,7 @@ FB_IMAGE_URLS = {
 LINE_ENABLED_INTENTS = {
     "greeting": False,
     "price": False,
-    "custom": False,
+    "custom": True,
     "shipping": False,
     "size": False,
     "delivery": False,
