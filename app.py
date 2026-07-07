@@ -3534,6 +3534,7 @@ def admin_inbox():
 @app.route("/api/line-image/<msg_id>")
 def proxy_line_image(msg_id):
     from flask import Response
+    import urllib.error
     dl_url = f"https://api-data.line.me/v2/bot/message/{msg_id}/content"
     req = urllib.request.Request(dl_url, headers={"Authorization": f"Bearer {LINE_CHANNEL_ACCESS_TOKEN}"})
     try:
@@ -3543,9 +3544,15 @@ def proxy_line_image(msg_id):
         resp = Response(data, content_type=content_type)
         resp.headers["Cache-Control"] = "max-age=86400"
         return resp
+    except urllib.error.HTTPError as e:
+        err_body = ""
+        try: err_body = e.read().decode()
+        except: pass
+        print(f"[LINE IMAGE PROXY] HTTP {e.code} msg_id={msg_id} body={err_body[:200]}", flush=True)
+        return Response(f"LINE API error {e.code}: {err_body[:200]}", status=502, content_type="text/plain")
     except Exception as e:
-        print(f"[LINE IMAGE PROXY ERROR] msg_id={msg_id} err={e}", flush=True)
-        return Response(b"", status=404)
+        print(f"[LINE IMAGE PROXY] ERROR msg_id={msg_id} err={e}", flush=True)
+        return Response(f"proxy error: {e}", status=502, content_type="text/plain")
 
 @app.route("/api/messages")
 def api_messages():
