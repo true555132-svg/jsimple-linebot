@@ -7,7 +7,7 @@ seo_admin.py — SEO 內容管理後台 Blueprint
     app.register_blueprint(seo_bp)
     init_seo_db()
 """
-import os, json, time, threading, urllib.request, re
+import os, json, time, threading, urllib.request, urllib.error, re
 from flask import Blueprint, request, jsonify, render_template_string, redirect, abort
 
 DATABASE_URL          = os.getenv("DATABASE_URL", "")
