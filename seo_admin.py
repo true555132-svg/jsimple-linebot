@@ -1262,7 +1262,7 @@ def _run_suggest_links_job(job_id, aid):
 
 # ── Claude AI 呼叫 ──────────────────────────────────────────────
 
-def _ai_call(prompt, model="claude-haiku-4-5-20251001", max_tokens=2000):
+def _ai_call(prompt, model="claude-haiku-4-5", max_tokens=2000):
     if not ANTHROPIC_API_KEY:
         return None, "ANTHROPIC_API_KEY 未設定"
     try:
@@ -1284,6 +1284,13 @@ def _ai_call(prompt, model="claude-haiku-4-5-20251001", max_tokens=2000):
             resp = json.loads(r.read().decode())
         text = resp["content"][0]["text"].strip()
         return text, ""
+    except urllib.error.HTTPError as e:
+        body = e.read().decode("utf-8", errors="replace")
+        try:
+            detail = json.loads(body).get("error", {}).get("message", body)
+        except Exception:
+            detail = body
+        return None, f"HTTP {e.code}: {detail}"
     except Exception as e:
         return None, str(e)
 
@@ -4767,7 +4774,7 @@ def seo_generator_analyze():
     brand      = _get_brand(brand_key)
     brand_rule = _match_brand_rule(brand_key, category, article_type)
     prompt     = _analyze_intent_prompt(brand, category, topic, brand_rule)
-    text, err  = _ai_call(prompt, model="claude-haiku-4-5-20251001", max_tokens=1500)
+    text, err  = _ai_call(prompt, model="claude-haiku-4-5", max_tokens=1500)
     if err:
         return jsonify({"error": f"AI分析失敗：{err}"}), 200
     analysis, suggested_article_type = _extract_suggested_article_type(text)
