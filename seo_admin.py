@@ -1311,12 +1311,26 @@ def _ai_call_json_array(prompt, model="claude-sonnet-4-6", max_tokens=6000):
     if err:
         return None, err
     m = re.search(r'\[[\s\S]*\]', text)
-    if not m:
-        return None, f"AI 回傳格式錯誤：{text[:300]}"
+    raw = m.group() if m else None
+    if not raw:
+        # 嘗試修復截斷：找到 [ 開頭但沒有 ] 結尾
+        start = text.find('[')
+        if start != -1:
+            raw = text[start:]
+        else:
+            return None, f"AI 回傳格式錯誤：{text[:300]}"
     try:
-        return json.loads(m.group()), ""
-    except Exception as e:
-        return None, f"JSON 解析失敗：{e}；原文：{text[:300]}"
+        return json.loads(raw), ""
+    except Exception:
+        # 截斷修復：移除最後一個不完整物件，補上 ]
+        try:
+            last_brace = raw.rfind('},')
+            if last_brace != -1:
+                repaired = raw[:last_brace+1] + ']'
+                return json.loads(repaired), ""
+        except Exception:
+            pass
+        return None, f"JSON 解析失敗（回傳被截斷）；原文：{text[:300]}"
 
 # ── AI Prompt 模板（可在 /admin/seo-settings 頁面編輯，存DB後立即生效，不需重新部署）──
 # 模板用 [[TOKEN]] 代表變數，避免跟JSON輸出格式裡的 { } 符號衝突（不是用 str.format）
@@ -4369,7 +4383,7 @@ def _run_opportunity_job(job_id, brand_key, category):
         knowledge_items = _get_knowledge_for_prompt(brand_key, category, limit=15)
         brand_rule = _match_brand_rule(brand_key, category)
         prompt = _opportunity_prompt(brand, category, knowledge_items, brand_rule)
-        items, err = _ai_call_json_array(prompt, model="claude-sonnet-4-6", max_tokens=6000)
+        items, err = _ai_call_json_array(prompt, model="claude-sonnet-4-6", max_tokens=16000)
         if err:
             _q("UPDATE seo_opportunity_jobs SET status='error', error_msg=%s, updated_at=%s WHERE id=%s",
                (f"AI產生主題失敗：{err}", time.time(), job_id))
@@ -4546,7 +4560,7 @@ def _run_knowledge_import_job(job_id, raw_text):
     try:
         _q("UPDATE seo_knowledge_import_jobs SET status='running', updated_at=%s WHERE id=%s", (time.time(), job_id))
         prompt = _knowledge_import_prompt(raw_text)
-        items, err = _ai_call_json_array(prompt, model="claude-sonnet-4-6", max_tokens=6000)
+        items, err = _ai_call_json_array(prompt, model="claude-sonnet-4-6", max_tokens=16000)
         if err:
             _q("UPDATE seo_knowledge_import_jobs SET status='error', error_msg=%s, updated_at=%s WHERE id=%s",
                (f"AI分析失敗：{err}", time.time(), job_id))
