@@ -7,7 +7,8 @@ seo_admin.py — SEO 內容管理後台 Blueprint
     app.register_blueprint(seo_bp)
     init_seo_db()
 """
-import os, json, time, threading, urllib.request, urllib.error, re
+import os, json, time, threading, urllib.request, urllib.error, re, requests
+from datetime import datetime, timezone, timedelta
 from flask import Blueprint, request, jsonify, render_template_string, redirect, abort
 
 DATABASE_URL          = os.getenv("DATABASE_URL", "")
@@ -16,6 +17,12 @@ ANTHROPIC_API_KEY     = os.getenv("ANTHROPIC_API_KEY", "")
 GA4_CREDENTIALS_JSON  = os.getenv("GA4_CREDENTIALS_JSON", "")
 GA4_CREDENTIALS_FILE  = os.getenv("GA4_CREDENTIALS_FILE", r"C:\Users\user\jsimple-ga-credentials.json")
 GA4_PROPERTY_ID       = os.getenv("GA4_PROPERTY_ID", "395475976")
+
+# EasyStore Open API 3.0 — 部落格文章發布（實測可用，官方 scope 文件未明列 articles，以實測為準）
+EASYSTORE_ACCESS_TOKEN = os.getenv("EASYSTORE_ACCESS_TOKEN", "")
+EASYSTORE_DOMAIN       = os.getenv("EASYSTORE_DOMAIN", "www.jsimple.tw")
+EASYSTORE_BLOG_IDS     = {"jsimple": os.getenv("EASYSTORE_BLOG_ID_JSIMPLE", "164646")}
+TAIPEI_TZ = timezone(timedelta(hours=8))
 
 seo_bp = Blueprint("seo", __name__)
 _db_lock = threading.Lock()
@@ -99,6 +106,7 @@ def init_seo_db():
             for col_sql in [
                 "ALTER TABLE seo_articles ADD COLUMN IF NOT EXISTS brand_key TEXT DEFAULT ''",
                 "ALTER TABLE seo_articles ADD COLUMN IF NOT EXISTS category TEXT DEFAULT ''",
+                "ALTER TABLE seo_articles ADD COLUMN IF NOT EXISTS easystore_article_id TEXT DEFAULT ''",
                 "ALTER TABLE seo_tracking ADD COLUMN IF NOT EXISTS line_inquiries INTEGER DEFAULT 0",
                 "ALTER TABLE seo_tracking ADD COLUMN IF NOT EXISTS orders INTEGER DEFAULT 0",
                 "ALTER TABLE seo_tracking ADD COLUMN IF NOT EXISTS revenue NUMERIC DEFAULT 0",
@@ -884,6 +892,61 @@ def _update_article_extra(article_id, patch):
     extra = _parse_extra(row[0] if row else None)
     extra.update(patch)
     _q("UPDATE seo_articles SET extra=%s, updated_at=%s WHERE id=%s", (_dump_extra(extra), time.time(), article_id))
+
+# ── EasyStore Open API 3.0：部落格文章發布 ──────────────────────
+# 端點是 /api/3.0/articles.json（不是 /admin/v2/... 後台內部 API），已由使用者實測驗證可用。
+
+def _easystore_publish_article(aid, scheduled_iso=None):
+    if not EASYSTORE_ACCESS_TOKEN:
+        return {"error": "未設定 EASYSTORE_ACCESS_TOKEN 環境變數"}
+    row = _q("""SELECT title, slug, meta_description, content, brand_key, easystore_article_id
+                FROM seo_articles WHERE id=%s""", (aid,), fetch="one")
+    if not row:
+        return {"error": "找不到文章"}
+    title, slug, meta_desc, content, brand_key, es_id = row
+    blog_id = EASYSTORE_BLOG_IDS.get(brand_key or "jsimple")
+    if not blog_id:
+        return {"error": f"品牌「{brand_key}」尚未設定 EasyStore blog_id"}
+    if not (content or "").strip():
+        return {"error": "文章內容是空的，請先儲存內容再發布"}
+
+    published_at = scheduled_iso or datetime.now(TAIPEI_TZ).strftime("%Y-%m-%dT%H:%M:%S+08:00")
+    payload = {"article": {
+        "blog_id": int(blog_id),
+        "title": title,
+        "body_html": content,
+        "description": meta_desc or "",
+        "author": "JSIMPLE",
+        "published": True,
+        "published_at": published_at,
+    }}
+    if slug:
+        payload["article"]["handle"] = slug.strip().strip("/").split("/")[-1]
+
+    headers = {"EasyStore-Access-Token": EASYSTORE_ACCESS_TOKEN, "Content-Type": "application/json"}
+    try:
+        if es_id:
+            url = f"https://{EASYSTORE_DOMAIN}/api/3.0/articles/{es_id}.json"
+            resp = requests.put(url, json=payload, headers=headers, timeout=20)
+        else:
+            url = f"https://{EASYSTORE_DOMAIN}/api/3.0/articles.json"
+            resp = requests.post(url, json=payload, headers=headers, timeout=20)
+        resp.raise_for_status()
+        data = resp.json()
+        art = data.get("article", {})
+        new_es_id = str(art.get("id") or es_id or "")
+        now = time.time()
+        _q("UPDATE seo_articles SET easystore_article_id=%s, status='published', published_at=%s, updated_at=%s WHERE id=%s",
+           (new_es_id, now, now, aid))
+        return {"ok": True, "easystore_id": new_es_id, "published_at": art.get("published_at", published_at),
+                "scheduled": bool(scheduled_iso)}
+    except requests.exceptions.HTTPError as e:
+        body = ""
+        try: body = e.response.text[:300]
+        except Exception: pass
+        return {"error": f"EasyStore API 錯誤（HTTP {e.response.status_code}）：{body}"}
+    except Exception as e:
+        return {"error": f"發布失敗：{e}"}
     return extra
 
 # ── 品牌 SEO 規則 ───────────────────────────────────────────────
@@ -2103,6 +2166,21 @@ textarea{resize:vertical;line-height:1.7}
 
 {% if a %}
 <div class="section">
+  <label style="font-size:13px;color:#555;font-weight:800">🚀 發布到 EasyStore</label>
+  {% if a[9] %}
+  <div style="font-size:12px;color:#2e7d32;margin-bottom:8px">已發布過（EasyStore 文章 ID：{{ a[9] }}）。再次按下會覆蓋更新該篇文章。</div>
+  {% endif %}
+  <label>排程時間（留空＝立即發布，時間為台北時區）</label>
+  <input type="datetime-local" id="es-scheduled-at">
+  <div style="margin-top:10px;display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+    <button class="btn btn-outline" id="btn-publish-es" onclick="publishToEasyStore({{ a[0] }})" type="button">🚀 發布到 EasyStore</button>
+    <span class="loading" id="es-loading" style="display:none;margin:0">處理中...</span>
+  </div>
+  <div class="err" id="es-err"></div>
+  <div id="es-result" style="display:none;margin-top:8px;font-size:13px;color:#2e7d32"></div>
+</div>
+
+<div class="section">
   <label>AI 品質檢查</label>
   <button class="btn btn-outline" id="btn-qc" onclick="doQualityCheck({{ a[0] }})" type="button">🔍 AI 品質檢查</button>
   <div class="loading" id="qc-loading" style="display:none">AI檢查中，請稍候...</div>
@@ -2161,6 +2239,34 @@ async function safeJson(res){
   const text = await res.text();
   try { return JSON.parse(text); }
   catch(e) { throw new Error('伺服器回應異常（可能是逾時或部署中），請稍後再試。HTTP ' + res.status); }
+}
+async function publishToEasyStore(articleId){
+  const btn = document.getElementById('btn-publish-es');
+  const scheduledAt = document.getElementById('es-scheduled-at').value;
+  btn.disabled = true;
+  document.getElementById('es-loading').style.display = 'inline';
+  document.getElementById('es-err').textContent = '';
+  document.getElementById('es-result').style.display = 'none';
+  try {
+    const res = await fetch('/admin/seo/article/' + articleId + '/publish-easystore?key=' + encodeURIComponent(KEY), {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({scheduled_at: scheduledAt})
+    });
+    const data = await safeJson(res);
+    if (data.error) {
+      document.getElementById('es-err').textContent = data.error;
+    } else {
+      const label = data.scheduled ? ('已排程發布，時間：' + data.published_at) : ('已立即發布，時間：' + data.published_at);
+      document.getElementById('es-result').textContent = '✅ ' + label + '（EasyStore 文章 ID：' + data.easystore_id + '）';
+      document.getElementById('es-result').style.display = 'block';
+    }
+  } catch(e) {
+    document.getElementById('es-err').textContent = String(e.message || e);
+  } finally {
+    btn.disabled = false;
+    document.getElementById('es-loading').style.display = 'none';
+  }
 }
 let _qcNextStatus = '';
 async function doQualityCheck(articleId){
@@ -4050,7 +4156,7 @@ def seo_article_edit(aid):
     ok, key = check_auth()
     if not ok:
         return render_template_string(LOGIN_HTML, error=None)
-    a = _q("""SELECT id,title,slug,meta_title,meta_description,content,ai_summary,status,extra
+    a = _q("""SELECT id,title,slug,meta_title,meta_description,content,ai_summary,status,extra,easystore_article_id
               FROM seo_articles WHERE id=%s""", (aid,), fetch="one")
     if not a:
         abort(404)
@@ -4110,6 +4216,20 @@ def seo_article_delete(aid):
     _q("DELETE FROM seo_tracking WHERE article_id=%s", (aid,))
     _q("DELETE FROM seo_articles WHERE id=%s", (aid,))
     return redirect(f"/admin/seo?key={key}")
+
+@seo_bp.route("/admin/seo/article/<int:aid>/publish-easystore", methods=["POST"])
+def seo_article_publish_easystore(aid):
+    ok, _ = auth_required()
+    if not ok:
+        return jsonify({"error": "unauthorized"}), 403
+    body = request.get_json(silent=True) or {}
+    scheduled_at = (body.get("scheduled_at") or "").strip()
+    scheduled_iso = None
+    if scheduled_at:
+        # <input type=datetime-local> 給的是不含時區的字串，一律當作台北時間
+        scheduled_iso = scheduled_at + ":00+08:00" if scheduled_at.count(":") == 1 else scheduled_at + "+08:00"
+    result = _easystore_publish_article(aid, scheduled_iso)
+    return jsonify(result)
 
 @seo_bp.route("/admin/seo/article/<int:aid>/suggest-links", methods=["POST"])
 def seo_suggest_links(aid):
@@ -4383,7 +4503,7 @@ def _run_opportunity_job(job_id, brand_key, category):
         knowledge_items = _get_knowledge_for_prompt(brand_key, category, limit=15)
         brand_rule = _match_brand_rule(brand_key, category)
         prompt = _opportunity_prompt(brand, category, knowledge_items, brand_rule)
-        items, err = _ai_call_json_array(prompt, model="claude-sonnet-4-6", max_tokens=16000)
+        items, err = _ai_call_json_array(prompt, model="claude-sonnet-4-6", max_tokens=32000)
         if err:
             _q("UPDATE seo_opportunity_jobs SET status='error', error_msg=%s, updated_at=%s WHERE id=%s",
                (f"AI產生主題失敗：{err}", time.time(), job_id))
