@@ -443,7 +443,7 @@ def _load_logs_from_db():
             SELECT time,platform,user_id,msg,intent,reply,replied,
                    image_url,sticker_url,sent_by,
                    COALESCE(quote_token,''),COALESCE(reply_quote_token,'')
-            FROM messages ORDER BY id DESC
+            FROM messages ORDER BY id DESC LIMIT 2000
         """)
         rows = cur.fetchall()
         cur.close()
