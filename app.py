@@ -1632,6 +1632,15 @@ const TPL_DATA = {
   '成交':['感謝您的訂購，我馬上幫您安排出貨，請確認收件地址是否正確。','訂單已確認，預計X月X日出貨，有任何問題請隨時告訴我。']
 };
 
+function fmtMsgTime(ts){
+  if(!ts) return '';
+  const d = new Date(ts*1000);
+  const now = new Date();
+  const isToday = d.getFullYear()===now.getFullYear() && d.getMonth()===now.getMonth() && d.getDate()===now.getDate();
+  const t = d.toLocaleTimeString('zh-TW',{hour:'2-digit',minute:'2-digit'});
+  return isToday ? t : `${t} ${d.getMonth()+1}/${d.getDate()}`;
+}
+
 function fmtConvTime(ts){
   if(!ts) return '';
   const d = new Date(ts*1000);
@@ -1864,7 +1873,7 @@ function renderMsgs(msgs){
   if(!msgs.length){area.innerHTML='<div class="sys-msg">沒有訊息記錄</div>';return}
   area.innerHTML = msgs.map(m=>{
     const isMe = m.role==='admin';
-    const time = m.ts ? new Date(m.ts*1000).toLocaleTimeString('zh-TW',{hour:'2-digit',minute:'2-digit'}) : '';
+    const time = fmtMsgTime(m.ts);
     let content = '';
     const fileMatch = (m.content||'').match(/^\[檔案\] (.+)$/);
     if(fileMatch && m.role==='admin'){
@@ -2190,6 +2199,12 @@ function renderTplCats(){
     `<div class="tcat${c===curTplCat?' active':''}" onclick="selectTplCat('${escAttr(c)}',this)">${escHtml(c)}</div>`
   ).join('');
 }
+
+document.getElementById('tplCats').addEventListener('wheel', e=>{
+  if(e.deltaY===0) return;
+  e.preventDefault();
+  e.currentTarget.scrollLeft += e.deltaY;
+}, {passive:false});
 
 function selectTplCat(cat, el){
   curTplCat = cat;
