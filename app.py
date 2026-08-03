@@ -1006,17 +1006,42 @@ def line_push_image(user_id: str, image_url: str) -> str:
     return ""
 
 def line_push_file(user_id: str, file_url: str, filename: str, file_size: int = 0) -> str:
+    # LINE Messaging API has no generic "file" message type, so a real file
+    # bubble can't be pushed to a 1:1 chat — use a Flex card with an open link instead.
     url = "https://api.line.me/v2/bot/message/push"
-    payload = json.dumps({"to": user_id, "messages": [{
-        "type": "file", "originalContentUrl": file_url,
-        "fileName": filename, "fileSize": file_size
-    }]}).encode()
+    ext = filename.rsplit(".", 1)[-1].upper() if "." in filename else "FILE"
+    flex = {
+        "type": "flex",
+        "altText": f"📎 {filename}",
+        "contents": {
+            "type": "bubble",
+            "size": "kilo",
+            "body": {
+                "type": "box", "layout": "horizontal", "spacing": "md", "paddingAll": "16px",
+                "contents": [
+                    {"type": "text", "text": "📄", "size": "xxl", "flex": 0},
+                    {"type": "box", "layout": "vertical", "flex": 1, "justifyContent": "center", "contents": [
+                        {"type": "text", "text": filename, "size": "sm", "weight": "bold", "wrap": True, "maxLines": 2},
+                        {"type": "text", "text": ext, "size": "xs", "color": "#999999", "margin": "sm"}
+                    ]}
+                ]
+            },
+            "footer": {
+                "type": "box", "layout": "vertical", "contents": [
+                    {"type": "button", "style": "primary", "color": "#0d6efd", "height": "sm",
+                     "action": {"type": "uri", "label": "開啟檔案", "uri": file_url}}
+                ]
+            }
+        }
+    }
+    payload = json.dumps({"to": user_id, "messages": [flex]}).encode()
     req = urllib.request.Request(url, data=payload, headers={
         "Content-Type": "application/json", "Authorization": f"Bearer {LINE_CHANNEL_ACCESS_TOKEN}"})
     try:
         with urllib.request.urlopen(req) as r:
             return _parse_sent_qt(r.read())
-    except Exception:
+    except Exception as e:
+        import sys; print(f"[LINE File Push Error] {e}", file=sys.stderr)
         line_push(user_id, f"📎 {filename}\n{file_url}")
     return ""
 
