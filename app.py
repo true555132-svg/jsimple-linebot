@@ -1305,7 +1305,7 @@ INBOX_HTML = """<!DOCTYPE html>
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
 body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#f0f2f5;color:#1a1a1a;height:100vh;overflow:hidden}
-.crm-wrap{display:grid;grid-template-columns:320px 1fr 280px;height:100vh}
+.crm-wrap{display:grid;grid-template-columns:370px 1fr 280px;height:100vh}
 .mobile-back{display:none}
 @media(max-width:820px){
   body{overflow:hidden}
@@ -1354,13 +1354,13 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
 .conv-item{padding:10px 12px;cursor:pointer;border-bottom:1px solid #f0f2f5;transition:background .15s;display:flex;gap:8px;align-items:flex-start}
 .conv-item:hover{background:#f8f9fa}
 .conv-item.active{background:#e8f4fd}
-.conv-avatar{width:38px;height:38px;border-radius:50%;object-fit:cover;flex-shrink:0;background:#e8eaed}
-.conv-avatar-placeholder{width:38px;height:38px;border-radius:50%;background:#e0e4e8;display:flex;align-items:center;justify-content:center;font-size:16px;flex-shrink:0}
+.conv-avatar{width:44px;height:44px;border-radius:50%;object-fit:cover;flex-shrink:0;background:#e8eaed}
+.conv-avatar-placeholder{width:44px;height:44px;border-radius:50%;background:#e0e4e8;display:flex;align-items:center;justify-content:center;font-size:18px;flex-shrink:0}
 .conv-info{flex:1;min-width:0}
 .conv-name-row{display:flex;align-items:center;gap:4px;margin-bottom:2px}
-.conv-name{font-size:13px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;flex:1}
-.conv-time{font-size:10px;color:#9aa0a6;white-space:nowrap}
-.conv-preview{font-size:11px;color:#9aa0a6;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-bottom:4px}
+.conv-name{font-size:15px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;flex:1}
+.conv-time{font-size:13px;color:#9aa0a6;white-space:nowrap;font-weight:600}
+.conv-preview{font-size:13px;color:#9aa0a6;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-bottom:4px}
 .conv-meta{display:flex;gap:3px;flex-wrap:wrap;align-items:center}
 .status-dot{width:7px;height:7px;border-radius:50%;flex-shrink:0}
 .s-bot{background:#6c757d}.s-human{background:#0d6efd}.s-waiting{background:#fd7e14}
@@ -1688,7 +1688,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
 <script>
 const KEY = new URLSearchParams(location.search).get('key') || '';
 document.getElementById('homeBtn').href = '/admin?key=' + KEY;
-const ALL_TAGS = ['有興趣','已報價','猶豫中','要比較','問尺寸','問材質','問交期','問安裝','詢問保固','重要客戶','需要跟進','已下訂','垃圾訊息','辦公家具','設計傢俱'];
+const ALL_TAGS = ['有興趣','已下訂','辦公家具','重要客戶','其他'];
 const STATUS_COLORS = {bot:'#6c757d',human:'#0d6efd',waiting:'#fd7e14',followup:'#6f42c1',closed:'#dc3545',sold:'#198754'};
 const TPL_DATA = {
   '打招呼':['你好，我是JSIMPLE高架床專員，請問有什麼可以幫您？','感謝您的詢問，請問您的需求是？'],
@@ -1714,9 +1714,12 @@ function fmtConvTime(ts){
   if(!ts) return '';
   const d = new Date(ts*1000);
   const now = new Date();
-  const isToday = d.getFullYear()===now.getFullYear() && d.getMonth()===now.getMonth() && d.getDate()===now.getDate();
-  if(isToday) return d.toLocaleTimeString('zh-TW',{hour:'2-digit',minute:'2-digit'});
-  return d.getFullYear()+'/'+(d.getMonth()+1)+'/'+d.getDate();
+  const dayStart = (x)=> new Date(x.getFullYear(), x.getMonth(), x.getDate()).getTime();
+  const diffDays = Math.round((dayStart(now) - dayStart(d)) / 86400000);
+  if(diffDays === 0) return d.toLocaleTimeString('zh-TW',{hour:'2-digit',minute:'2-digit'});
+  if(diffDays === 1) return '昨天';
+  if(d.getFullYear() !== now.getFullYear()) return d.getFullYear()+'/'+(d.getMonth()+1)+'/'+d.getDate();
+  return (d.getMonth()+1)+'/'+d.getDate();
 }
 
 let allConvs = [], curKey = null, curStatus = 'bot', filterStatus = 'all', filterTag = null, searchQ = '', filterRead = 'all';
