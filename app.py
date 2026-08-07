@@ -1292,7 +1292,7 @@ def api_logs():
                 "已回覆" if l.get("replied") else "冷卻中"
             ])
         from flask import Response
-        return Response(out.getvalue(), mimetype="text/csv; charset=utf-8",
+        return Response("﻿" + out.getvalue(), mimetype="text/csv; charset=utf-8",
                         headers={"Content-Disposition": "attachment; filename=logs.csv"})
     return jsonify(logs)
 
