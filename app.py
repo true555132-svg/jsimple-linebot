@@ -387,6 +387,7 @@ threading.Thread(target=_seed_templates, daemon=True).start()
 def _db_insert_message(entry):
     if not DATABASE_URL:
         return
+    conn = None
     try:
         with _db_lock:
             conn = _pg_conn()
@@ -412,9 +413,14 @@ def _db_insert_message(entry):
             ))
             conn.commit()
             cur.close()
-            conn.close()
     except Exception as e:
         import sys; print(f"[DB Insert Error] {e}", file=sys.stderr)
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
 
 def _db_update_reply_qt(platform: str, user_id: str, time_str: str, reply_qt: str):
     if not DATABASE_URL or not reply_qt:
@@ -462,6 +468,43 @@ def _load_logs_from_db():
         import sys; print(f"[DB Load Error] {e}", file=sys.stderr)
         return deque()
 
+def _db_get_conversation(pf, uid, limit=5000):
+    """Fetch one conversation's full history straight from Postgres,
+    independent of the size-capped in-memory message_log cache."""
+    if not DATABASE_URL or not pf or not uid:
+        return []
+    conn = None
+    try:
+        conn = _pg_conn()
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT time,platform,user_id,msg,intent,reply,replied,
+                   image_url,sticker_url,sent_by,
+                   COALESCE(quote_token,''),COALESCE(reply_quote_token,'')
+            FROM messages WHERE platform=%s AND user_id=%s
+            ORDER BY id DESC LIMIT %s
+        """, (pf, uid, limit))
+        rows = cur.fetchall()
+        cur.close()
+        rows.reverse()
+        return [{
+            "time": r[0], "platform": r[1], "user_id": r[2],
+            "msg": r[3], "intent": r[4], "reply": r[5],
+            "replied": bool(r[6]), "image_url": r[7] or "",
+            "sticker_url": r[8] or "", "sent_by": r[9] or "",
+            "quote_token": r[10] or "", "reply_quote_token": r[11] or "",
+        } for r in rows]
+    except Exception as e:
+        import sys; print(f"[DB Conv Load Error] {e}", file=sys.stderr)
+        return []
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+
 def _migrate_json_to_db():
     if not DATABASE_URL:
         return
@@ -502,7 +545,8 @@ def _load_logs():
             pass
     return d
 
-message_log = _load_logs()
+MSG_CACHE_MAXLEN = 2000
+message_log = deque(_load_logs(), maxlen=MSG_CACHE_MAXLEN)
 
 def _save_logs():
     try:
@@ -3665,10 +3709,20 @@ def api_messages():
     parts = key.split(":", 1)
     pf = parts[0] if len(parts) > 1 else ""
     uid = parts[1] if len(parts) > 1 else key
+
+    entries = _db_get_conversation(pf, uid, 5000)
+    if entries:
+        seen = {(e.get("time",""), e.get("msg",""), e.get("sent_by","")) for e in entries}
+        recent = [l for l in reversed(list(message_log))
+                  if l.get("platform","") == pf and l.get("user_id","") == uid
+                  and (l.get("time",""), l.get("msg",""), l.get("sent_by","")) not in seen]
+        entries = entries + recent
+    else:
+        entries = [l for l in reversed(list(message_log))
+                   if l.get("platform","") == pf and l.get("user_id","") == uid]
+
     msgs = []
-    for l in reversed(list(message_log)):
-        if l.get("platform", "") != pf or l.get("user_id", "") != uid:
-            continue
+    for l in entries:
         ts = 0
         try:
             ts = int(time.mktime(time.strptime(l.get("time", ""), "%Y/%m/%d %H:%M:%S")) - 8*3600)
