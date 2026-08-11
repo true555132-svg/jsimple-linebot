@@ -795,9 +795,10 @@ def handle_line_message(event):
         messages.append(ImageMessage(original_content_url=image_url, preview_image_url=image_url))
     try:
         with ApiClient(configuration) as api_client:
-            resp, _status, _hdrs = MessagingApi(api_client).reply_message_with_http_info(
+            _api_resp = MessagingApi(api_client).reply_message_with_http_info(
                 ReplyMessageRequest(reply_token=event.reply_token, messages=messages)
             )
+            resp = _api_resp.data if hasattr(_api_resp, "data") else _api_resp
         try:
             sent = getattr(resp, "sent_messages", None) or []
             reply_qt = getattr(sent[0], "quote_token", "") if sent else ""
