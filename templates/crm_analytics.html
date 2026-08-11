@@ -1,0 +1,292 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>對話分析 — JSIMPLE CRM</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.2/dist/chart.umd.min.js"></script>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#f0f2f5;color:#1a1a1a;min-height:100vh}
+
+/* ── Top nav ── */
+.topnav{display:flex;align-items:center;justify-content:space-between;background:#fff;padding:0 24px;height:54px;border-bottom:1px solid #e8eaed;position:sticky;top:0;z-index:10;box-shadow:0 1px 3px rgba(0,0,0,.06)}
+.topnav-left{display:flex;align-items:center;gap:14px}
+.back-btn{font-size:13px;color:#0d6efd;text-decoration:none;padding:5px 10px;border-radius:6px;transition:.15s}
+.back-btn:hover{background:#e8f4fd}
+.page-title{font-size:15px;font-weight:700;color:#1a1a1a}
+.day-tabs{display:flex;gap:4px;background:#f0f2f5;padding:4px;border-radius:8px}
+.daybtn{padding:5px 14px;border-radius:6px;font-size:12px;font-weight:600;border:none;cursor:pointer;color:#666;background:transparent;transition:.15s}
+.daybtn.active{background:#fff;color:#0d6efd;box-shadow:0 1px 3px rgba(0,0,0,.12)}
+.daybtn:hover:not(.active){color:#333}
+
+/* ── Page content ── */
+.page{max-width:1280px;margin:0 auto;padding:20px 16px 40px}
+
+/* ── KPI Cards ── */
+.cards-row{display:grid;grid-template-columns:repeat(5,1fr);gap:12px;margin-bottom:16px}
+.card{background:#fff;border-radius:12px;padding:18px 20px;box-shadow:0 1px 4px rgba(0,0,0,.07)}
+.card-label{font-size:11px;font-weight:600;color:#888;text-transform:uppercase;letter-spacing:.5px;margin-bottom:8px}
+.card-value{font-size:28px;font-weight:800;color:#1a1a1a;line-height:1;margin-bottom:5px}
+.card-sub{font-size:11px;color:#aaa}
+.card-warn .card-value{color:#e65100}
+.card-warn{border-top:3px solid #f28e2b}
+.card-success{border-top:3px solid #59a14f}
+.card-success .card-value{color:#2e7d32}
+.card-loading .card-value{color:#ccc}
+
+/* ── Charts Row ── */
+.charts-row{display:grid;grid-template-columns:3fr 2fr;gap:12px}
+.chart-box,.funnel-box{background:#fff;border-radius:12px;padding:20px;box-shadow:0 1px 4px rgba(0,0,0,.07)}
+.chart-title{font-size:13px;font-weight:700;color:#333;margin-bottom:16px}
+
+/* ── Funnel ── */
+.funnel-rows{display:flex;flex-direction:column;gap:10px;margin-top:4px}
+.funnel-row{display:flex;flex-direction:column;gap:5px}
+.funnel-meta{display:flex;align-items:center;justify-content:space-between;font-size:12px}
+.funnel-label{color:#444;font-weight:600}
+.funnel-stats{display:flex;align-items:center;gap:8px}
+.funnel-count{font-weight:700;color:#1a1a1a;font-size:13px}
+.fpct{font-size:11px;padding:1px 6px;border-radius:10px;background:#f0f2f5;color:#555;font-weight:600}
+.funnel-bar-wrap{width:100%;height:10px;background:#f0f2f5;border-radius:5px;overflow:hidden}
+.funnel-bar{height:100%;border-radius:5px;transition:width .5s ease}
+
+/* ── Spinner ── */
+.loading-overlay{display:flex;align-items:center;justify-content:center;height:200px;color:#aaa;font-size:13px}
+
+/* ── Responsive ── */
+@media(max-width:900px){
+  .cards-row{grid-template-columns:repeat(3,1fr)}
+  .charts-row{grid-template-columns:1fr}
+}
+@media(max-width:580px){
+  .cards-row{grid-template-columns:repeat(2,1fr)}
+  .topnav{padding:0 12px}
+  .page{padding:12px 10px 30px}
+}
+</style>
+</head>
+<body>
+
+<!-- Top nav -->
+<header class="topnav">
+  <div class="topnav-left">
+    <a class="back-btn" href="/admin/inbox?key={{ key }}">← 收件匣</a>
+    <span class="page-title">對話分析</span>
+  </div>
+  <div class="day-tabs">
+    <button class="daybtn" data-days="7">7 天</button>
+    <button class="daybtn active" data-days="30">30 天</button>
+    <button class="daybtn" data-days="90">90 天</button>
+  </div>
+</header>
+
+<div class="page">
+
+  <!-- KPI Cards -->
+  <div class="cards-row">
+    <div class="card">
+      <div class="card-label">今日新對話</div>
+      <div class="card-value card-loading" id="v-today">—</div>
+      <div class="card-sub">今天進線人次</div>
+    </div>
+    <div class="card">
+      <div class="card-label">Bot 回覆率</div>
+      <div class="card-value card-loading" id="v-botrate">—</div>
+      <div class="card-sub">期間內自動回覆比例</div>
+    </div>
+    <div class="card">
+      <div class="card-label">曾人工接手</div>
+      <div class="card-value card-loading" id="v-human">—</div>
+      <div class="card-sub">有 admin 回覆的人次</div>
+    </div>
+    <div class="card card-warn">
+      <div class="card-label">未回覆對話</div>
+      <div class="card-value card-loading" id="v-unreplied">—</div>
+      <div class="card-sub">期間內從未被回覆</div>
+    </div>
+    <div class="card card-success">
+      <div class="card-label">高意願 / 成交</div>
+      <div class="card-value card-loading" id="v-convert">—</div>
+      <div class="card-sub">追蹤中 / 已成交</div>
+    </div>
+  </div>
+
+  <!-- Charts -->
+  <div class="charts-row">
+    <!-- Line Chart -->
+    <div class="chart-box">
+      <div class="chart-title">每日訊息量 &amp; 唯一用戶</div>
+      <canvas id="lineChart"></canvas>
+    </div>
+
+    <!-- Funnel -->
+    <div class="funnel-box">
+      <div class="chart-title">對話轉換漏斗（累計全期）</div>
+      <div class="funnel-rows" id="funnelChart">
+        <div class="loading-overlay">載入中…</div>
+      </div>
+    </div>
+  </div>
+
+</div>
+
+<script>
+const KEY = "{{ key }}";
+let chartInst = null;
+let curDays = 30;
+
+// ── Fetch & render ────────────────────────────────────────
+async function loadData(days) {
+  curDays = days;
+  try {
+    const r = await fetch(`/api/crm-analytics/data?days=${days}&key=${KEY}`);
+    const d = await r.json();
+    if (d.error) { console.error(d.error); return; }
+    renderCards(d.cards);
+    renderLineChart(d.daily);
+    renderFunnel(d.funnel);
+  } catch(e) {
+    console.error("Analytics load error:", e);
+  }
+}
+
+// ── Cards ─────────────────────────────────────────────────
+function renderCards(c) {
+  function set(id, val) {
+    const el = document.getElementById(id);
+    el.textContent = val;
+    el.classList.remove("card-loading");
+  }
+  set("v-today",    c.today_convs);
+  set("v-botrate",  c.bot_rate + "%");
+  set("v-human",    c.human_count);
+  set("v-unreplied",c.unreplied);
+  set("v-convert",  c.high_intent + " / " + c.sold);
+}
+
+// ── Line Chart ────────────────────────────────────────────
+function renderLineChart(daily) {
+  // 日期 label：只顯示 MM/DD
+  const labels = daily.map(r => {
+    const parts = r.day.split("/");
+    return parts[1] + "/" + parts[2];
+  });
+  const msgs   = daily.map(r => r.cust_msgs);
+  const users  = daily.map(r => r.unique_users);
+  const inq    = daily.map(r => r.inquiry);
+
+  if (chartInst) { chartInst.destroy(); }
+  const ctx = document.getElementById("lineChart").getContext("2d");
+  chartInst = new Chart(ctx, {
+    data: {
+      labels,
+      datasets: [
+        {
+          type: "bar",
+          label: "訊息量",
+          data: msgs,
+          backgroundColor: "rgba(78,121,231,0.18)",
+          borderColor: "#4e79e7",
+          borderWidth: 1.5,
+          yAxisID: "y",
+          order: 3,
+        },
+        {
+          type: "line",
+          label: "唯一用戶",
+          data: users,
+          borderColor: "#59a14f",
+          backgroundColor: "transparent",
+          borderWidth: 2,
+          pointRadius: curDays <= 7 ? 4 : 2,
+          tension: 0.35,
+          yAxisID: "y",
+          order: 1,
+        },
+        {
+          type: "line",
+          label: "詢價",
+          data: inq,
+          borderColor: "#f28e2b",
+          backgroundColor: "transparent",
+          borderWidth: 1.5,
+          borderDash: [5, 3],
+          pointRadius: curDays <= 7 ? 4 : 2,
+          tension: 0.35,
+          yAxisID: "y",
+          order: 2,
+        },
+      ],
+    },
+    options: {
+      responsive: true,
+      interaction: { mode: "index", intersect: false },
+      plugins: {
+        legend: {
+          position: "top",
+          labels: { boxWidth: 12, font: { size: 11 }, padding: 12 },
+        },
+        tooltip: {
+          callbacks: {
+            title: (items) => items[0]?.label + " 日",
+          }
+        }
+      },
+      scales: {
+        y: {
+          beginAtZero: true,
+          ticks: { font: { size: 11 }, stepSize: 1 },
+          grid: { color: "rgba(0,0,0,.05)" },
+        },
+        x: {
+          ticks: {
+            maxRotation: 45,
+            font: { size: 10 },
+            maxTicksLimit: curDays <= 7 ? 7 : 15,
+          },
+          grid: { display: false },
+        },
+      },
+    },
+  });
+}
+
+// ── Funnel ────────────────────────────────────────────────
+function renderFunnel(funnel) {
+  const top = Math.max(funnel[0]?.count || 1, 1);
+  const html = funnel.map((f, i) => {
+    const pct     = Math.round(f.count / top * 100);
+    const prevN   = i > 0 ? funnel[i - 1].count : null;
+    const convPct = prevN ? Math.round(f.count / Math.max(prevN, 1) * 100) : null;
+    return `
+      <div class="funnel-row">
+        <div class="funnel-meta">
+          <span class="funnel-label">${f.label}</span>
+          <div class="funnel-stats">
+            ${convPct !== null ? `<span class="fpct">${convPct}%</span>` : ''}
+            <span class="funnel-count">${f.count.toLocaleString()}</span>
+          </div>
+        </div>
+        <div class="funnel-bar-wrap">
+          <div class="funnel-bar" style="width:${pct}%;background:${f.color}"></div>
+        </div>
+      </div>`;
+  }).join("");
+  document.getElementById("funnelChart").innerHTML = html;
+}
+
+// ── Day selector ──────────────────────────────────────────
+document.querySelectorAll(".daybtn").forEach(btn => {
+  btn.addEventListener("click", () => {
+    document.querySelectorAll(".daybtn").forEach(b => b.classList.remove("active"));
+    btn.classList.add("active");
+    loadData(parseInt(btn.dataset.days));
+  });
+});
+
+// ── Init ──────────────────────────────────────────────────
+loadData(30);
+</script>
+</body>
+</html>

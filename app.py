@@ -4234,6 +4234,10 @@ app.register_blueprint(ai_images_bp)
 from ai_image_chat_api import ai_image_chat_bp
 app.register_blueprint(ai_image_chat_bp)
 
+# ═══ CRM 對話分析 Blueprint ════════════════════════════════════════════
+from crm_analytics import crm_analytics_bp
+app.register_blueprint(crm_analytics_bp)
+
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port)
