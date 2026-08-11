@@ -532,6 +532,36 @@ def _db_get_conversation_keys():
                 pass
 
 
+def _db_get_all_conv_summaries():
+    """Single query: last message per conversation. Avoids N+1 DB calls."""
+    if not DATABASE_URL:
+        return []
+    conn = None
+    try:
+        conn = _pg_conn()
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT DISTINCT ON (platform, user_id)
+                platform, user_id, msg, time
+            FROM messages
+            WHERE platform != 'FB_COMMENT'
+              AND user_id != 'ADMIN'
+              AND user_id != ''
+              AND user_id IS NOT NULL
+            ORDER BY platform, user_id, id DESC
+        """)
+        rows = cur.fetchall()
+        cur.close()
+        return [{"platform": r[0], "user_id": r[1], "last_msg": r[2] or "", "last_time": r[3] or ""} for r in rows]
+    except Exception as e:
+        import sys; print(f"[DB Conv Summaries Error] {e}", file=sys.stderr)
+        return []
+    finally:
+        if conn is not None:
+            try: conn.close()
+            except: pass
+
+
 def _migrate_json_to_db():
     if not DATABASE_URL:
         return
@@ -3781,82 +3811,59 @@ def api_conversations():
     ok, _ = auth_required()
     if not ok:
         return jsonify({"error": "unauthorized"}), 403
-    logs = list(message_log)
-    convs = {}
-    for l in reversed(logs):
+
+    # Pre-build unread counts from in-memory log (O(n) single pass)
+    unread_counts = {}
+    for l in message_log:
+        pf  = l.get("platform", "")
         uid = l.get("user_id", "")
-        pf = l.get("platform", "")
-        if not uid or not pf or pf == "FB_COMMENT" or uid == "ADMIN":
+        if not pf or not uid or pf == "FB_COMMENT" or uid == "ADMIN":
+            continue
+        if l.get("sent_by", "") == "admin":
             continue
         key = f"{pf}:{uid}"
-        if key not in convs:
-            profile = user_profiles.get(key, {"name": "", "avatar": ""})
-            if not profile.get("name"):
-                threading.Thread(target=get_user_profile, args=(pf, uid), daemon=True).start()
-            convs[key] = {"key": key, "platform": pf, "user_id": uid, "messages": [],
-                          "last_time": l.get("time",""), "last_msg": l.get("msg",""),
-                          "last_message": l.get("msg",""),
-                          "manual": key in manual_takeover,
-                          "status": _pg_get_status(key),
-                          "name": profile.get("name",""),
-                          "user_name": profile.get("name","") or uid,
-                          "avatar": profile.get("avatar",""),
-                          "user_avatar": profile.get("avatar",""),
-                          "note": _pg_get_note(key),
-                          "tags": _pg_get_tags(key),
-                          "unread": 0}
-        convs[key]["messages"].append(l)
-        convs[key]["last_time"] = l.get("time","")
-        convs[key]["last_msg"] = l.get("msg","")
-        convs[key]["last_message"] = l.get("msg","")
         seen_ts = _pg_get_last_seen(key)
         try:
             msg_ts = time.mktime(time.strptime(l.get("time",""), "%Y/%m/%d %H:%M:%S")) - 8*3600
-            if msg_ts > seen_ts and l.get("user_id","") != "ADMIN" and l.get("sent_by","") != "admin":
-                convs[key]["unread"] += 1
+            if msg_ts > seen_ts:
+                unread_counts[key] = unread_counts.get(key, 0) + 1
         except Exception:
             pass
 
-    for pf, uid in _db_get_conversation_keys():
+    # Single DB query for all conversation summaries (no N+1)
+    summaries = _db_get_all_conv_summaries()
+
+    result = []
+    for s in summaries:
+        pf  = s["platform"]
+        uid = s["user_id"]
         key = f"{pf}:{uid}"
-        if key in convs:
-            continue
-        entries = _db_get_conversation(pf, uid, limit=200)
-        if not entries:
-            continue
-        last = entries[-1]
         profile = user_profiles.get(key, {"name": "", "avatar": ""})
         if not profile.get("name"):
             threading.Thread(target=get_user_profile, args=(pf, uid), daemon=True).start()
-        seen_ts = _pg_get_last_seen(key)
-        unread = 0
-        for e in entries:
-            try:
-                msg_ts = time.mktime(time.strptime(e.get("time",""), "%Y/%m/%d %H:%M:%S")) - 8*3600
-                if msg_ts > seen_ts and e.get("user_id","") != "ADMIN" and e.get("sent_by","") != "admin":
-                    unread += 1
-            except Exception:
-                pass
-        convs[key] = {"key": key, "platform": pf, "user_id": uid, "messages": entries,
-                      "last_time": last.get("time",""), "last_msg": last.get("msg",""),
-                      "last_message": last.get("msg",""),
-                      "manual": key in manual_takeover,
-                      "status": _pg_get_status(key),
-                      "name": profile.get("name",""),
-                      "user_name": profile.get("name","") or uid,
-                      "avatar": profile.get("avatar",""),
-                      "user_avatar": profile.get("avatar",""),
-                      "note": _pg_get_note(key),
-                      "tags": _pg_get_tags(key),
-                      "unread": unread}
-
-    for v in convs.values():
         try:
-            ts = time.mktime(time.strptime(v.get("last_time",""), "%Y/%m/%d %H:%M:%S")) - 8*3600
-            v["last_time"] = int(ts)
+            last_ts = int(time.mktime(time.strptime(s["last_time"], "%Y/%m/%d %H:%M:%S")) - 8*3600)
         except Exception:
-            v["last_time"] = 0
-    result = sorted(convs.values(), key=lambda x: x["last_time"], reverse=True)
+            last_ts = 0
+        result.append({
+            "key":          key,
+            "platform":     pf,
+            "user_id":      uid,
+            "last_time":    last_ts,
+            "last_msg":     s["last_msg"],
+            "last_message": s["last_msg"],
+            "manual":       key in manual_takeover,
+            "status":       _pg_get_status(key),
+            "name":         profile.get("name",""),
+            "user_name":    profile.get("name","") or uid,
+            "avatar":       profile.get("avatar",""),
+            "user_avatar":  profile.get("avatar",""),
+            "note":         _pg_get_note(key),
+            "tags":         _pg_get_tags(key),
+            "unread":       unread_counts.get(key, 0),
+        })
+
+    result.sort(key=lambda x: x["last_time"], reverse=True)
     return jsonify(result)
 
 @app.route("/api/note", methods=["POST"])
