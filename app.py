@@ -583,20 +583,26 @@ def _save_logs():
         pass
 
 _sheets_lock = threading.Lock()
+_gc_client = None  # 共用 gspread client，避免每次建立新 session
+
+def _get_gc():
+    global _gc_client
+    if _gc_client is None:
+        import gspread
+        from google.oauth2.service_account import Credentials
+        creds = Credentials.from_service_account_info(
+            json.loads(GOOGLE_SERVICE_ACCOUNT_JSON),
+            scopes=["https://www.googleapis.com/auth/spreadsheets"]
+        )
+        _gc_client = gspread.Client(auth=creds)
+    return _gc_client
 
 def _append_to_sheets(entry):
     if not GOOGLE_SHEET_ID or not GOOGLE_SERVICE_ACCOUNT_JSON:
         return
     with _sheets_lock:
         try:
-            import gspread
-            from google.oauth2.service_account import Credentials
-            creds = Credentials.from_service_account_info(
-                json.loads(GOOGLE_SERVICE_ACCOUNT_JSON),
-                scopes=["https://www.googleapis.com/auth/spreadsheets"]
-            )
-            gc = gspread.Client(auth=creds)
-            ws = gc.open_by_key(GOOGLE_SHEET_ID).sheet1
+            ws = _get_gc().open_by_key(GOOGLE_SHEET_ID).sheet1
             ws.append_row([
                 entry["time"],
                 entry["platform"],
@@ -608,6 +614,8 @@ def _append_to_sheets(entry):
             ])
         except Exception as e:
             import sys
+            global _gc_client
+            _gc_client = None  # 重置 client，下次重建
             print(f"[Sheets Error] {e}", file=sys.stderr)
 
 def log_message(entry):
@@ -620,14 +628,7 @@ def _load_history_from_sheets():
     if not GOOGLE_SHEET_ID or not GOOGLE_SERVICE_ACCOUNT_JSON:
         return
     try:
-        import gspread
-        from google.oauth2.service_account import Credentials
-        creds = Credentials.from_service_account_info(
-            json.loads(GOOGLE_SERVICE_ACCOUNT_JSON),
-            scopes=["https://www.googleapis.com/auth/spreadsheets"]
-        )
-        gc = gspread.Client(auth=creds)
-        ws = gc.open_by_key(GOOGLE_SHEET_ID).sheet1
+        ws = _get_gc().open_by_key(GOOGLE_SHEET_ID).sheet1
         rows = ws.get_all_values()
         loaded = 0
         for row in rows[-800:]:
