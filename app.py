@@ -504,6 +504,33 @@ def _db_get_conversation(pf, uid, limit=5000):
             except Exception:
                 pass
 
+def _db_get_conversation_keys():
+    """List every (platform, user_id) that has ever messaged, straight from
+    Postgres, so a conversation can never vanish from the sidebar just
+    because its messages aged out of the size-capped in-memory cache."""
+    if not DATABASE_URL:
+        return []
+    conn = None
+    try:
+        conn = _pg_conn()
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT DISTINCT platform, user_id FROM messages
+            WHERE user_id <> 'ADMIN' AND platform <> 'FB_COMMENT'
+        """)
+        rows = cur.fetchall()
+        cur.close()
+        return [(r[0], r[1]) for r in rows]
+    except Exception as e:
+        import sys; print(f"[DB Conv Keys Error] {e}", file=sys.stderr)
+        return []
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
 
 def _migrate_json_to_db():
     if not DATABASE_URL:
@@ -3787,6 +3814,40 @@ def api_conversations():
                 convs[key]["unread"] += 1
         except Exception:
             pass
+
+    for pf, uid in _db_get_conversation_keys():
+        key = f"{pf}:{uid}"
+        if key in convs:
+            continue
+        entries = _db_get_conversation(pf, uid, limit=200)
+        if not entries:
+            continue
+        last = entries[-1]
+        profile = user_profiles.get(key, {"name": "", "avatar": ""})
+        if not profile.get("name"):
+            threading.Thread(target=get_user_profile, args=(pf, uid), daemon=True).start()
+        seen_ts = _pg_get_last_seen(key)
+        unread = 0
+        for e in entries:
+            try:
+                msg_ts = time.mktime(time.strptime(e.get("time",""), "%Y/%m/%d %H:%M:%S")) - 8*3600
+                if msg_ts > seen_ts and e.get("user_id","") != "ADMIN" and e.get("sent_by","") != "admin":
+                    unread += 1
+            except Exception:
+                pass
+        convs[key] = {"key": key, "platform": pf, "user_id": uid, "messages": entries,
+                      "last_time": last.get("time",""), "last_msg": last.get("msg",""),
+                      "last_message": last.get("msg",""),
+                      "manual": key in manual_takeover,
+                      "status": _pg_get_status(key),
+                      "name": profile.get("name",""),
+                      "user_name": profile.get("name","") or uid,
+                      "avatar": profile.get("avatar",""),
+                      "user_avatar": profile.get("avatar",""),
+                      "note": _pg_get_note(key),
+                      "tags": _pg_get_tags(key),
+                      "unread": unread}
+
     for v in convs.values():
         try:
             ts = time.mktime(time.strptime(v.get("last_time",""), "%Y/%m/%d %H:%M:%S")) - 8*3600
