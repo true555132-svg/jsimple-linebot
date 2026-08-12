@@ -532,6 +532,36 @@ def _db_get_conversation_keys():
                 pass
 
 
+def _db_get_all_conv_summaries():
+    """Single query: last message per conversation. Avoids N+1 DB calls."""
+    if not DATABASE_URL:
+        return []
+    conn = None
+    try:
+        conn = _pg_conn()
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT DISTINCT ON (platform, user_id)
+                platform, user_id, msg, time
+            FROM messages
+            WHERE platform != 'FB_COMMENT'
+              AND user_id != 'ADMIN'
+              AND user_id != ''
+              AND user_id IS NOT NULL
+            ORDER BY platform, user_id, id DESC
+        """)
+        rows = cur.fetchall()
+        cur.close()
+        return [{"platform": r[0], "user_id": r[1], "last_msg": r[2] or "", "last_time": r[3] or ""} for r in rows]
+    except Exception as e:
+        import sys; print(f"[DB Conv Summaries Error] {e}", file=sys.stderr)
+        return []
+    finally:
+        if conn is not None:
+            try: conn.close()
+            except: pass
+
+
 def _migrate_json_to_db():
     if not DATABASE_URL:
         return
@@ -583,20 +613,26 @@ def _save_logs():
         pass
 
 _sheets_lock = threading.Lock()
+_gc_client = None  # 共用 gspread client，避免每次建立新 session
+
+def _get_gc():
+    global _gc_client
+    if _gc_client is None:
+        import gspread
+        from google.oauth2.service_account import Credentials
+        creds = Credentials.from_service_account_info(
+            json.loads(GOOGLE_SERVICE_ACCOUNT_JSON),
+            scopes=["https://www.googleapis.com/auth/spreadsheets"]
+        )
+        _gc_client = gspread.Client(auth=creds)
+    return _gc_client
 
 def _append_to_sheets(entry):
     if not GOOGLE_SHEET_ID or not GOOGLE_SERVICE_ACCOUNT_JSON:
         return
     with _sheets_lock:
         try:
-            import gspread
-            from google.oauth2.service_account import Credentials
-            creds = Credentials.from_service_account_info(
-                json.loads(GOOGLE_SERVICE_ACCOUNT_JSON),
-                scopes=["https://www.googleapis.com/auth/spreadsheets"]
-            )
-            gc = gspread.Client(auth=creds)
-            ws = gc.open_by_key(GOOGLE_SHEET_ID).sheet1
+            ws = _get_gc().open_by_key(GOOGLE_SHEET_ID).sheet1
             ws.append_row([
                 entry["time"],
                 entry["platform"],
@@ -608,6 +644,8 @@ def _append_to_sheets(entry):
             ])
         except Exception as e:
             import sys
+            global _gc_client
+            _gc_client = None  # 重置 client，下次重建
             print(f"[Sheets Error] {e}", file=sys.stderr)
 
 def log_message(entry):
@@ -620,14 +658,7 @@ def _load_history_from_sheets():
     if not GOOGLE_SHEET_ID or not GOOGLE_SERVICE_ACCOUNT_JSON:
         return
     try:
-        import gspread
-        from google.oauth2.service_account import Credentials
-        creds = Credentials.from_service_account_info(
-            json.loads(GOOGLE_SERVICE_ACCOUNT_JSON),
-            scopes=["https://www.googleapis.com/auth/spreadsheets"]
-        )
-        gc = gspread.Client(auth=creds)
-        ws = gc.open_by_key(GOOGLE_SHEET_ID).sheet1
+        ws = _get_gc().open_by_key(GOOGLE_SHEET_ID).sheet1
         rows = ws.get_all_values()
         loaded = 0
         for row in rows[-800:]:
@@ -795,9 +826,10 @@ def handle_line_message(event):
         messages.append(ImageMessage(original_content_url=image_url, preview_image_url=image_url))
     try:
         with ApiClient(configuration) as api_client:
-            resp, _status, _hdrs = MessagingApi(api_client).reply_message_with_http_info(
+            _api_resp = MessagingApi(api_client).reply_message_with_http_info(
                 ReplyMessageRequest(reply_token=event.reply_token, messages=messages)
             )
+            resp = _api_resp.data if hasattr(_api_resp, "data") else _api_resp
         try:
             sent = getattr(resp, "sent_messages", None) or []
             reply_qt = getattr(sent[0], "quote_token", "") if sent else ""
@@ -3779,82 +3811,59 @@ def api_conversations():
     ok, _ = auth_required()
     if not ok:
         return jsonify({"error": "unauthorized"}), 403
-    logs = list(message_log)
-    convs = {}
-    for l in reversed(logs):
+
+    # Pre-build unread counts from in-memory log (O(n) single pass)
+    unread_counts = {}
+    for l in message_log:
+        pf  = l.get("platform", "")
         uid = l.get("user_id", "")
-        pf = l.get("platform", "")
-        if not uid or not pf or pf == "FB_COMMENT" or uid == "ADMIN":
+        if not pf or not uid or pf == "FB_COMMENT" or uid == "ADMIN":
+            continue
+        if l.get("sent_by", "") == "admin":
             continue
         key = f"{pf}:{uid}"
-        if key not in convs:
-            profile = user_profiles.get(key, {"name": "", "avatar": ""})
-            if not profile.get("name"):
-                threading.Thread(target=get_user_profile, args=(pf, uid), daemon=True).start()
-            convs[key] = {"key": key, "platform": pf, "user_id": uid, "messages": [],
-                          "last_time": l.get("time",""), "last_msg": l.get("msg",""),
-                          "last_message": l.get("msg",""),
-                          "manual": key in manual_takeover,
-                          "status": _pg_get_status(key),
-                          "name": profile.get("name",""),
-                          "user_name": profile.get("name","") or uid,
-                          "avatar": profile.get("avatar",""),
-                          "user_avatar": profile.get("avatar",""),
-                          "note": _pg_get_note(key),
-                          "tags": _pg_get_tags(key),
-                          "unread": 0}
-        convs[key]["messages"].append(l)
-        convs[key]["last_time"] = l.get("time","")
-        convs[key]["last_msg"] = l.get("msg","")
-        convs[key]["last_message"] = l.get("msg","")
         seen_ts = _pg_get_last_seen(key)
         try:
             msg_ts = time.mktime(time.strptime(l.get("time",""), "%Y/%m/%d %H:%M:%S")) - 8*3600
-            if msg_ts > seen_ts and l.get("user_id","") != "ADMIN" and l.get("sent_by","") != "admin":
-                convs[key]["unread"] += 1
+            if msg_ts > seen_ts:
+                unread_counts[key] = unread_counts.get(key, 0) + 1
         except Exception:
             pass
 
-    for pf, uid in _db_get_conversation_keys():
+    # Single DB query for all conversation summaries (no N+1)
+    summaries = _db_get_all_conv_summaries()
+
+    result = []
+    for s in summaries:
+        pf  = s["platform"]
+        uid = s["user_id"]
         key = f"{pf}:{uid}"
-        if key in convs:
-            continue
-        entries = _db_get_conversation(pf, uid, limit=200)
-        if not entries:
-            continue
-        last = entries[-1]
         profile = user_profiles.get(key, {"name": "", "avatar": ""})
         if not profile.get("name"):
             threading.Thread(target=get_user_profile, args=(pf, uid), daemon=True).start()
-        seen_ts = _pg_get_last_seen(key)
-        unread = 0
-        for e in entries:
-            try:
-                msg_ts = time.mktime(time.strptime(e.get("time",""), "%Y/%m/%d %H:%M:%S")) - 8*3600
-                if msg_ts > seen_ts and e.get("user_id","") != "ADMIN" and e.get("sent_by","") != "admin":
-                    unread += 1
-            except Exception:
-                pass
-        convs[key] = {"key": key, "platform": pf, "user_id": uid, "messages": entries,
-                      "last_time": last.get("time",""), "last_msg": last.get("msg",""),
-                      "last_message": last.get("msg",""),
-                      "manual": key in manual_takeover,
-                      "status": _pg_get_status(key),
-                      "name": profile.get("name",""),
-                      "user_name": profile.get("name","") or uid,
-                      "avatar": profile.get("avatar",""),
-                      "user_avatar": profile.get("avatar",""),
-                      "note": _pg_get_note(key),
-                      "tags": _pg_get_tags(key),
-                      "unread": unread}
-
-    for v in convs.values():
         try:
-            ts = time.mktime(time.strptime(v.get("last_time",""), "%Y/%m/%d %H:%M:%S")) - 8*3600
-            v["last_time"] = int(ts)
+            last_ts = int(time.mktime(time.strptime(s["last_time"], "%Y/%m/%d %H:%M:%S")) - 8*3600)
         except Exception:
-            v["last_time"] = 0
-    result = sorted(convs.values(), key=lambda x: x["last_time"], reverse=True)
+            last_ts = 0
+        result.append({
+            "key":          key,
+            "platform":     pf,
+            "user_id":      uid,
+            "last_time":    last_ts,
+            "last_msg":     s["last_msg"],
+            "last_message": s["last_msg"],
+            "manual":       key in manual_takeover,
+            "status":       _pg_get_status(key),
+            "name":         profile.get("name",""),
+            "user_name":    profile.get("name","") or uid,
+            "avatar":       profile.get("avatar",""),
+            "user_avatar":  profile.get("avatar",""),
+            "note":         _pg_get_note(key),
+            "tags":         _pg_get_tags(key),
+            "unread":       unread_counts.get(key, 0),
+        })
+
+    result.sort(key=lambda x: x["last_time"], reverse=True)
     return jsonify(result)
 
 @app.route("/api/note", methods=["POST"])
