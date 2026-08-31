@@ -482,7 +482,7 @@ def _db_get_conversation(pf, uid, limit=5000):
                    image_url,sticker_url,sent_by,
                    COALESCE(quote_token,''),COALESCE(reply_quote_token,'')
             FROM messages WHERE platform=%s AND user_id=%s
-            ORDER BY id DESC LIMIT %s
+            ORDER BY time DESC, id DESC LIMIT %s
         """, (pf, uid, limit))
         rows = cur.fetchall()
         cur.close()
