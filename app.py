@@ -1467,6 +1467,10 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
 .msg-row.them .msg-bubble{background:#fff;border-bottom-left-radius:4px;box-shadow:0 1px 2px rgba(0,0,0,.1);color:#1a1a1a}
 .msg-row.me .msg-bubble{background:#95EC69;color:#1a1a1a;border-bottom-right-radius:4px}
 
+/* Bot 標示 */
+.auto-tag{font-size:10px;color:#2e7d32;background:#e8f5e9;border-radius:6px;padding:1px 5px;margin-right:4px;font-weight:700}
+.replied-tag{font-size:10px;color:#aaa;margin-left:3px}
+
 /* hover 回覆選單 */
 .msg-actions{display:none;position:absolute;top:-32px;background:#fff;border:1px solid #e0e0e0;border-radius:18px;padding:2px 5px;box-shadow:0 2px 10px rgba(0,0,0,.15);z-index:10;align-items:center;white-space:nowrap}
 .msg-row.them .msg-actions{left:4px}
@@ -2040,9 +2044,11 @@ function renderMsgs(msgs){
     const replyBtn = hasQt
       ? `<button class="msg-act-btn" onclick="${quoteCall}">↩ 回覆</button>`
       : `<button class="msg-act-btn no-qt" disabled title="舊訊息無法原生引用">↩ 舊訊息</button>`;
+    const autoTag = (isMe && m.is_auto) ? '<span class="auto-tag">Bot</span>' : '';
+    const repliedTag = (!isMe && m.bot_replied) ? '<span class="replied-tag">✓已回</span>' : '';
     return `<div class="msg-row ${isMe?'me':'them'}">
       <div class="msg-bubble"${hasQt?` ondblclick="${quoteCall}" title="雙擊引用"`:''}>${content}</div>
-      <span class="msg-time">${time}</span>
+      <span class="msg-time">${autoTag}${time}${repliedTag}</span>
       <div class="msg-actions">
         ${replyBtn}
       </div>
@@ -3800,10 +3806,12 @@ def api_messages():
             if l.get("msg"):
                 msgs.append({"role": "user", "content": l["msg"], "ts": ts,
                              "image_url": l.get("image_url", ""), "sticker_url": l.get("sticker_url", ""),
-                             "quote_token": l.get("quote_token", "")})
+                             "quote_token": l.get("quote_token", ""),
+                             "bot_replied": bool(l.get("replied"))})
             if l.get("reply") and l.get("replied"):
                 msgs.append({"role": "admin", "content": l["reply"], "ts": ts + 1,
-                             "quote_token": l.get("reply_quote_token", "")})
+                             "quote_token": l.get("reply_quote_token", ""),
+                             "is_auto": True})
     return jsonify({"messages": msgs})
 
 @app.route("/api/conversations")
