@@ -548,7 +548,7 @@ def _db_get_all_conv_summaries():
               AND user_id != 'ADMIN'
               AND user_id != ''
               AND user_id IS NOT NULL
-            ORDER BY platform, user_id, id DESC
+            ORDER BY platform, user_id, time DESC, id DESC
         """)
         rows = cur.fetchall()
         cur.close()
