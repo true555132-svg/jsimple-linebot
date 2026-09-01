@@ -1497,6 +1497,9 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
 .msg-time{font-size:10px;color:#888;white-space:nowrap;padding-bottom:3px;flex-shrink:0;line-height:1.2}
 .msg-avatar{width:28px;height:28px;border-radius:50%;object-fit:cover;background:#e8eaed;flex-shrink:0}
 .sys-msg{text-align:center;font-size:11px;color:#888;padding:6px 0;background:rgba(0,0,0,.04);border-radius:12px;margin:6px 20px}
+.date-sep-wrap{display:flex;align-items:center;justify-content:center;margin:14px 0 6px;gap:8px}
+.date-sep-wrap::before,.date-sep-wrap::after{content:'';flex:1;height:1px;background:#e0e0e0}
+.date-sep-label{font-size:11px;color:#999;white-space:nowrap;padding:2px 8px;background:#f0f2f5;border-radius:10px}
 
 .tpl-panel{background:#fff;border-top:1px solid #e8eaed;display:none;flex-direction:column;max-height:280px}
 .tpl-panel.open{display:flex}
@@ -1767,11 +1770,19 @@ const TPL_DATA = {
 function fmtMsgTime(ts){
   if(!ts) return '';
   const d = new Date(ts*1000);
-  const now = new Date();
-  const isToday = d.getFullYear()===now.getFullYear() && d.getMonth()===now.getMonth() && d.getDate()===now.getDate();
-  const t = d.toLocaleTimeString('zh-TW',{hour:'2-digit',minute:'2-digit'});
-  return isToday ? t : `${t} ${d.getMonth()+1}/${d.getDate()}`;
+  return d.toLocaleTimeString('zh-TW',{hour:'2-digit',minute:'2-digit'});
 }
+function fmtDateSep(ts){
+  if(!ts) return '';
+  const d = new Date(ts*1000);
+  const now = new Date();
+  const toDay = (x)=> new Date(x.getFullYear(),x.getMonth(),x.getDate()).getTime();
+  const diff = Math.round((toDay(now)-toDay(d))/86400000);
+  if(diff===0) return '今天';
+  if(diff===1) return '昨天';
+  return `${d.getFullYear()}年${d.getMonth()+1}月${d.getDate()}日`;
+}
+function dateKey(ts){ const d=new Date(ts*1000); return `${d.getFullYear()}-${d.getMonth()}-${d.getDate()}`; }
 
 function fmtConvTime(ts){
   if(!ts) return '';
@@ -2006,13 +2017,22 @@ async function loadMsgs(key){
 function renderMsgs(msgs){
   const area = document.getElementById('msgArea');
   if(!msgs.length){area.innerHTML='<div class="sys-msg">沒有訊息記錄</div>';return}
-  area.innerHTML = msgs.map(m=>{
+  let html = '';
+  let lastDK = '';
+  const conv = allConvs.find(c=>c.key===curKey);
+  msgs.forEach(m=>{
+    if(m.ts > 0){
+      const dk = dateKey(m.ts);
+      if(dk !== lastDK){
+        html += `<div class="date-sep-wrap"><span class="date-sep-label">${fmtDateSep(m.ts)}</span></div>`;
+        lastDK = dk;
+      }
+    }
     const isMe = m.role==='admin';
     const time = fmtMsgTime(m.ts);
     let content = '';
     const fileMatch = (m.content||'').match(/^\[檔案\] (.+)$/);
     if(fileMatch && m.role==='admin'){
-      // admin sent file - show link from log
       content = `<span>📎 ${escHtml(fileMatch[1])}</span>`;
     } else if(m.image_url){
       const imgUrl = m.image_url;
@@ -2034,7 +2054,6 @@ function renderMsgs(msgs){
     else content = linkify(m.content||'');
     const rawContent = m.image_url ? '[圖片]' : (m.sticker_url ? '[貼圖]' : (m.content||''));
     const safePreview = rawContent.replace(/'/g,"\\'").replace(/\\n/g,' ').slice(0,80);
-    const conv = allConvs.find(c=>c.key===curKey);
     const senderName = isMe ? '我' : (conv?.user_name || conv?.user_id || '客戶');
     const safeSender = senderName.replace(/'/g,"\\'").slice(0,30);
     const safeToken = (m.quote_token||'').replace(/'/g,"\\'");
@@ -2046,14 +2065,15 @@ function renderMsgs(msgs){
       : `<button class="msg-act-btn no-qt" disabled title="舊訊息無法原生引用">↩ 舊訊息</button>`;
     const autoTag = (isMe && m.is_auto) ? '<span class="auto-tag">Bot</span>' : '';
     const repliedTag = (!isMe && m.bot_replied) ? '<span class="replied-tag">✓已回</span>' : '';
-    return `<div class="msg-row ${isMe?'me':'them'}">
+    html += `<div class="msg-row ${isMe?'me':'them'}">
       <div class="msg-bubble"${hasQt?` ondblclick="${quoteCall}" title="雙擊引用"`:''}>${content}</div>
       <span class="msg-time">${autoTag}${time}${repliedTag}</span>
       <div class="msg-actions">
         ${replyBtn}
       </div>
     </div>`;
-  }).join('');
+  });
+  area.innerHTML = html;
   area.scrollTop = area.scrollHeight;
 }
 
