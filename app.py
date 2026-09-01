@@ -3800,16 +3800,18 @@ def api_messages():
 
     entries = _db_get_conversation(pf, uid, 5000)
     if entries:
-        seen = {(e.get("time",""), e.get("msg",""), e.get("sent_by","")) for e in entries}
+        # Dedup key: (time, msg) only — Sheets entries lack sent_by so we can't include it
+        seen = {(e.get("time",""), e.get("msg","")) for e in entries}
         recent = [l for l in reversed(list(message_log))
                   if l.get("platform","") == pf and l.get("user_id","") == uid
-                  and (l.get("time",""), l.get("msg",""), l.get("sent_by","")) not in seen]
+                  and (l.get("time",""), l.get("msg","")) not in seen]
         entries = entries + recent
     else:
         entries = [l for l in reversed(list(message_log))
                    if l.get("platform","") == pf and l.get("user_id","") == uid]
 
     msgs = []
+    seen_content = set()  # prevent exact duplicates slipping through
     for l in entries:
         ts = 0
         try:
@@ -3820,19 +3822,29 @@ def api_messages():
             content = l.get("reply", "")
             img = l.get("image_url", "")
             if content or img:
-                msgs.append({"role": "admin", "content": content, "ts": ts, "image_url": img,
-                             "quote_token": l.get("quote_token", "")})
+                ck = (ts, "admin", content, img)
+                if ck not in seen_content:
+                    seen_content.add(ck)
+                    msgs.append({"role": "admin", "content": content, "ts": ts, "image_url": img,
+                                 "quote_token": l.get("quote_token", "")})
         else:
             if l.get("msg"):
-                msgs.append({"role": "user", "content": l["msg"], "ts": ts,
-                             "image_url": l.get("image_url", ""), "sticker_url": l.get("sticker_url", ""),
-                             "quote_token": l.get("quote_token", ""),
-                             "bot_replied": bool(l.get("replied"))})
+                ck = (ts, "user", l["msg"])
+                if ck not in seen_content:
+                    seen_content.add(ck)
+                    msgs.append({"role": "user", "content": l["msg"], "ts": ts,
+                                 "image_url": l.get("image_url", ""), "sticker_url": l.get("sticker_url", ""),
+                                 "quote_token": l.get("quote_token", ""),
+                                 "bot_replied": bool(l.get("replied"))})
             if l.get("reply") and l.get("replied"):
-                msgs.append({"role": "admin", "content": l["reply"], "ts": ts + 1,
-                             "quote_token": l.get("reply_quote_token", ""),
-                             "is_auto": True})
-    msgs.sort(key=lambda m: m["ts"])
+                ck = (ts + 1, "auto", l["reply"])
+                if ck not in seen_content:
+                    seen_content.add(ck)
+                    msgs.append({"role": "admin", "content": l["reply"], "ts": ts + 1,
+                                 "quote_token": l.get("reply_quote_token", ""),
+                                 "is_auto": True})
+    # sort ascending: oldest at top (ts=0 = broken timestamp → push to bottom)
+    msgs.sort(key=lambda m: m["ts"] if m["ts"] > 0 else 9_999_999_999)
     return jsonify({"messages": msgs})
 
 @app.route("/api/conversations")
