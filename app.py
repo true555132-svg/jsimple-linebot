@@ -3812,6 +3812,7 @@ def api_messages():
                 msgs.append({"role": "admin", "content": l["reply"], "ts": ts + 1,
                              "quote_token": l.get("reply_quote_token", ""),
                              "is_auto": True})
+    msgs.sort(key=lambda m: m["ts"])
     return jsonify({"messages": msgs})
 
 @app.route("/api/conversations")
