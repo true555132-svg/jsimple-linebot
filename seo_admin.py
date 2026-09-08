@@ -433,13 +433,22 @@ def _resolve_allowed_products(brand, category):
         return ap, "品牌預設 allowed_products"
     return "", "無商品資料"
 
-def _list_articles_with_ga4():
-    """文章列表 + 最新一筆 GA4 來源的 seo_tracking 資料（LATERAL JOIN，不額外打 GA4 API）"""
+def _list_articles_with_ga4(brand_key="", category=""):
+    """文章列表 + 最新一筆 GA4 來源的 seo_tracking 資料（LATERAL JOIN，不額外打 GA4 API）
+    可選擇依品牌/品類篩選"""
     if not DATABASE_URL:
         return []
     try:
-        rows = _q("""
+        where = []
+        params = []
+        if brand_key:
+            where.append("a.brand_key=%s"); params.append(brand_key)
+        if category:
+            where.append("a.category=%s"); params.append(category)
+        where_sql = (" WHERE " + " AND ".join(where)) if where else ""
+        rows = _q(f"""
             SELECT a.id, a.title, a.status, a.slug, a.updated_at, a.extra,
+                   a.brand_key, a.category,
                    t.page_views, t.active_users, t.sessions, t.engagement_rate,
                    t.bounce_rate, t.avg_duration, t.record_date, t.notes
             FROM seo_articles a
@@ -451,28 +460,31 @@ def _list_articles_with_ga4():
                 ORDER BY created_at DESC
                 LIMIT 1
             ) t ON TRUE
+            {where_sql}
             ORDER BY a.id DESC
-        """, fetch="all") or []
+        """, tuple(params), fetch="all") or []
         articles = []
         for r in rows:
             extra = _parse_extra(r[5])
-            notes = r[13] or ""
+            notes = r[15] or ""
             ga4_match = "slug" if "slug:" in notes else ("title" if "title" in notes else "")
-            has_ga4 = r[6] is not None
+            has_ga4 = r[8] is not None
             articles.append({
                 "id": r[0], "title": r[1], "status": r[2], "slug": r[3] or "",
                 "updated_at": time.strftime("%Y-%m-%d %H:%M", time.localtime(r[4])) if r[4] else "",
+                "brand_key": r[6] or "",
+                "category": r[7] or "",
                 "main_keyword": extra.get("main_keyword", ""),
                 "ai_score": extra.get("ai_score", 0),
                 "related_products": extra.get("related_products", ""),
                 "next_action": extra.get("next_action", ""),
-                "page_views":      r[6] or 0 if has_ga4 else None,
-                "active_users":    r[7] or 0 if has_ga4 else None,
-                "sessions":        r[8] or 0 if has_ga4 else None,
-                "engagement_rate": r[9] or 0 if has_ga4 else None,
-                "bounce_rate":     r[10] or 0 if has_ga4 else None,
-                "avg_duration":    r[11] or 0 if has_ga4 else None,
-                "ga4_date":        r[12] or "" if has_ga4 else "",
+                "page_views":      r[8] or 0 if has_ga4 else None,
+                "active_users":    r[9] or 0 if has_ga4 else None,
+                "sessions":        r[10] or 0 if has_ga4 else None,
+                "engagement_rate": r[11] or 0 if has_ga4 else None,
+                "bounce_rate":     r[12] or 0 if has_ga4 else None,
+                "avg_duration":    r[13] or 0 if has_ga4 else None,
+                "ga4_date":        r[14] or "" if has_ga4 else "",
                 "ga4_match":       ga4_match,
             })
         return articles
@@ -5563,7 +5575,10 @@ th{color:#888;font-weight:600;font-size:11px;text-transform:uppercase}
     <div class="stat-card"><div class="label">本月成交金額</div><div class="value">${{ stats.cur.revenue }}</div>
       {% if stats.pct.revenue is not none %}<div class="delta {{ 'delta-up' if stats.pct.revenue>=0 else 'delta-down' }}">{{ '↑' if stats.pct.revenue>=0 else '↓' }} {{ stats.pct.revenue|abs }}% 較上月</div>{% endif %}
     </div>
+    <div class="stat-card"><div class="label">GA4 總瀏覽數</div><div class="value">{{ "{:,}".format(ga4_summary.total_page_views) }}</div><div style="font-size:11px;color:#888">{{ ga4_summary.synced_count }}/{{ ga4_summary.total_count }} 篇已同步</div></div>
+    <div class="stat-card"><div class="label">GA4 活躍用戶</div><div class="value">{{ "{:,}".format(ga4_summary.total_active_users) }}</div><div style="font-size:11px;color:#888">平均互動率 {{ "%.1f%%"|format(ga4_summary.avg_engagement*100) }}</div></div>
   </div>
+  {% if ga4_no_creds %}<div style="color:#c00;font-size:12px;padding:10px;background:#fdecea;border-radius:8px;margin-bottom:14px">⚠️ 未設定 GA4_CREDENTIALS_JSON，無法同步 GA4 數據。請在 Render 設定環境變數後重新部署。</div>{% endif %}
 
   <div class="section">
     <h3>📋 今日 SEO 任務（{{ today_tasks|length }}）</h3>
@@ -5635,6 +5650,7 @@ th{color:#888;font-weight:600;font-size:11px;text-transform:uppercase}
       <div class="rank-tab" data-panel="rk-inquiries" onclick="showRank(this)">詢價最高</div>
       <div class="rank-tab" data-panel="rk-orders" onclick="showRank(this)">成交最高</div>
       <div class="rank-tab" data-panel="rk-revenue" onclick="showRank(this)">營收最高</div>
+      <div class="rank-tab" data-panel="rk-ga4" onclick="showRank(this)">GA4流量最高</div>
     </div>
     <div class="lb-card rank-panel active" id="rk-clicks">
       {% for i in top_clicks %}<div class="lb-item"><span>{{ i.title }}</span><span class="v">{{ i.clicks }}</span></div>{% endfor %}
@@ -5650,6 +5666,13 @@ th{color:#888;font-weight:600;font-size:11px;text-transform:uppercase}
     </div>
     <div class="lb-card rank-panel" id="rk-revenue">
       {% for i in top_revenue %}<div class="lb-item"><span>{{ i.title }}</span><span class="v">${{ i.revenue }}</span></div>{% endfor %}
+    </div>
+    <div class="lb-card rank-panel" id="rk-ga4">
+      {% if top_ga4 %}
+        {% for i in top_ga4 %}<div class="lb-item"><span>{{ i.title }}</span><span class="v">{{ "{:,}".format(i.page_views) }}</span></div>{% endfor %}
+      {% else %}
+        <p style="color:#999;font-size:12px;padding:8px 0">目前沒有 GA4 數據。</p>
+      {% endif %}
     </div>
     <script>
     function showRank(el){
@@ -5706,6 +5729,22 @@ def seo_dashboard_page():
     except Exception as e:
         import sys; print(f"[SEO Dashboard] 讀取文章數據失敗：{e}", file=sys.stderr)
         items = []
+    ga4_summary = {"total_page_views": 0, "total_active_users": 0, "avg_engagement": 0, "synced_count": 0, "total_count": 0}
+    top_ga4 = []
+    ga4_no_creds = not GA4_CREDENTIALS_JSON and not (GA4_CREDENTIALS_FILE and os.path.exists(GA4_CREDENTIALS_FILE))
+    try:
+        ga4_items = _list_articles_with_ga4(brand_key, category)
+        ga4_synced = [a for a in ga4_items if a["page_views"] is not None]
+        ga4_summary = {
+            "total_page_views": sum(a["page_views"] for a in ga4_synced),
+            "total_active_users": sum(a["active_users"] for a in ga4_synced),
+            "avg_engagement": round(sum(a["engagement_rate"] for a in ga4_synced)/len(ga4_synced), 4) if ga4_synced else 0,
+            "synced_count": len(ga4_synced),
+            "total_count": len(ga4_items),
+        }
+        top_ga4 = sorted(ga4_synced, key=lambda x: x["page_views"], reverse=True)[:5]
+    except Exception as e:
+        import sys; print(f"[SEO Dashboard] GA4 統計計算失敗：{e}", file=sys.stderr)
     try:
         stats = _dashboard_stats(brand_key, category)
     except Exception as e:
@@ -5752,6 +5791,7 @@ def seo_dashboard_page():
         top_clicks=_top_n(items, "clicks"), top_ctr=_top_n(items, "ctr"),
         top_inquiries=_top_n(items, "line_inquiries"), top_orders=_top_n(items, "orders"),
         top_revenue=_top_n(items, "revenue"),
+        ga4_summary=ga4_summary, top_ga4=top_ga4, ga4_no_creds=ga4_no_creds,
         low_score_articles=low_score_articles,
         suggestion=suggestion,
         suggestion_time=time.strftime("%Y-%m-%d %H:%M", time.localtime(gen_at)) if gen_at else "尚未生成")
