@@ -7,7 +7,7 @@ seo_admin.py — SEO 內容管理後台 Blueprint
     app.register_blueprint(seo_bp)
     init_seo_db()
 """
-import os, json, time, threading, urllib.request, urllib.error, re, requests
+import os, json, time, threading, urllib.request, urllib.error, re, requests, html as html_mod, hashlib
 from datetime import datetime, timezone, timedelta
 from flask import Blueprint, request, jsonify, render_template_string, redirect, abort
 
@@ -57,6 +57,11 @@ def init_seo_db():
             for col_sql in [
                 "ALTER TABLE brand_profiles ADD COLUMN IF NOT EXISTS allowed_products TEXT DEFAULT ''",
                 "ALTER TABLE brand_profiles ADD COLUMN IF NOT EXISTS allowed_services TEXT DEFAULT ''",
+                # 相容品牌／型號白名單（三品牌隔離修正：guardrail不再一律擋掉「其他品牌名稱」，
+                # 而是只允許這份清單裡「已由使用者確認相容」的品牌/型號，例如濾呼吸的濾網相容家電品牌）
+                "ALTER TABLE brand_profiles ADD COLUMN IF NOT EXISTS compatible_brands TEXT DEFAULT ''",
+                # 品牌CTA目標網址（生成文章的CTA區塊只能用這裡填的網址，AI不得自行猜測網址）
+                "ALTER TABLE brand_profiles ADD COLUMN IF NOT EXISTS cta_url TEXT DEFAULT ''",
             ]:
                 try: cur.execute(col_sql)
                 except Exception: pass
@@ -107,6 +112,12 @@ def init_seo_db():
                 "ALTER TABLE seo_articles ADD COLUMN IF NOT EXISTS brand_key TEXT DEFAULT ''",
                 "ALTER TABLE seo_articles ADD COLUMN IF NOT EXISTS category TEXT DEFAULT ''",
                 "ALTER TABLE seo_articles ADD COLUMN IF NOT EXISTS easystore_article_id TEXT DEFAULT ''",
+                # 內容/排版分離：AI輸出結構化blocks(JSON)，content欄位改成「由blocks渲染出來的HTML」，
+                # 供既有流程（品質檢查讀取content、EasyStore發布讀取content）原封不動繼續用，不用改既有讀取邏輯。
+                # 舊文章沒有blocks（空字串）＝沿用舊的手寫content HTML，不強制回填、不批次改寫。
+                "ALTER TABLE seo_articles ADD COLUMN IF NOT EXISTS blocks TEXT DEFAULT ''",
+                # 發布前檢查的結果快照（給後台顯示「缺什麼」），不是發布閘門本身的判斷依據（判斷即時算）
+                "ALTER TABLE seo_articles ADD COLUMN IF NOT EXISTS publish_checks TEXT DEFAULT ''",
                 "ALTER TABLE seo_tracking ADD COLUMN IF NOT EXISTS line_inquiries INTEGER DEFAULT 0",
                 "ALTER TABLE seo_tracking ADD COLUMN IF NOT EXISTS orders INTEGER DEFAULT 0",
                 "ALTER TABLE seo_tracking ADD COLUMN IF NOT EXISTS revenue NUMERIC DEFAULT 0",
@@ -159,6 +170,31 @@ def init_seo_db():
                 )
             """)
             cur.execute("CREATE INDEX IF NOT EXISTS idx_seo_knowledge_filter ON seo_knowledge(brand, category, type)")
+            # 品牌固定視覺主題（H2/表格/摘要等區塊渲染用的配色），confirmed=FALSE代表還沒正式定案，
+            # 渲染時會標示「待確認」，不會被系統自己指定成正式品牌色
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS seo_brand_themes (
+                    brand_key     TEXT PRIMARY KEY,
+                    primary_color TEXT DEFAULT '#333333',
+                    accent_color  TEXT DEFAULT '#0d6efd',
+                    bg_color      TEXT DEFAULT '#f5f5f5',
+                    confirmed     BOOLEAN DEFAULT FALSE,
+                    updated_at    FLOAT DEFAULT 0
+                )
+            """)
+            # LüAir（filterbreath）主色已由使用者明確指定，直接標記confirmed；
+            # JS(jsimple)、朗德(lander)目前沒有正式配色，用中性暫定主題並標示待確認，不自行決定正式品牌色
+            cur.execute("""
+                INSERT INTO seo_brand_themes (brand_key, primary_color, accent_color, bg_color, confirmed, updated_at)
+                VALUES ('filterbreath', '#1B3F6E', '#2F80ED', '#F5F8FC', TRUE, 0)
+                ON CONFLICT (brand_key) DO NOTHING
+            """)
+            for bk in ("jsimple", "lander"):
+                cur.execute("""
+                    INSERT INTO seo_brand_themes (brand_key, primary_color, accent_color, bg_color, confirmed, updated_at)
+                    VALUES (%s, '#333333', '#0d6efd', '#f5f5f5', FALSE, 0)
+                    ON CONFLICT (brand_key) DO NOTHING
+                """, (bk,))
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS seo_knowledge_import_jobs (
                     id           SERIAL PRIMARY KEY,
@@ -286,6 +322,29 @@ def init_seo_db():
                     updated_at   FLOAT DEFAULT 0
                 )
             """)
+            # 每日自動發文（AI生成 → AI品質檢查 → 過關才自動發布到 EasyStore，沒過關留給人工審稿）
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS seo_auto_publish_settings (
+                    id           INTEGER PRIMARY KEY DEFAULT 1,
+                    enabled      BOOLEAN DEFAULT FALSE,
+                    daily_count  INTEGER DEFAULT 2,
+                    hour_taipei  INTEGER DEFAULT 9,
+                    updated_at   FLOAT DEFAULT 0
+                )
+            """)
+            cur.execute("""
+                INSERT INTO seo_auto_publish_settings (id, enabled, daily_count, hour_taipei, updated_at)
+                VALUES (1, FALSE, 2, 9, 0) ON CONFLICT (id) DO NOTHING
+            """)
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS seo_auto_publish_runs (
+                    run_date     TEXT PRIMARY KEY,
+                    status       TEXT DEFAULT 'running',
+                    summary      TEXT DEFAULT '',
+                    created_at   FLOAT DEFAULT 0,
+                    updated_at   FLOAT DEFAULT 0
+                )
+            """)
             conn.commit()
             cur.close()
             conn.close()
@@ -323,14 +382,374 @@ def _get_brand(brand_key):
     if not DATABASE_URL or not brand_key:
         return {}
     try:
-        row = _q("""SELECT brand_key,name,category,style,tone,custom_prompt,allowed_products,allowed_services
+        row = _q("""SELECT brand_key,name,category,style,tone,custom_prompt,allowed_products,allowed_services,
+                    compatible_brands,cta_url
                     FROM brand_profiles WHERE brand_key=%s""", (brand_key,), fetch="one")
         if not row:
             return {}
         return {"key": row[0], "name": row[1], "category": row[2], "style": row[3], "tone": row[4],
-                "custom_prompt": row[5], "allowed_products": row[6] or "", "allowed_services": row[7] or ""}
+                "custom_prompt": row[5], "allowed_products": row[6] or "", "allowed_services": row[7] or "",
+                "compatible_brands": row[8] or "", "cta_url": row[9] or ""}
     except Exception:
         return {}
+
+def _brand_compatible_list(brand_key):
+    """回傳該品牌已確認的相容品牌/型號清單（逗號分隔字串解析成list），用於放寬guardrail的白名單。"""
+    b = _get_brand(brand_key)
+    raw = b.get("compatible_brands", "") or ""
+    return [x.strip() for x in raw.split(",") if x.strip()]
+
+DEFAULT_NEUTRAL_THEME = {
+    "primary_color": "#333333", "accent_color": "#666666", "bg_color": "#F7F7F7",
+    "confirmed": False,
+}
+
+def _get_brand_theme(brand_key):
+    """取得品牌視覺主題色。查無資料時回傳中性暫定主題（confirmed=False），不自行指定正式品牌色。"""
+    if not DATABASE_URL or not brand_key:
+        return dict(DEFAULT_NEUTRAL_THEME, brand_key=brand_key or "")
+    try:
+        row = _q("""SELECT brand_key,primary_color,accent_color,bg_color,confirmed
+                    FROM seo_brand_themes WHERE brand_key=%s""", (brand_key,), fetch="one")
+        if not row:
+            return dict(DEFAULT_NEUTRAL_THEME, brand_key=brand_key)
+        return {"brand_key": row[0], "primary_color": row[1] or DEFAULT_NEUTRAL_THEME["primary_color"],
+                "accent_color": row[2] or DEFAULT_NEUTRAL_THEME["accent_color"],
+                "bg_color": row[3] or DEFAULT_NEUTRAL_THEME["bg_color"], "confirmed": bool(row[4])}
+    except Exception:
+        return dict(DEFAULT_NEUTRAL_THEME, brand_key=brand_key)
+
+def _save_brand_theme(brand_key, primary_color, accent_color, bg_color, confirmed):
+    _q("""INSERT INTO seo_brand_themes (brand_key,primary_color,accent_color,bg_color,confirmed,updated_at)
+          VALUES (%s,%s,%s,%s,%s,%s)
+          ON CONFLICT (brand_key) DO UPDATE SET
+              primary_color=EXCLUDED.primary_color, accent_color=EXCLUDED.accent_color,
+              bg_color=EXCLUDED.bg_color, confirmed=EXCLUDED.confirmed, updated_at=EXCLUDED.updated_at""",
+       (brand_key, primary_color, accent_color, bg_color, bool(confirmed), time.time()))
+
+def _save_brand_compat_cta(brand_key, compatible_brands, cta_url):
+    cta_url = (cta_url or "").strip()
+    if cta_url and not _is_safe_url(cta_url):
+        cta_url = ""  # 擋掉javascript:等危險協定，不寫進資料庫
+    _q("UPDATE brand_profiles SET compatible_brands=%s, cta_url=%s, updated_at=%s WHERE brand_key=%s",
+       (compatible_brands, cta_url, time.time(), brand_key))
+
+def _list_brands_with_theme():
+    """品牌SEO規則頁「品牌視覺主題與相容設定」區塊用：合併brand_profiles與seo_brand_themes。"""
+    if not DATABASE_URL:
+        return []
+    try:
+        rows = _q("""SELECT brand_key,name,compatible_brands,cta_url FROM brand_profiles ORDER BY brand_key""",
+                  fetch="all") or []
+        out = []
+        for r in rows:
+            theme = _get_brand_theme(r[0])
+            out.append({"key": r[0], "name": r[1], "compatible_brands": r[2] or "", "cta_url": r[3] or "",
+                        "primary_color": theme["primary_color"], "accent_color": theme["accent_color"],
+                        "bg_color": theme["bg_color"], "confirmed": theme["confirmed"]})
+        return out
+    except Exception:
+        return []
+
+# ── 文章 Blocks 渲染引擎 ─────────────────────────────────────
+# 設計：AI只負責決定「內容」與「要用哪些block」，不寫HTML/CSS；程式依品牌主題把blocks渲染成固定樣式的HTML。
+# 支援型別：paragraph/heading/summary/table/takeaway/note/list/faq/related_links/cta
+# 所有文字欄位一律html escape，AI輸出不可能夾帶可執行HTML/script，從架構上排除多數AI來源的HTML注入風險。
+BLOCKS_SCHEMA_VERSION = 1
+BLOCK_TYPES = ["heading", "paragraph", "summary", "table", "takeaway", "note", "list", "faq", "related_links", "cta"]
+
+def _esc(s):
+    return html_mod.escape(str(s if s is not None else ""), quote=True)
+
+def _block_style_rules(theme):
+    """回傳每個視覺角色對應的CSS屬性字串（不含選擇器），scoped版跟inline版共用同一份規則，
+    確保「預覽跟複製HTML輸出的樣式完全一致」。"""
+    primary = (theme or {}).get("primary_color") or DEFAULT_NEUTRAL_THEME["primary_color"]
+    accent  = (theme or {}).get("accent_color") or DEFAULT_NEUTRAL_THEME["accent_color"]
+    bg      = (theme or {}).get("bg_color") or DEFAULT_NEUTRAL_THEME["bg_color"]
+    return {
+        "wrap": "font-size:18px;line-height:1.8;color:#222222;word-break:break-word;",
+        "wrap_mobile": "font-size:16px;",
+        "h2": f"color:{primary};border-bottom:3px solid {bg};padding-bottom:8px;margin:32px 0 16px 0;font-size:22px;font-weight:700;",
+        "h3": "font-weight:700;margin:24px 0 12px 0;font-size:19px;color:#222222;",
+        "p": "margin:0 0 16px 0;",
+        "summary": f"background:{bg};border-radius:10px;padding:18px 22px;margin:20px 0;",
+        "summary_title": f"font-weight:700;color:{primary};margin:0 0 8px 0;font-size:16px;",
+        "summary_ul": "margin:0;padding-left:20px;",
+        "table_wrap": "overflow-x:auto;margin:20px 0;-webkit-overflow-scrolling:touch;",
+        "table": "width:100%;border-collapse:collapse;font-size:16px;min-width:480px;",
+        "th": f"background:{primary};color:#ffffff;padding:10px 12px;text-align:left;white-space:nowrap;",
+        "td": "padding:10px 12px;border-bottom:1px solid #e5e5e5;",
+        "td_even_bg": f"background:{bg};",
+        "caption": "font-size:14px;color:#666666;margin:0 0 8px 0;",
+        "takeaway": f"background:{accent}22;border-left:4px solid {accent};border-radius:8px;padding:16px 20px;margin:20px 0;font-weight:600;color:#222222;",
+        "note": f"background:{bg};border-left:4px solid {accent};padding:12px 16px;margin:16px 0;font-size:14px;color:#444444;",
+        "list": "margin:0 0 16px 0;padding-left:22px;",
+        "faq_q": f"font-weight:700;margin:16px 0 4px 0;color:{primary};font-size:17px;",
+        "faq_a": "margin:0 0 8px 0;",
+        "related_title": "font-weight:700;margin:24px 0 8px 0;font-size:16px;",
+        "related_link": f"color:{accent};text-decoration:underline;",
+        "cta": f"background:{primary};color:#ffffff;border-radius:8px;padding:18px 22px;margin:28px 0;text-align:center;",
+        "cta_link": "color:#ffffff;font-weight:700;text-decoration:underline;",
+    }
+
+def _blocks_body_html(blocks, rules, inline):
+    """組出容器內部的HTML本體。inline=True時每個標籤帶style=""；否則帶class="jxsa-xxx"讓外層<style>生效。
+    兩種模式跑同一段組裝邏輯，確保預覽（inline，適合貼到不支援<style>的編輯器）跟正式輸出（scoped）視覺一致。"""
+    def a(key):
+        return f' style="{rules[key]}"' if inline else f' class="jxsa-{key.replace("_","-")}"'
+    parts = []
+    for b in blocks:
+        t = b.get("type")
+        if t == "heading":
+            level = 3 if str(b.get("level", 2)) == "3" else 2
+            key = "h3" if level == 3 else "h2"
+            parts.append(f"<h{level}{a(key)}>{_esc(b.get('text',''))}</h{level}>")
+        elif t == "paragraph":
+            parts.append(f"<p{a('p')}>{_esc(b.get('text',''))}</p>")
+        elif t == "summary":
+            title = b.get("title") or "重點整理"
+            lis = "".join(f"<li>{_esc(p)}</li>" for p in (b.get("points") or []))
+            parts.append(f'<div{a("summary")}><p{a("summary_title")}>{_esc(title)}</p>'
+                         f'<ul{a("summary_ul")}>{lis}</ul></div>')
+        elif t == "table":
+            headers = b.get("headers") or []
+            rows = b.get("rows") or []
+            caption = b.get("caption", "")
+            thead = "".join(f"<th{a('th')}>{_esc(h)}</th>" for h in headers)
+            trs = []
+            for i, row in enumerate(rows):
+                even = (i % 2 == 1)
+                td_style = f' style="{rules["td"]}{rules["td_even_bg"] if (inline and even) else ""}"' if inline else ''
+                td_class = f' class="jxsa-td"' if not inline else ''
+                tds = "".join(f"<td{td_class}{td_style}>{_esc(c)}</td>" for c in row)
+                tr_class = ' class="jxsa-tr-even"' if (not inline and even) else ''
+                trs.append(f"<tr{tr_class}>{tds}</tr>")
+            cap_html = f'<div{a("caption")}>{_esc(caption)}</div>' if caption else ""
+            parts.append(f'{cap_html}<div{a("table_wrap")}><table{a("table")}>'
+                         f'<thead><tr>{thead}</tr></thead><tbody>{"".join(trs)}</tbody></table></div>')
+        elif t == "takeaway":
+            parts.append(f'<div{a("takeaway")}>{_esc(b.get("text",""))}</div>')
+        elif t == "note":
+            parts.append(f'<div{a("note")}>{_esc(b.get("text",""))}</div>')
+        elif t == "list":
+            tag = "ol" if b.get("ordered") else "ul"
+            items = "".join(f"<li>{_esc(i)}</li>" for i in (b.get("items") or []))
+            parts.append(f"<{tag}{a('list')}>{items}</{tag}>")
+        elif t == "faq":
+            for item in (b.get("items") or []):
+                parts.append(f'<h3{a("faq_q")}>{_esc(item.get("q",""))}</h3><p{a("faq_a")}>{_esc(item.get("a",""))}</p>')
+        elif t == "related_links":
+            items = [it for it in (b.get("items") or []) if _is_safe_url(it.get("url", ""))]
+            if items:
+                lis = "".join(
+                    f'<li><a href="{_esc(it.get("url",""))}"{a("related_link")}>{_esc(it.get("text",""))}</a></li>'
+                    for it in items)
+                parts.append(f'<p{a("related_title")}>延伸閱讀</p><ul{a("list")}>{lis}</ul>')
+        elif t == "cta":
+            url = b.get("url", "") if _is_safe_url(b.get("url", "")) else ""
+            label = _esc(b.get("label") or "了解更多")
+            link_html = f'<p><a href="{_esc(url)}"{a("cta_link")}>{label} →</a></p>' if url else ""
+            parts.append(f'<div{a("cta")}><p>{_esc(b.get("text",""))}</p>{link_html}</div>')
+        # 未知type直接略過，不讓不認識的區塊污染輸出
+    return "\n".join(parts)
+
+def _scoped_style_block(rules):
+    css = f"""<style>
+.jxsa-wrap{{{rules['wrap']}}}
+.jxsa-h2{{{rules['h2']}}}
+.jxsa-h3{{{rules['h3']}}}
+.jxsa-p{{{rules['p']}}}
+.jxsa-summary{{{rules['summary']}}}
+.jxsa-summary-title{{{rules['summary_title']}}}
+.jxsa-summary-ul{{{rules['summary_ul']}}}
+.jxsa-table-wrap{{{rules['table_wrap']}}}
+.jxsa-table{{{rules['table']}}}
+.jxsa-th{{{rules['th']}}}
+.jxsa-td{{{rules['td']}}}
+.jxsa-tr-even .jxsa-td{{{rules['td_even_bg']}}}
+.jxsa-caption{{{rules['caption']}}}
+.jxsa-takeaway{{{rules['takeaway']}}}
+.jxsa-note{{{rules['note']}}}
+.jxsa-list{{{rules['list']}}}
+.jxsa-faq-q{{{rules['faq_q']}}}
+.jxsa-faq-a{{{rules['faq_a']}}}
+.jxsa-related-title{{{rules['related_title']}}}
+.jxsa-related-link{{{rules['related_link']}}}
+.jxsa-cta{{{rules['cta']}}}
+.jxsa-cta-link{{{rules['cta_link']}}}
+@media (max-width:600px){{
+.jxsa-wrap{{{rules['wrap_mobile']}}}
+}}
+</style>"""
+    return css
+
+def _render_blocks_html(blocks, theme, inline=False):
+    """把blocks渲染成HTML。inline=False（預設，正式輸出/發布用）：<style>+class，樣式只作用在.jxsa-wrap容器內，
+    不影響官網其他區域。inline=True（供不支援<style>標籤的編輯器貼上用）：每個標籤帶行內style，
+    用clamp()做手機/桌機字級縮放，不依賴media query。"""
+    blocks = blocks or []
+    rules = _block_style_rules(theme)
+    body = _blocks_body_html(blocks, rules, inline)
+    if inline:
+        wrap_style = rules["wrap"].replace("font-size:18px;", "font-size:clamp(16px,1.1vw + 14px,18px);")
+        return f'<div class="jxsa-wrap" style="{wrap_style}">{body}</div>'
+    return _scoped_style_block(rules) + f'<div class="jxsa-wrap">{body}</div>'
+
+def _blocks_to_plain_text(blocks):
+    """把blocks攤成純文字，供AI品質檢查/字數統計使用，避免把裝飾用HTML標籤也算進去、浪費檢查用的token。"""
+    blocks = blocks or []
+    lines = []
+    for b in blocks:
+        t = b.get("type")
+        if t == "heading":
+            lines.append(f"{'###' if str(b.get('level'))=='3' else '##'} {b.get('text','')}")
+        elif t == "paragraph":
+            lines.append(b.get("text", ""))
+        elif t == "summary":
+            lines.append(b.get("title") or "重點整理")
+            lines += [f"- {p}" for p in (b.get("points") or [])]
+        elif t == "table":
+            if b.get("caption"):
+                lines.append(b["caption"])
+            if b.get("headers"):
+                lines.append(" | ".join(b["headers"]))
+            for row in (b.get("rows") or []):
+                lines.append(" | ".join(str(c) for c in row))
+        elif t in ("takeaway", "note"):
+            lines.append(b.get("text", ""))
+        elif t == "list":
+            lines += [f"- {i}" for i in (b.get("items") or [])]
+        elif t == "faq":
+            for item in (b.get("items") or []):
+                lines.append(f"Q: {item.get('q','')}")
+                lines.append(f"A: {item.get('a','')}")
+        elif t == "related_links":
+            lines += [it.get("text", "") for it in (b.get("items") or [])]
+        elif t == "cta":
+            lines.append(b.get("text", ""))
+    return "\n".join(l for l in lines if l)
+
+def _is_safe_url(url):
+    """只允許 http/https 完整網址，或以單一個「/」開頭的站內相對路徑。
+    擋掉 javascript:、data:、vbscript: 等危險協定，以及用來偽裝站外導向的「//」開頭網址。
+    純文字escape不會處理這個問題（href屬性裡的javascript:字串就算被escape，瀏覽器仍會照原意執行），
+    所以連結一定要在這裡另外做協定檢查，不能只靠html.escape。"""
+    url = (url or "").strip()
+    if not url:
+        return False
+    if url.startswith("//"):
+        return False
+    if url.startswith("/"):
+        return True
+    try:
+        from urllib.parse import urlparse
+        scheme = urlparse(url).scheme.lower()
+    except Exception:
+        return False
+    return scheme in ("http", "https")
+
+def _resolve_block_links(blocks, brand_key):
+    """連結只能來自目前品牌已確認的資料：CTA用brand_profiles.cta_url，related_links的url要嘛是cta_url、
+    要嘛是本品牌「已發布」文章的slug，否則一律拿掉href並記錄到missing，不猜測網址。
+    草稿/待審文章的slug不算數——那些頁面還沒上線，連過去只會是死連結。
+    每個候選網址都還要再過_is_safe_url的協定檢查，即使是資料庫裡的資料也一樣（防呆，避免cta_url被誤填成危險協定）。
+    回傳 (處理後的blocks, missing訊息list)。
+    註：目前商品/服務只有名稱清單、沒有各自獨立網址欄位，所以商品連結暫不在這裡自動補，
+    這點會在完成報告裡跟使用者說明是待補的設定項目。"""
+    brand = _get_brand(brand_key)
+    cta_url = (brand.get("cta_url") or "").strip()
+    if cta_url and not _is_safe_url(cta_url):
+        cta_url = ""
+    confirmed_slugs = set()
+    try:
+        rows = _q("SELECT slug FROM seo_articles WHERE brand_key=%s AND status='published' AND slug<>''",
+                  (brand_key,), fetch="all") or []
+        confirmed_slugs = {r[0] for r in rows if r[0] and _is_safe_url(r[0])}
+    except Exception:
+        pass
+    missing = []
+    resolved = []
+    for b in blocks:
+        b = dict(b)
+        if b.get("type") == "cta":
+            url = (b.get("url") or "").strip()
+            if not url:
+                if cta_url:
+                    b["url"] = cta_url
+                else:
+                    missing.append("CTA缺少連結：品牌尚未設定cta_url，AI也沒有指定已確認的連結")
+            elif url not in confirmed_slugs and url != cta_url:
+                missing.append(f"CTA連結「{url}」不在本品牌已確認清單內，已移除該連結")
+                b["url"] = ""
+        elif b.get("type") == "related_links":
+            items = []
+            for it in (b.get("items") or []):
+                u = (it.get("url") or "").strip()
+                if u and (u in confirmed_slugs or u == cta_url):
+                    items.append(it)
+                else:
+                    missing.append(f"相關連結「{it.get('text','')}」網址未確認或指向未發布文章，已略過該連結")
+            b["items"] = items
+        resolved.append(b)
+    return resolved, missing
+
+def _validate_blocks_schema(blocks):
+    """基本schema檢查：型別合法、必要欄位存在、內容非空。回傳錯誤訊息list（空list代表通過）。"""
+    errors = []
+    if not isinstance(blocks, list) or not blocks:
+        return ["blocks為空或格式不是陣列"]
+    heading_count = 0
+    for idx, b in enumerate(blocks):
+        if not isinstance(b, dict):
+            errors.append(f"第{idx+1}個block不是物件")
+            continue
+        t = b.get("type")
+        if t not in BLOCK_TYPES:
+            errors.append(f"第{idx+1}個block型別「{t}」不合法")
+            continue
+        if t == "heading":
+            heading_count += 1
+            if not (b.get("text") or "").strip():
+                errors.append(f"第{idx+1}個heading區塊沒有文字")
+        elif t == "paragraph" and not (b.get("text") or "").strip():
+            errors.append(f"第{idx+1}個paragraph區塊沒有文字")
+        elif t == "table":
+            headers = b.get("headers") or []
+            rows = b.get("rows") or []
+            if not headers or not rows:
+                errors.append(f"第{idx+1}個table區塊缺少headers或rows")
+            else:
+                bad = [i for i, r in enumerate(rows) if len(r) != len(headers)]
+                if bad:
+                    errors.append(f"第{idx+1}個table區塊有列的欄數跟headers數量不一致（第{[i+1 for i in bad]}列）")
+        elif t == "faq":
+            items = b.get("items") or []
+            if not items:
+                errors.append(f"第{idx+1}個faq區塊沒有題目")
+            for j, it in enumerate(items):
+                if not (it.get("q") or "").strip() or not (it.get("a") or "").strip():
+                    errors.append(f"第{idx+1}個faq區塊第{j+1}題缺Q或A")
+    if heading_count == 0:
+        errors.append("整篇文章沒有任何H2/H3標題")
+    return errors
+
+SAMPLE_PREVIEW_BLOCKS = [
+    {"type": "heading", "level": 2, "text": "範例段落標題（H2）"},
+    {"type": "paragraph", "text": "這是一段範例內文，用來預覽目前設定的品牌配色與版型樣式，不是真實文章內容。"},
+    {"type": "summary", "text": "摘要區塊：用一兩句話總結本段重點，方便讀者快速掃過。"},
+    {"type": "heading", "level": 3, "text": "範例子標題（H3）"},
+    {"type": "table", "headers": ["項目", "說明", "備註"],
+     "rows": [["範例A", "說明文字", "待確認"], ["範例B", "說明文字", "—"]]},
+    {"type": "takeaway", "text": "重點提示：這裡放本段最重要的一句結論。"},
+    {"type": "note", "text": "補充說明：這裡放次要但值得留意的細節。"},
+    {"type": "list", "items": ["條列項目一", "條列項目二", "條列項目三"]},
+    {"type": "faq", "items": [
+        {"q": "範例問題一？", "a": "範例回答一，說明本品項的常見疑問。"},
+        {"q": "範例問題二？", "a": "範例回答二。"},
+    ]},
+    {"type": "cta", "text": "想了解更多，歡迎進一步詢問。"},
+]
 
 def _list_brands_with_allowed():
     """品牌SEO規則頁頂部「允許商品/服務清單」編輯區用：只需要brand_key/name/allowed_products/allowed_services"""
@@ -626,7 +1045,10 @@ def _brand_guardrail_header(brand, category):
     """品牌一致性規則：用程式碼直接組字串、不放進「Prompt設定」頁可編輯的範本裡，
     這樣使用者編輯Prompt範本時不會不小心把這道防線改掉或刪掉，符合「最高優先權」的要求。
     搜尋意圖分析、Prompt Preview、AI生成文章共用同一支，三個流程的防護內容保證一致。
-    Allowed Products 依 brand+category 三層 fallback（key_products > 品牌預設 > 無）。"""
+    Allowed Products 依 brand+category 三層 fallback（key_products > 品牌預設 > 無）。
+    compatible_brands（brand_profiles欄位，逗號分隔）：品牌資料庫已確認「相容」的其他品牌/型號
+    （例如濾網品牌相容的家電廠牌），允許在有實際資料佐證時提及，但不得暗示原廠/官方授權，
+    也不得混入該相容品牌自己的商品、服務、案例、價格等資料。"""
     brand_name = brand.get("name") or "(未指定)"
     allowed_products, _ = _resolve_allowed_products(brand, category)
     allowed_services = (brand.get("allowed_services") or "").strip()
@@ -636,6 +1058,20 @@ def _brand_guardrail_header(brand, category):
     if allowed_services:
         allowed_lines.append(f"允許提到的服務：{allowed_services}")
     allowed_block = ("\n" + "\n".join(allowed_lines) + "\n（只能從上面這份清單裡提商品/服務，清單外的商品、服務、或其他品牌的任何東西都不能出現）") if allowed_lines else ""
+    compat = _brand_compatible_list(brand.get("key", ""))
+    if compat:
+        compat_block = f"""
+已確認相容品牌/型號白名單（可以提到，但僅限「{brand_name}適用/相容於」這類敘述）：
+{"、".join(compat)}
+提到上述相容品牌時：
+- 只能說明「{brand_name}的商品相容於／適用於」這些品牌或型號
+- 不得暗示這些是原廠商品、原廠授權、官方合作
+- 不得帶入這些品牌自己的商品規格、價格、案例或其他資料（那些不屬於{brand_name}的知識庫）
+- 這份白名單只代表「可以提及這些品牌名稱」，不代表「所有商品/所有型號都相容」
+- 禁止使用「全系列相容」「所有型號皆適用」「均相容」等籠統說法；相容性必須針對個別商品，
+  且只能依據該商品自己的資料佐證，沒有資料佐證的型號一律不得宣稱相容"""
+    else:
+        compat_block = "\n目前品牌沒有已確認的相容品牌白名單，禁止提及任何其他品牌名稱。"
     return f"""========
 品牌一致性規則（最高優先權，違反視為錯誤輸出，回傳前必須遵守）
 目前品牌：{brand_name}
@@ -645,21 +1081,28 @@ def _brand_guardrail_header(brand, category):
 - 目前品牌（{brand_name}）
 - 目前品牌知識庫（seo_knowledge）
 - 目前品牌SEO規則（seo_brand_rules）
+{compat_block}
 
 禁止：
-- 推測或提及其他品牌名稱、其他品牌的商品、其他品牌的服務
-- 混用不同品牌的資料
-- 自行創造本品牌沒有資料佐證的商品、服務、案例、特色
+- 推測或提及白名單以外的其他品牌名稱、其他品牌的商品、其他品牌的服務
+- 混用不同品牌的資料（包含白名單內的相容品牌，只能提名稱做相容性說明，不能借用其資料）
+- 自行創造本品牌沒有資料佐證的商品、服務、案例、特色、規格、價格、承重、認證、防水等級
 
 若沒有相關資料，請直接回答不知道，不得用其他品牌或虛構內容填補。
 ========"""
 
 def _brand_guardrail_footer(brand):
     brand_name = brand.get("name") or "(未指定)"
+    compat = _brand_compatible_list(brand.get("key", ""))
+    compat_note = (f"提及「{'、'.join(compat)}」時只能是相容性說明，不能是原廠授權或借用其資料。" if compat
+                   else "")
     return f"""========
 【最後驗證，回傳前必做】
-請再檢查一次你即將輸出的內容，是否出現「{brand_name}」以外的其他品牌名稱、其他品牌的商品、或其他品牌的服務。
-如果有，請先修正（拿掉或換成「{brand_name}」實際的資料）再輸出，不要讓不同品牌的內容混在同一份輸出裡。
+請再檢查一次你即將輸出的內容：
+1. 是否出現白名單以外的其他品牌名稱、其他品牌的商品、或其他品牌的服務——如果有，拿掉或換成「{brand_name}」實際的資料。
+2. 是否有暗示原廠/官方授權、或混入其他品牌自己資料的敘述——如果有，改成中性的相容性描述或拿掉。{compat_note}
+3. 是否有規格、價格、承重、認證等具體數據卻沒有對應知識庫資料佐證——如果有，拿掉該敘述或改標「待確認」。
+不要讓不同品牌的內容混在同一份輸出裡。
 ========"""
 
 def _knowledge_import_prompt(raw_text):
@@ -893,30 +1336,158 @@ def _update_article_extra(article_id, patch):
     extra.update(patch)
     _q("UPDATE seo_articles SET extra=%s, updated_at=%s WHERE id=%s", (_dump_extra(extra), time.time(), article_id))
 
+UNSAFE_HTML_PATTERNS = ["<script", "javascript:", "onerror=", "onload=", "onclick=", "<iframe"]
+
+def _check_heading_hierarchy(blocks):
+    """檢查H3不能出現在第一個H2之前（結構要有骨架，不能一開始就是子標題）。"""
+    errors = []
+    seen_h2 = False
+    for i, b in enumerate(blocks):
+        if b.get("type") != "heading":
+            continue
+        level = 3 if str(b.get("level")) == "3" else 2
+        if level == 2:
+            seen_h2 = True
+        elif level == 3 and not seen_h2:
+            errors.append(f"第{i+1}個block是H3但前面還沒有任何H2，標題階層不完整")
+    return errors
+
+def _check_empty_links_in_html(content):
+    errors = []
+    if re.search(r'href=["\']\s*["\']', content or ""):
+        errors.append("內容裡有空連結（href=\"\"）")
+    return errors
+
+def _check_unsafe_html(content):
+    lowered = (content or "").lower()
+    return [f"內容含有不安全的HTML片段（{p}）" for p in UNSAFE_HTML_PATTERNS if p in lowered]
+
+def _check_products_brand_ownership(brand, related_products):
+    """粗略檢查related_products是否都在品牌允許商品清單內，避免混入其他品牌商品名稱。
+    allowed清單是空的代表這品牌還沒建檔案商品，無法核對，視為通過（不誤擋），但仍會反映在missing項目讓後台知道。"""
+    allowed = (brand.get("allowed_products") or "").strip()
+    if not allowed or not (related_products or "").strip():
+        return []
+    allowed_set = {x.strip().lower() for x in allowed.split(",") if x.strip()}
+    errors = []
+    for p in [x.strip() for x in related_products.split(",") if x.strip()]:
+        if not any(p.lower() in a or a in p.lower() for a in allowed_set):
+            errors.append(f"對應商品「{p}」不在本品牌允許商品清單內，可能是誤植或跨品牌混入")
+    return errors
+
+def _content_fingerprint(title, meta_title, meta_desc, content, blocks_raw, brand_key, related_products):
+    """把會影響「實際輸出」與「AI品質檢查依據」的欄位打包雜湊成一個版本指紋。
+    AI品質檢查通過的結果只能對應到打指紋當下的那個版本；只要現在重算的指紋跟
+    quality_check存的指紋對不起來，就代表文章在檢查之後又被改過（不管是透過編輯頁存檔，
+    還是任何其他會動到這些欄位的路徑），舊的通過結果一律視為失效，必須重新檢查才能發布。"""
+    raw = "\x1f".join([title or "", meta_title or "", meta_desc or "", content or "",
+                        blocks_raw or "", brand_key or "", related_products or ""])
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+def _validate_article_for_publish(aid):
+    """發布前的程式面檢查（不是AI檢查，是確定性規則），任何一項沒過都不能發布。
+    涵蓋：必要欄位、blocks schema、AI輸出截斷、標題階層、表格完整性（已含在blocks schema檢查）、
+    空連結、待補充/待確認殘留文字、連結是否已確認、商品品牌歸屬、HTML安全性。
+    回傳 (ok: bool, errors: list[str])。"""
+    row = _q("""SELECT title,meta_title,meta_description,content,blocks,brand_key,category,extra,status
+                FROM seo_articles WHERE id=%s""", (aid,), fetch="one")
+    if not row:
+        return False, ["找不到這篇文章"]
+    title, meta_title, meta_desc, content, blocks_raw, brand_key, category, extra_raw, status = row
+    errors = []
+    for label, val in [("標題", title), ("Meta Title", meta_title), ("Meta Description", meta_desc)]:
+        if not (val or "").strip():
+            errors.append(f"{label}是空的")
+    # 新schema文章的正文來自blocks，content欄位可以合法留空（實際輸出是即時渲染的blocks，不是content）；
+    # 只有兩者都空才算「文章內容是空的」，避免所有blocks文章被誤擋。
+    if not (content or "").strip() and not (blocks_raw or "").strip():
+        errors.append("文章內容是空的（content與blocks皆為空）")
+    extra = _parse_extra(extra_raw)
+    brand = _get_brand(brand_key)
+    try:
+        blocks = json.loads(blocks_raw) if blocks_raw else []
+    except Exception:
+        blocks = []
+        if blocks_raw:
+            errors.append("blocks欄位存在但JSON解析失敗（資料可能損毀）")
+    if blocks:
+        errors += _validate_blocks_schema(blocks)
+        errors += _check_heading_hierarchy(blocks)
+        # 發布前重新驗證內部連結，不沿用生成當下寫死的extra.missing_links（那是舊快照，
+        # 目標文章可能在生成之後又被下架/改回草稿）；一律以「現在」的已發布清單為準，
+        # 失效的連結直接擋下發布並提示，不要偷偷拿掉連結卻讓文章照樣發布。
+        resolved_blocks, link_missing = _resolve_block_links(blocks, brand_key)
+        errors += [f"內部連結驗證失敗：{m}" for m in link_missing]
+        plain_text = _blocks_to_plain_text(resolved_blocks)
+        try:
+            effective_html = _render_blocks_html(resolved_blocks, _get_brand_theme(brand_key), inline=False)
+        except Exception as e:
+            effective_html = content or ""
+            errors.append(f"blocks渲染時發生錯誤，改用既有content欄位做檢查：{e}")
+    else:
+        plain_text = content or ""
+        effective_html = content or ""
+    if extra.get("truncated"):
+        errors.append("AI生成時輸出被截斷（max_tokens），內容可能不完整")
+    if extra.get("blocks_errors"):
+        errors += [f"生成階段已標記的問題：{e}" for e in extra["blocks_errors"]]
+    if extra.get("needs_confirmation"):
+        errors.append("內容標記needs_confirmation（資料不足待確認），不得發布")
+        if extra.get("confirmation_notes"):
+            errors.append(f"待確認說明：{extra['confirmation_notes']}")
+    if _content_has_placeholder(plain_text) or _content_has_placeholder(title or ""):
+        errors.append("正文或標題殘留「待補充／待確認」等佔位文字")
+    errors += _check_empty_links_in_html(effective_html)
+    errors += _check_unsafe_html(effective_html)
+    errors += _check_products_brand_ownership(brand, extra.get("related_products", ""))
+    qc = extra.get("quality_check") or {}
+    current_fp = _content_fingerprint(title, meta_title, meta_desc, content, blocks_raw, brand_key,
+                                       extra.get("related_products", ""))
+    if qc and extra.get("quality_check_fingerprint") == current_fp:
+        if qc.get("brand_consistency_pass") is False:
+            errors.append("AI品質檢查：品牌一致性未通過")
+        if qc.get("recommend_publish") is False:
+            errors.append("AI品質檢查：不建議發布")
+    elif qc:
+        errors.append("尚未跑過AI品質檢查（內容在上次檢查後又被修改，舊的檢查結果已失效）")
+    else:
+        errors.append("尚未跑過AI品質檢查")
+    return (len(errors) == 0), errors
+
 # ── EasyStore Open API 3.0：部落格文章發布 ──────────────────────
 # 端點是 /api/3.0/articles.json（不是 /admin/v2/... 後台內部 API），已由使用者實測驗證可用。
 
 def _easystore_publish_article(aid, scheduled_iso=None):
     if not EASYSTORE_ACCESS_TOKEN:
         return {"error": "未設定 EASYSTORE_ACCESS_TOKEN 環境變數"}
+    ok, check_errors = _validate_article_for_publish(aid)
+    if not ok:
+        return {"error": "發布前檢查未通過，已擋下：" + "；".join(check_errors)}
     row = _q("""SELECT title, slug, meta_description, content, brand_key, easystore_article_id
                 FROM seo_articles WHERE id=%s""", (aid,), fetch="one")
     if not row:
         return {"error": "找不到文章"}
     title, slug, meta_desc, content, brand_key, es_id = row
-    blog_id = EASYSTORE_BLOG_IDS.get(brand_key or "jsimple")
+    if not brand_key:
+        # 不用預設品牌，避免舊資料/空brand_key的文章被誤判成JS家具，借用JS的EasyStore blog_id和憑證發出去
+        return {"error": "這篇文章沒有brand_key（品牌未設定），為避免誤用JS家具的EasyStore設定，已阻止發布"}
+    blog_id = EASYSTORE_BLOG_IDS.get(brand_key)
     if not blog_id:
-        return {"error": f"品牌「{brand_key}」尚未設定 EasyStore blog_id"}
-    if not (content or "").strip():
+        return {"error": f"品牌「{brand_key}」尚未設定 EasyStore blog_id，不能借用其他品牌的設定發布"}
+    # 發布內容一律用即時渲染結果（跟預覽/複製HTML同一套邏輯），不用資料庫裡可能過期的content欄位，
+    # 避免blocks改過之後，發布出去的還是舊版HTML
+    body_html = _render_article_output_html(aid, inline=False)
+    if not (body_html or "").strip():
         return {"error": "文章內容是空的，請先儲存內容再發布"}
 
+    author_name = (_get_brand(brand_key).get("name") or brand_key).upper()
     published_at = scheduled_iso or datetime.now(TAIPEI_TZ).strftime("%Y-%m-%dT%H:%M:%S+08:00")
     payload = {"article": {
         "blog_id": int(blog_id),
         "title": title,
-        "body_html": content,
+        "body_html": body_html,
         "description": meta_desc or "",
-        "author": "JSIMPLE",
+        "author": author_name,
         "published": True,
         "published_at": published_at,
     }}
@@ -947,7 +1518,122 @@ def _easystore_publish_article(aid, scheduled_iso=None):
         return {"error": f"EasyStore API 錯誤（HTTP {e.response.status_code}）：{body}"}
     except Exception as e:
         return {"error": f"發布失敗：{e}"}
-    return extra
+
+# ── 每日自動發文：AI生成 → AI品質檢查 → 過關才自動發布，沒過關留給人工審稿 ──
+
+def _get_auto_publish_settings():
+    row = _q("SELECT enabled, daily_count, hour_taipei FROM seo_auto_publish_settings WHERE id=1", fetch="one")
+    if not row:
+        return {"enabled": False, "daily_count": 2, "hour_taipei": 9}
+    return {"enabled": bool(row[0]), "daily_count": row[1], "hour_taipei": row[2]}
+
+def _save_auto_publish_settings(enabled, daily_count, hour_taipei):
+    _q("""UPDATE seo_auto_publish_settings SET enabled=%s, daily_count=%s, hour_taipei=%s, updated_at=%s WHERE id=1""",
+       (enabled, daily_count, hour_taipei, time.time()))
+
+def _claim_daily_run(run_date):
+    """用DB唯一鍵搶當天的執行權，確保 gunicorn 多個 worker 各自的排程執行緒不會同一天重複執行。"""
+    row = _q("""INSERT INTO seo_auto_publish_runs (run_date, status, created_at, updated_at)
+                VALUES (%s, 'running', %s, %s) ON CONFLICT (run_date) DO NOTHING RETURNING run_date""",
+             (run_date, time.time(), time.time()), fetch="one")
+    return bool(row)
+
+def _auto_generate_one(opp_id, brand_key, category, topic):
+    """複製手動流程（意圖分析→正式生成）但同步執行、不透過job輪詢，回傳新文章id。"""
+    brand = _get_brand(brand_key)
+    brand_rule = _match_brand_rule(brand_key, category, "")
+    prompt = _analyze_intent_prompt(brand, category, topic, brand_rule)
+    text, err = _ai_call(prompt, model="claude-haiku-4-5", max_tokens=1500)
+    if err:
+        raise RuntimeError(f"意圖分析失敗：{err}")
+    analysis, suggested_article_type = _extract_suggested_article_type(text)
+    analysis, suggested_main_keyword = _extract_suggested_main_keyword(analysis)
+    fields = {"main_keyword": suggested_main_keyword, "article_type": suggested_article_type,
+              "brand_rule_mode": "auto"}
+    now = time.time()
+    job_id = _q("INSERT INTO seo_generate_jobs (status,created_at,updated_at) VALUES ('pending',%s,%s) RETURNING id",
+                (now, now), fetch="id")
+    _run_generate_job(job_id, brand_key, category, topic, analysis, opp_id=opp_id, fields=fields)
+    row = _q("SELECT status, article_id, error_msg FROM seo_generate_jobs WHERE id=%s", (job_id,), fetch="one")
+    if not row or row[0] != "done":
+        raise RuntimeError((row[2] if row else "") or "生成任務失敗")
+    return row[1]
+
+def _auto_quality_check_one(article_id):
+    """跑既有的AI品質檢查（跟人工按鈕同一支邏輯），回傳套用檢查結果後的文章狀態與分數。"""
+    now = time.time()
+    job_id = _q("INSERT INTO seo_quality_check_jobs (status,article_id,created_at,updated_at) VALUES (%s,%s,%s,%s) RETURNING id",
+                ("pending", article_id, now, now), fetch="id")
+    _run_quality_check_job(job_id, article_id)
+    row = _q("SELECT status, error_msg FROM seo_quality_check_jobs WHERE id=%s", (job_id,), fetch="one")
+    if not row or row[0] != "done":
+        raise RuntimeError((row[1] if row else "") or "品質檢查任務失敗")
+    art = _q("SELECT status, extra FROM seo_articles WHERE id=%s", (article_id,), fetch="one")
+    status = art[0] if art else "needs_revision"
+    score = _parse_extra(art[1] if art else None).get("ai_score", 0)
+    return status, score
+
+def _run_daily_auto_publish(run_date, settings):
+    summary = {"topics": []}
+    try:
+        rows = _q("""SELECT id, brand, category, topic FROM seo_opportunities
+                     WHERE status='confirmed'
+                     ORDER BY (seo_score+geo_score+conversion_score-difficulty) DESC, id ASC
+                     LIMIT %s""", (settings["daily_count"],), fetch="all") or []
+        if not rows:
+            summary["note"] = "主題機會池裡沒有狀態為「已確認」的主題可以生成，今天沒有產出"
+        for opp_id, brand_key, category, topic in rows:
+            entry = {"opp_id": opp_id, "topic": topic}
+            try:
+                article_id = _auto_generate_one(opp_id, brand_key, category, topic)
+                entry["article_id"] = article_id
+                status, score = _auto_quality_check_one(article_id)
+                entry["ai_score"] = score
+                if status == "ready_to_publish":
+                    pub = _easystore_publish_article(article_id)
+                    if pub.get("ok"):
+                        entry["result"] = "已自動發布"
+                    else:
+                        entry["result"] = f"品質過關但發布失敗，留待人工處理：{pub.get('error')}"
+                else:
+                    entry["result"] = f"AI品質檢查未過關（狀態：{ARTICLE_STATUS_LABELS.get(status, status)}），已存草稿等人工審稿"
+            except Exception as e:
+                entry["result"] = f"失敗：{_safe_job_error_msg(e)}"
+            summary["topics"].append(entry)
+        _q("UPDATE seo_auto_publish_runs SET status='done', summary=%s, updated_at=%s WHERE run_date=%s",
+           (_dump_extra(summary), time.time(), run_date))
+    except Exception as e:
+        _q("UPDATE seo_auto_publish_runs SET status='error', summary=%s, updated_at=%s WHERE run_date=%s",
+           (_dump_extra({"error": _safe_job_error_msg(e)}), time.time(), run_date))
+
+_auto_publish_scheduler_started = False
+
+def _auto_publish_tick():
+    settings = _get_auto_publish_settings()
+    if not settings["enabled"]:
+        return
+    now = datetime.now(TAIPEI_TZ)
+    if now.hour != settings["hour_taipei"]:
+        return
+    run_date = now.strftime("%Y-%m-%d")
+    if not _claim_daily_run(run_date):
+        return
+    _run_daily_auto_publish(run_date, settings)
+
+def _start_auto_publish_scheduler():
+    """背景執行緒每10分鐘檢查一次；用DB唯一鍵搶執行權，gunicorn多個worker各自的執行緒不會重複發文。"""
+    global _auto_publish_scheduler_started
+    if _auto_publish_scheduler_started or not DATABASE_URL:
+        return
+    _auto_publish_scheduler_started = True
+    def loop():
+        while True:
+            try:
+                _auto_publish_tick()
+            except Exception as e:
+                import sys; print(f"[AutoPublish] 排程檢查失敗：{e}", file=sys.stderr)
+            time.sleep(600)
+    threading.Thread(target=loop, daemon=True).start()
 
 # ── 品牌 SEO 規則 ───────────────────────────────────────────────
 
@@ -1037,12 +1723,20 @@ def _match_brand_rule(brand, category, article_type=""):
             "keywords": best[11], "negative_keywords": best[12]}
 
 def _resolve_brand_rule(brand_key, category, fields):
-    """三種模式（自動／不套用／手動）共用的決定邏輯，Preview跟正式生成都呼叫這支，確保預覽看到的跟實際送出的一致。"""
+    """三種模式（自動／不套用／手動）共用的決定邏輯，Preview跟正式生成都呼叫這支，確保預覽看到的跟實際送出的一致。
+    停用SEO規則（mode=none）只是不套用「品牌定位/語氣」這類規則內容，跟品牌隔離無關——
+    知識庫、允許商品、機會池都是各自獨立依 brand_key 查詢（見_get_knowledge_for_prompt/_allowed_products_block/
+    _run_daily_auto_publish的SQL WHERE條件），不會因為這裡回傳空規則就改用其他品牌的資料。"""
     mode = fields.get("brand_rule_mode", "auto")
     if mode == "none":
         return "none", {}
     if mode == "manual":
-        return "manual", _get_brand_rule_by_id(fields.get("manual_rule_id"))
+        rule = _get_brand_rule_by_id(fields.get("manual_rule_id"))
+        # 手動指定規則也必須驗證品牌歸屬：規則的brand留空＝萬用規則可以套用；
+        # 規則指定了brand但跟目前品牌不符，一律視為未選取，不可以套用別的品牌規則
+        if rule and (rule.get("brand") or "").strip().lower() not in ("", (brand_key or "").strip().lower()):
+            return "manual", {}
+        return "manual", rule
     return "auto", _match_brand_rule(brand_key, category, fields.get("article_type", ""))
 
 def _brand_rule_label(brand_rule):
@@ -1136,9 +1830,22 @@ CTA方向：{rule.get('cta_direction','')}
 
 # ── AI 文章品質檢查 ─────────────────────────────────────────────
 
-def _quality_check_prompt(article, brand, category, brand_rule, extra):
-    body = f"""你是台灣SEO/GEO/AEO內容策略專家，請幫以下文章做發布前品質檢查。
+PLACEHOLDER_MARKERS = ["待補充", "待確認", "TBD", "TODO", "[待", "（待", "(待"]
 
+def _content_has_placeholder(content):
+    """程式面複查：正文是否殘留待補充/待確認等佔位文字，作為AI判斷之外的保險。"""
+    content = content or ""
+    return any(m in content for m in PLACEHOLDER_MARKERS)
+
+QUALITY_CHECK_CHUNK_THRESHOLD = 16000  # 超過此字數才啟用分段檢查，避免大部分文章都要多打一次API
+
+def _quality_check_prompt(article, brand, category, brand_rule, extra, content_override=None, chunk_note=""):
+    """content_override：分段檢查時傳入該段內容；不傳則用article['content']全文（不再截斷前8000字）。"""
+    content = article.get('content', '') if content_override is None else content_override
+    compat = _brand_compatible_list(brand.get("key", ""))
+    compat_line = (f"（已排除白名單相容品牌「{'、'.join(compat)}」的合理相容性說明，這些不算違規）" if compat else "")
+    body = f"""你是台灣SEO/GEO/AEO內容策略專家，請幫以下文章做發布前品質檢查。
+{chunk_note}
 品牌SEO規則（文章必須符合，不可偏離）：
 {_brand_rule_block(brand_rule)}
 
@@ -1153,7 +1860,7 @@ def _quality_check_prompt(article, brand, category, brand_rule, extra):
 Meta Title：{article.get('meta_title','')}
 Meta Description：{article.get('meta_description','')}
 文章內容：
-{article.get('content','')[:8000]}
+{content}
 
 請檢查以下15項：
 1. 標題是否包含主關鍵字
@@ -1170,7 +1877,8 @@ Meta Description：{article.get('meta_description','')}
 12. 是否需要拆成多篇文章
 13. 是否有內容太泛、太像AI文的問題
 14. 是否有錯誤或不適合品牌的方向（尤其注意是否偏離「禁止偏離方向」）
-15. 品牌一致性檢查（重要）—— 逐項檢查文章裡是否出現：(a) 「{brand.get('name','')}」以外的其他品牌名稱 (b) 不屬於{brand.get('name','')}的商品 (c) 不屬於{brand.get('name','')}的服務 (d) 違反上面「可用商品資料」清單的商品/服務 (e) 混用其他品牌知識庫內容。只要出現其中任何一項，這篇文章的品牌一致性就算未通過，必須在brand_consistency_issues欄位具體列出疑似違規的文字段落。
+15. 品牌一致性檢查（重要）{compat_line}—— 逐項檢查文章裡是否出現：(a) 白名單以外的其他品牌名稱 (b) 不屬於{brand.get('name','')}的商品 (c) 不屬於{brand.get('name','')}的服務 (d) 違反上面「可用商品資料」清單的商品/服務 (e) 混用其他品牌（含白名單相容品牌）自己的知識庫內容 (f) 暗示原廠/官方授權 (g) 具體規格、價格、承重、認證等數據卻沒有資料佐證 (h) 用「全系列相容」「所有型號皆適用」「均相容」等籠統說法宣稱相容性，而非針對個別商品逐一佐證。只要出現其中任何一項，這篇文章的品牌一致性就算未通過，必須在brand_consistency_issues欄位具體列出疑似違規的文字段落。
+16. 正文是否還殘留「待補充」「待確認」「TODO」等佔位文字尚未填寫（若有，視為未完成，必須在issues指出，且not recommend_publish）
 
 輸出格式（只輸出JSON，不要其他文字，不要markdown code block）：
 {{
@@ -1178,6 +1886,7 @@ Meta Description：{article.get('meta_description','')}
   "recommend_publish": true或false,
   "brand_consistency_pass": true或false,
   "brand_consistency_issues": "列出第15項找到的疑似違反品牌一致性的具體內容，沒有問題就輸出空字串",
+  "has_placeholder_text": true或false,
   "issues": "主要問題，條列式文字，找到的問題具體寫出來",
   "suggestions": "修改建議，具體可執行",
   "next_status": "從 draft_review/needs_revision/ready_to_publish 選一個",
@@ -1187,22 +1896,93 @@ Meta Description：{article.get('meta_description','')}
 }}"""
     return _brand_guardrail_header(brand, category) + "\n\n" + body + "\n\n" + _brand_guardrail_footer(brand)
 
+def _split_content_for_chunk_check(content, n=2):
+    """把長文章依段落邊界切成約n等分，避免品質檢查漏看後半段內容。"""
+    paras = content.split("\n\n")
+    if len(paras) < n:
+        size = max(1, len(content) // n)
+        return [content[i:i+size] for i in range(0, len(content), size)]
+    target = len(content) / n
+    chunks, cur, cur_len = [], [], 0
+    for p in paras:
+        cur.append(p)
+        cur_len += len(p)
+        if cur_len >= target and len(chunks) < n - 1:
+            chunks.append("\n\n".join(cur))
+            cur, cur_len = [], 0
+    if cur:
+        chunks.append("\n\n".join(cur))
+    return chunks
+
+def _merge_quality_check_results(results):
+    """合併分段品質檢查結果：分數取最低（保守），brand_consistency/recommend_publish只要有一段未通過就整體未通過。"""
+    if len(results) == 1:
+        return results[0]
+    merged = {
+        "score": min(int(r.get("score", 0) or 0) for r in results),
+        "recommend_publish": all(bool(r.get("recommend_publish")) for r in results),
+        "brand_consistency_pass": all(r.get("brand_consistency_pass") is not False for r in results),
+        "brand_consistency_issues": " / ".join(x for x in (r.get("brand_consistency_issues", "") for r in results) if x),
+        "has_placeholder_text": any(bool(r.get("has_placeholder_text")) for r in results),
+        "issues": "\n".join(f"[第{i+1}段] {r.get('issues','')}" for i, r in enumerate(results) if r.get("issues")),
+        "suggestions": "\n".join(f"[第{i+1}段] {r.get('suggestions','')}" for i, r in enumerate(results) if r.get("suggestions")),
+        "next_status": "needs_revision",
+        "suggested_sections": " / ".join(x for x in (r.get("suggested_sections", "") for r in results) if x),
+        "suggested_internal_links": " / ".join(x for x in (r.get("suggested_internal_links", "") for r in results) if x),
+        "suggested_related_products": " / ".join(x for x in (r.get("suggested_related_products", "") for r in results) if x),
+    }
+    statuses = [r.get("next_status", "") for r in results]
+    if all(s == "ready_to_publish" for s in statuses):
+        merged["next_status"] = "ready_to_publish"
+    elif any(s == "needs_revision" for s in statuses):
+        merged["next_status"] = "needs_revision"
+    else:
+        merged["next_status"] = "draft_review"
+    return merged
+
+def _quality_check_run(article, brand, category, brand_rule, extra):
+    """依內容長度決定單次或分段檢查（分段時每段各打一次API再合併），回傳(result, err)。"""
+    content = article.get('content', '') or ''
+    if len(content) <= QUALITY_CHECK_CHUNK_THRESHOLD:
+        prompt = _quality_check_prompt(article, brand, category, brand_rule, extra)
+        return _ai_call_json(prompt, model="claude-sonnet-4-6", max_tokens=2000)
+    chunks = _split_content_for_chunk_check(content, n=2)
+    results = []
+    for i, chunk in enumerate(chunks):
+        note = f"\n【注意：這是全文分段檢查的第{i+1}/{len(chunks)}段，只針對這段內容評估，不要因為看不到其他段落就扣分】\n"
+        prompt = _quality_check_prompt(article, brand, category, brand_rule, extra,
+                                        content_override=chunk, chunk_note=note)
+        result, err = _ai_call_json(prompt, model="claude-sonnet-4-6", max_tokens=2000)
+        if err:
+            return None, err
+        results.append(result)
+    return _merge_quality_check_results(results), None
+
 def _run_quality_check_job(job_id, article_id):
     try:
         _q("UPDATE seo_quality_check_jobs SET status='running', updated_at=%s WHERE id=%s", (time.time(), job_id))
-        row = _q("""SELECT title,meta_title,meta_description,content,brand_key,category,extra
+        row = _q("""SELECT title,meta_title,meta_description,content,brand_key,category,extra,blocks
                     FROM seo_articles WHERE id=%s""", (article_id,), fetch="one")
         if not row:
             _q("UPDATE seo_quality_check_jobs SET status='error', error_msg=%s, updated_at=%s WHERE id=%s",
                ("找不到這篇文章", time.time(), job_id))
             return
-        article = {"title": row[0], "meta_title": row[1], "meta_description": row[2], "content": row[3]}
+        # 新式文章有blocks就用blocks攤平的純文字做品質檢查（避免渲染出來的裝飾HTML標籤稀釋/浪費檢查用的token）；
+        # 舊文章沒有blocks就沿用content欄位原文，維持舊資料相容
+        blocks_raw = row[7] or ""
+        check_content = row[3] or ""
+        try:
+            blocks_parsed = json.loads(blocks_raw) if blocks_raw else []
+        except Exception:
+            blocks_parsed = []
+        if blocks_parsed:
+            check_content = _blocks_to_plain_text(blocks_parsed)
+        article = {"title": row[0], "meta_title": row[1], "meta_description": row[2], "content": check_content}
         brand_key, category = row[4], row[5]
         extra = _parse_extra(row[6])
         brand = _get_brand(brand_key)
         brand_rule = _match_brand_rule(brand_key, category)
-        prompt = _quality_check_prompt(article, brand, category, brand_rule, extra)
-        result, err = _ai_call_json(prompt, model="claude-sonnet-4-6", max_tokens=2000)
+        result, err = _quality_check_run(article, brand, category, brand_rule, extra)
         if err:
             _q("UPDATE seo_quality_check_jobs SET status='error', error_msg=%s, updated_at=%s WHERE id=%s",
                (f"AI檢查失敗：{err}", time.time(), job_id))
@@ -1213,13 +1993,21 @@ def _run_quality_check_job(job_id, article_id):
             result["recommend_publish"] = False
             if not (result.get("brand_consistency_issues") or "").strip():
                 result["brand_consistency_issues"] = "AI標示品牌一致性檢查未通過，但未說明具體違規內容"
+        # 正文殘留待補充/待確認佔位文字：強制留草稿，不管AI自己判斷的recommend_publish/next_status
+        if result.get("has_placeholder_text") or _content_has_placeholder(article.get("content", "")):
+            result["recommend_publish"] = False
+            result["has_placeholder_text"] = True
         next_status = result.get("next_status", "")
         if next_status not in ARTICLE_STATUS:
             next_status = "needs_revision"
         if result.get("brand_consistency_pass") is False:
             next_status = "needs_revision"
+        if result.get("has_placeholder_text"):
+            next_status = "draft_review" if next_status == "ready_to_publish" else next_status
         extra["ai_score"] = int(result.get("score", 0) or 0)
         extra["quality_check"] = result
+        extra["quality_check_fingerprint"] = _content_fingerprint(
+            row[0], row[1], row[2], row[3], blocks_raw, brand_key, extra.get("related_products", ""))
         extra["next_action"] = "人工審稿" if result.get("recommend_publish") else "修改內容"
         now = time.time()
         _q("UPDATE seo_articles SET extra=%s, status=%s, updated_at=%s WHERE id=%s",
@@ -1325,9 +2113,11 @@ def _run_suggest_links_job(job_id, aid):
 
 # ── Claude AI 呼叫 ──────────────────────────────────────────────
 
-def _ai_call(prompt, model="claude-haiku-4-5", max_tokens=2000):
+def _ai_call_full(prompt, model="claude-haiku-4-5", max_tokens=2000):
+    """跟_ai_call同一支邏輯，但多回傳stop_reason（"max_tokens"代表輸出被截斷），
+    供需要偵測截斷的呼叫端（例如文章生成）使用；不改_ai_call本身的2值回傳，避免動到既有10幾處呼叫端。"""
     if not ANTHROPIC_API_KEY:
-        return None, "ANTHROPIC_API_KEY 未設定"
+        return None, "ANTHROPIC_API_KEY 未設定", ""
     try:
         req_data = json.dumps({
             "model": model,
@@ -1346,28 +2136,38 @@ def _ai_call(prompt, model="claude-haiku-4-5", max_tokens=2000):
         with urllib.request.urlopen(req, timeout=120) as r:
             resp = json.loads(r.read().decode())
         text = resp["content"][0]["text"].strip()
-        return text, ""
+        return text, "", resp.get("stop_reason", "")
     except urllib.error.HTTPError as e:
         body = e.read().decode("utf-8", errors="replace")
         try:
             detail = json.loads(body).get("error", {}).get("message", body)
         except Exception:
             detail = body
-        return None, f"HTTP {e.code}: {detail}"
+        return None, f"HTTP {e.code}: {detail}", ""
     except Exception as e:
-        return None, str(e)
+        return None, str(e), ""
 
-def _ai_call_json(prompt, model="claude-sonnet-4-6", max_tokens=8000):
-    text, err = _ai_call(prompt, model=model, max_tokens=max_tokens)
+def _ai_call(prompt, model="claude-haiku-4-5", max_tokens=2000):
+    text, err, _ = _ai_call_full(prompt, model=model, max_tokens=max_tokens)
+    return text, err
+
+def _ai_call_json_full(prompt, model="claude-sonnet-4-6", max_tokens=8000):
+    """回傳(result, err, stop_reason)。stop_reason=="max_tokens"時代表輸出被截斷，
+    就算JSON剛好還能解析出來，內容本身也可能不完整，呼叫端應視為需要人工複檢。"""
+    text, err, stop_reason = _ai_call_full(prompt, model=model, max_tokens=max_tokens)
     if err:
-        return None, err
+        return None, err, stop_reason
     m = re.search(r'\{[\s\S]*\}', text)
     if not m:
-        return None, f"AI 回傳格式錯誤：{text[:300]}"
+        return None, f"AI 回傳格式錯誤：{text[:300]}", stop_reason
     try:
-        return json.loads(m.group()), ""
+        return json.loads(m.group()), "", stop_reason
     except Exception as e:
-        return None, f"JSON 解析失敗：{e}；原文：{text[:300]}"
+        return None, f"JSON 解析失敗：{e}；原文：{text[:300]}", stop_reason
+
+def _ai_call_json(prompt, model="claude-sonnet-4-6", max_tokens=8000):
+    result, err, _ = _ai_call_json_full(prompt, model=model, max_tokens=max_tokens)
+    return result, err
 
 def _ai_call_json_array(prompt, model="claude-sonnet-4-6", max_tokens=6000):
     text, err = _ai_call(prompt, model=model, max_tokens=max_tokens)
@@ -1434,7 +2234,7 @@ DEFAULT_GENERATE_PROMPT = """你是台灣SEO/GEO/AEO內容策略專家與文案�
 主關鍵字：[[MAIN_KEYWORD]]
 搜尋意圖：[[SEARCH_INTENT]]
 目標客群：[[TARGET_AUDIENCE]]
-對應商品（文章必須導向這些商品，自然提及並建議）：[[RELATED_PRODUCTS]]
+對應商品（文章必須自然導向這些商品，只能從這裡面挑，不可自創其他商品或服務）：[[RELATED_PRODUCTS]]
 禁止偏離方向（絕對不要寫到這些主題或方向）：[[AVOID_DIRECTIONS]]
 CTA方向：[[CTA_DIRECTION]]
 
@@ -1444,68 +2244,61 @@ CTA方向：[[CTA_DIRECTION]]
 品牌SEO規則（重要，整篇文章不可偏離這份規則）：
 [[BRAND_RULE]]
 
-品牌知識庫（真實資料，請優先引用）：
+品牌知識庫（真實資料，只能引用這裡出現的規格/案例/數據，不得自行想像或誇大）：
 [[KNOWLEDGE]]
 
-━━━ 知識庫引用規則（重要） ━━━
-1. 優先引用上面「品牌知識庫」的內容（規格、FAQ、案例、品牌特色），不要憑空想像
-2. 不得虛構案例、數據、認證——如果知識庫沒有相關資料，就用一般專業說明帶過，不要假裝有具體數據或案例
-3. 如果知識庫顯示「沒有符合此品牌/品類的資料」，文章仍要寫完，只是不要編造具體數字或案例去填補
-4. 文章最後（FAQ與CTA之間或CTA之後）新增一個小節，標題為「本篇引用知識庫」：如果有引用，列出引用了哪幾筆資料的標題；如果完全沒有可引用的資料，就寫「本篇未引用品牌知識庫資料，內容為一般專業說明」
+━━━ 資料不足時的處理原則（重要） ━━━
+1. 優先引用「品牌知識庫」的內容，不要憑空想像規格、價格、承重、認證、案例等具體數據
+2. 不影響文章核心結論的次要資訊，資料不足就直接省略，不用為了寫滿硬湊內容
+3. 如果缺少的資料會影響文章的核心結論（例如比較表裡某個關鍵數字、選購建議依據的規格），
+   該處內容請填「待確認」，並在最終輸出JSON的 needs_confirmation 設為 true、
+   confirmation_notes 具體說明哪裡待確認——不要為了讓文章看起來完整就編造內容
+4. 額外用JSON欄位 knowledge_citations（陣列）列出這篇實際引用到的知識庫條目標題，沒有引用就輸出空陣列。
+   這個欄位只存後台紀錄用，不要把它寫進文章正文裡（正文不需要「本篇引用知識庫」這種段落）
 
 ━━━ 品牌規則與目標客群（重要） ━━━
 - 嚴格遵守上面的「禁止偏離方向」，絕對不要往那些方向寫
-- 目標客群是[[TARGET_AUDIENCE]]，全文視角、用詞、案例都要對著這群人寫，不要寫成其他客群會看的內容
-- 文章不能只講知識，必須自然導向「對應商品」，至少安排一段具體的商品導購段落
-- CTA要呼應「CTA方向」，自然引導但不要太硬銷
+- 目標客群是[[TARGET_AUDIENCE]]，全文視角、用詞、案例都要對著這群人寫
+- 文章不能只講知識，要自然帶到「對應商品」的適用情境，但不用特別劃出一整段「商品導購」
+- CTA要呼應「CTA方向」，1~3句話講清楚下一步該做什麼，不要硬銷，也不用刻意寫到很長
 
 ━━━ 第一步：依文章類型規劃架構 ━━━
 [[ARTICLE_TYPE_GUIDE]]
-文章類型只影響語氣與架構重點，下面的GEO結構元素仍然每篇必要。
+不同文章類型該有的架構重點不一樣，不是每篇都要套用同一套固定段落順序——
+依這個主題實際需要的內容來安排先後順序，不需要的內容就不要硬寫。
 
-━━━ 第二步：規劃架構並寫完整文章 ━━━
-從搜尋意圖挑最值得寫、問題導向、適合Google AI Overview與ChatGPT引用的標題。
-主關鍵字「[[MAIN_KEYWORD]]」必須出現在：H1標題、文章開頭第一段、至少1個H2小標。
+━━━ 第二步：用blocks組出文章內容 ━━━
+文章內容不是輸出一整塊HTML或Markdown，而是輸出一個依顯示順序排列的「blocks」陣列，
+每個block是一個物件，type只能是以下10種之一。程式會依type把內容渲染成固定樣式
+（顏色、字級、間距、表格RWD都由程式控制），你只需要決定「寫什麼」跟「用哪個block」，
+不用也不能自己下HTML標籤或CSS：
 
-字數目標公式：(H2數量 + H3數量) × 200字 ± 25%
-範例：4個H2 + 4個H3 = 目標約1600字；6個H2 + 6個H3 = 目標約2400字
-不要為了湊字數填廢話，寧可精簡也不要膨脹。
+- heading：{"type":"heading","level":2或3,"text":"標題文字"}——文章骨架用，主關鍵字「[[MAIN_KEYWORD]]」
+  至少出現在1個heading跟文章第一個paragraph裡
+- paragraph：{"type":"paragraph","text":"一段內容，2~4句，一段一個概念"}
+- summary：{"type":"summary","title":"重點整理","points":["重點1","重點2","重點3"]}——3~5點，
+  適合放在文章開頭快速回答搜尋意圖，不是每篇都必須有
+- table：{"type":"table","caption":"表格說明（可省略）","headers":["欄位1","欄位2"],"rows":[["值1","值2"]]}——
+  只有在確實需要「比較」或「數據對照」時才用，不要為了湊GEO元素硬塞表格；每列的欄數要跟headers數量一致
+- takeaway：{"type":"takeaway","text":"這一段的結論，一句話講重點"}——可以放在某個重點小節結尾，不用每節都放
+- note：{"type":"note","text":"提醒或補充說明，例如待確認事項、注意事項"}——不強制數量，沒有要提醒的就不用放
+- list：{"type":"list","ordered":true或false,"items":["項目1","項目2"]}——步驟或條列重點時用
+- faq：{"type":"faq","items":[{"q":"問題","a":"答案"}]}——3~5題，只放讀者真的會搜尋、前面內容還沒完整回答過的問題；
+  如果這篇主題不適合放FAQ，可以完全不放這個block
+- related_links：{"type":"related_links","items":[{"text":"連結文字","url":""}]}——url欄位不確定實際網址就留空字串，
+  絕對不要自己編網址，程式會依後台已確認的連結資料補上或直接移除
+- cta：{"type":"cta","text":"1~3句話講清楚下一步該做什麼，呼應CTA方向","url":"","label":"按鈕文字，例如：立即詢價"}——
+  全文只需要1個，放在文章最後；url留空，程式會自動補上品牌設定的連結
 
-━━━ 固定輸出結構（每篇必要，依序） ━━━
-1. Meta Title
-2. Meta Description
-3. H1標題
-4. 前言（直接回答搜尋意圖）
-5. 主要內容段落（依文章類型規劃，至少2個H2）
-6. 表格或條列比較（HTML <table>或<ul><li>）
-7. 商品導購段落（自然提及「對應商品」，說明適用情境）
-8. 品牌定位段落（簡述[[BRAND_NAME]]的定位與優勢，呼應品牌SEO規則）
-9. FAQ（至少5題，<h3>寫問題，每題80~120字直接回答）
-10. CTA結尾（呼應CTA方向，至少80字）
-11. 建議內部連結（列出2~3個可以連結的相關主題，例如：xx怎麼選、xx比較）
-12. 對應商品建議（重複列出本篇對應的商品，方便編輯加商品連結）
-13. 主關鍵字與長尾關鍵字（列出本篇用到的主關鍵字與3~5個長尾關鍵字）
-
-━━━ GEO結構元素（每篇必要） ━━━
-1. 至少1個比較表或數據表（用HTML <table><tr><th><td>標籤，AI可直接引用）
-2. 至少2個定義段落，格式：<blockquote><strong>詞彙</strong>：解釋其實際意義與用途</blockquote>
-3. 至少2個條列清單（步驟、重點、注意事項，每點一個概念，用<ul><li>或<ol><li>標籤）
-4. 倒金字塔結構：每個H2開頭先給結論，再展開說明
-
-━━━ EEAT佔位符規則 ━━━
-僅在真的缺乏具體資料時使用，每1000字最多1個，一般性陳述不需要。
-三種格式，依情境選一：
-【待補充：實際數據——例：價格區間、市場行情】
-【待補充：第一手觀點——例：專業建議、施工經驗】
-【待補充：法規資訊——例：適用法規、官方來源】
+不需要每種type都用到，也沒有固定順序或固定數量，依這篇文章實際需要的內容安排。不要自創第11種type，
+不要寫「品牌定位」這種獨立自我介紹段落，品牌調性自然融入內容語氣就好。
 
 ━━━ 語言與品質規範 ━━━
 - 台灣用語：「軟體」非「軟件」、「影片」非「視頻」、「品質」非「質量」
-- 用具體數字代替模糊描述（「NT$3萬起」而非「價格不便宜」）
+- 用具體數字代替模糊描述（「NT$3萬起」而非「價格不便宜」），但數字必須來自品牌知識庫，不能自己編
 - 不寫「保證」「最好」「絕對」「100%」，不虛構數據或案例
-- 一段2~4句，一段一個概念，不堆砌形容詞
 - 不要寫得太空泛、太像罐頭AI文章——多用具體場景、具體數字、具體商品名稱
-- FAQ要對應真實搜尋問題，不要硬湊
+- 不要為了湊字數塞廢話，該精簡就精簡，寧可短一點也不要膨脹
 
 輸出格式（只輸出JSON，不要其他文字，不要markdown code block）：
 {
@@ -1514,9 +2307,12 @@ CTA方向：[[CTA_DIRECTION]]
   "meta_title": "Meta Title（含品牌名，60字以內）",
   "meta_description": "Meta Description（120字以內，含關鍵字與品牌名）",
   "ai_summary": "AI Overview摘要，100~200字，純文字，包含1~2個關鍵數字或結論",
-  "internal_links": "建議內部連結，逗號分隔，2~3個",
+  "internal_links": "建議內部連結主題，逗號分隔，2~3個",
   "long_tail_keywords": "長尾關鍵字，逗號分隔，3~5個",
-  "content": "完整文章內容，純HTML格式（用<h2><h3><p><table><ul><ol><li><blockquote><strong>標籤），絕對不要用Markdown符號（不要##、不要**、不要>開頭的引用），這樣才能直接貼到網站後台的HTML/原始碼模式正常顯示，不需要再轉換。內容裡要包含上面13點固定結構（Meta部分已經是獨立欄位不用再放進content，從H1開始放進content即可）"
+  "knowledge_citations": ["引用的知識庫條目標題"],
+  "needs_confirmation": true或false,
+  "confirmation_notes": "哪些地方標了待確認、為什麼，沒有就空字串",
+  "blocks": [ {"type":"heading","level":2,"text":"..."} ]
 }"""
 
 def _get_prompt_template(key, default):
@@ -1706,6 +2502,7 @@ SIDEBAR_ITEMS = [
     ("seo-keyword-map", "🗺️ 關鍵字地圖",    "/admin/seo/keyword-map"),
     ("seo-settings",       "⚙️ Prompt 設定",    "/admin/seo-settings"),
     ("seo-article-import", "📥 批次匯入舊文章", "/admin/seo-article-import"),
+    ("seo-auto-publish",   "🤖 每日自動發文",   "/admin/seo-auto-publish"),
 ]
 
 SHELL_CLOSE = "</div></div></div>"
@@ -2106,6 +2903,19 @@ textarea{resize:vertical;line-height:1.7}
       {% endfor %}
     </select>
   </div>
+  {% if a %}
+  <div class="section" style="border:2px solid {{ '#2e7d32' if publish_ok else '#c62828' }}">
+    <label style="font-size:13px;color:#555;font-weight:800">📋 發布前檢查</label>
+    {% if publish_ok %}
+    <div style="color:#2e7d32;font-weight:700;font-size:13px">✅ 通過所有檢查，可以發布</div>
+    {% else %}
+    <div style="color:#c62828;font-weight:700;font-size:13px;margin-bottom:6px">❌ 尚未通過發布前檢查（{{ publish_errors|length }} 項）</div>
+    <ul style="font-size:12px;color:#c62828;padding-left:18px;line-height:1.8;margin:0">
+      {% for e in publish_errors %}<li>{{ e }}</li>{% endfor %}
+    </ul>
+    {% endif %}
+  </div>
+  {% endif %}
   <div class="section">
     <label>主關鍵字</label>
     <input type="text" name="main_keyword" value="{{ extra.main_keyword or '' }}">
@@ -2158,13 +2968,32 @@ textarea{resize:vertical;line-height:1.7}
     <textarea name="ai_summary" rows="4">{{ a[6] if a else '' }}</textarea>
   </div>
   <div class="section">
-    <label>文章內容</label>
+    <label>文章內容{% if a and a[11] %}（僅供備份查閱，這篇文章是新版blocks版型）{% endif %}</label>
+    {% if a and a[11] %}
+    <div style="background:#fff3cd;border:1px solid #ffe69c;color:#664d03;padding:8px 10px;border-radius:6px;font-size:12px;margin-bottom:6px">
+      ⚠️ 這篇文章使用新版blocks版型，實際預覽／複製HTML／發布出去的內容一律是即時從blocks渲染的結果，
+      跟下面這個content欄位無關。這裡改了不會反映在預覽或發布結果上，只是舊格式的備份欄位。
+    </div>
+    {% endif %}
     <textarea name="content" rows="24">{{ a[5] if a else '' }}</textarea>
   </div>
   <button class="btn" type="submit">儲存</button>
 </form>
 
 {% if a %}
+<div class="section">
+  <label style="font-size:13px;color:#555;font-weight:800">👁 版型預覽 / 複製 HTML</label>
+  <div style="display:flex;gap:10px;flex-wrap:wrap;margin-top:6px">
+    <a class="btn btn-outline" href="/admin/seo/article/{{ a[0] }}/preview?key={{ key }}&device=desktop" target="_blank">🖥 桌機預覽</a>
+    <a class="btn btn-outline" href="/admin/seo/article/{{ a[0] }}/preview?key={{ key }}&device=mobile" target="_blank">📱 手機預覽</a>
+    <button class="btn btn-outline" type="button" onclick="copyRenderedHtml({{ a[0] }}, false)">複製HTML（正式版）</button>
+    <button class="btn btn-outline" type="button" onclick="copyRenderedHtml({{ a[0] }}, true)">複製HTML（inline版）</button>
+  </div>
+  <div style="font-size:11px;color:#999;margin-top:6px">正式版含 &lt;style&gt; 區塊，適合能保留 CSS 的編輯器；inline 版把樣式寫在每個標籤上，適合會過濾 &lt;style&gt; 的編輯器。</div>
+  <div class="err" id="preview-copy-err"></div>
+  <div id="preview-copy-ok" style="display:none;font-size:12px;color:#2e7d32;margin-top:4px">✅ 已複製到剪貼簿</div>
+</div>
+
 <div class="section">
   <label style="font-size:13px;color:#555;font-weight:800">🚀 發布到 EasyStore</label>
   {% if a[9] %}
@@ -2375,8 +3204,56 @@ function copyCode(elId){
     el.style.background='#e8f5e9'; setTimeout(function(){el.style.background='#f5f5f5';},1200);
   });
 }
+async function copyRenderedHtml(articleId, inline){
+  document.getElementById('preview-copy-err').textContent = '';
+  document.getElementById('preview-copy-ok').style.display = 'none';
+  try {
+    const res = await fetch('/admin/seo/article/' + articleId + '/rendered-html?key=' + encodeURIComponent(KEY) + '&inline=' + (inline ? '1' : '0'));
+    const data = await safeJson(res);
+    if (data.error) { document.getElementById('preview-copy-err').textContent = data.error; return; }
+    await navigator.clipboard.writeText(data.html || '');
+    document.getElementById('preview-copy-ok').style.display = 'block';
+    setTimeout(function(){ document.getElementById('preview-copy-ok').style.display = 'none'; }, 2000);
+  } catch(e) {
+    document.getElementById('preview-copy-err').textContent = String(e.message || e);
+  }
+}
 </script>
 """ + SHELL_CLOSE + """
+</body></html>"""
+
+ARTICLE_PREVIEW_HTML = """<!DOCTYPE html>
+<html lang="zh-TW"><head><meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>預覽：{{ title }}</title>
+<style>
+*{box-sizing:border-box}
+body{font-family:-apple-system,sans-serif;background:#e9ecef;margin:0;padding:20px}
+.toolbar{max-width:900px;margin:0 auto 16px;display:flex;gap:10px;align-items:center}
+.toolbar button{padding:8px 16px;border:1px solid #999;border-radius:8px;background:#fff;cursor:pointer;font-size:13px}
+.toolbar button.active{background:#0d6efd;color:#fff;border-color:#0d6efd}
+.toolbar .hint{font-size:12px;color:#888;margin-left:6px}
+#frame-outer{display:flex;justify-content:center}
+#frame{background:#fff;transition:width .2s;box-shadow:0 2px 10px rgba(0,0,0,.1);min-height:200px;width:100%}
+#frame.desktop{max-width:900px;width:100%}
+#frame.mobile{max-width:390px;width:390px}
+</style></head><body>
+<div class="toolbar">
+  <button id="btn-desktop" onclick="setDevice('desktop')">🖥 桌機</button>
+  <button id="btn-mobile" onclick="setDevice('mobile')">📱 手機</button>
+  <span class="hint">預覽與正式輸出使用同一套渲染邏輯</span>
+</div>
+<div id="frame-outer"><div id="frame" class="{{ device }}">
+{{ body_html|safe }}
+</div></div>
+<script>
+function setDevice(d){
+  document.getElementById('frame').className = d;
+  document.getElementById('btn-desktop').classList.toggle('active', d==='desktop');
+  document.getElementById('btn-mobile').classList.toggle('active', d==='mobile');
+}
+setDevice({{ device|tojson }});
+</script>
 </body></html>"""
 
 TRACKING_HTML = """<!DOCTYPE html>
@@ -3255,6 +4132,37 @@ textarea{width:100%;border:1px solid #ddd;border-radius:8px;padding:8px 10px;fon
     </form>
     {% else %}
     <div class="hint2">目前沒有品牌資料（brand_profiles 是空的）。</div>
+    {% endfor %}
+  </div>
+  <div class="section">
+    <h3 style="font-size:15px;margin-bottom:6px">品牌視覺主題 ／ 相容品牌 ／ CTA連結</h3>
+    <div class="hint2">
+      視覺主題：套用在文章的H2底線、表格表頭、重點區塊、CTA背景色。「已確認正式品牌色」沒勾＝暫定中性色，文章會照樣渲染但代表這組顏色還沒被認定是正式品牌色。<br>
+      相容品牌：guardrail預設禁止提到其他品牌名稱，這裡逗號分隔列出「已確認相容」的品牌/型號（例如濾網相容的家電廠牌），才會放行提及（僅限相容性說明，不得暗示原廠授權）。<br>
+      CTA連結：文章CTA區塊的預設連結網址，AI不會自己編網址，一律用這裡設定的網址。
+    </div>
+    {% for b in brands_theme %}
+    <form method="POST" action="/admin/seo-brand-rules/theme/save?key={{ key }}" class="brand-allowed-row">
+      <input type="hidden" name="brand_key" value="{{ b.key }}">
+      <label>{{ b.name }}（{{ b.key }}）</label>
+      <div style="display:flex;gap:14px;flex-wrap:wrap;align-items:flex-end;margin-top:6px">
+        <div><label style="margin-top:0">主色 primary</label><input type="color" name="primary_color" value="{{ b.primary_color }}"></div>
+        <div><label style="margin-top:0">輔色 accent</label><input type="color" name="accent_color" value="{{ b.accent_color }}"></div>
+        <div><label style="margin-top:0">底色 bg</label><input type="color" name="bg_color" value="{{ b.bg_color }}"></div>
+        <div style="display:flex;align-items:center;gap:6px;padding-bottom:8px">
+          <input type="checkbox" name="confirmed" {{ 'checked' if b.confirmed else '' }} style="width:16px;height:16px">
+          <span style="font-size:12px;color:#666">已確認為正式品牌色{{ '' if b.confirmed else '（目前：暫定中性色）' }}</span>
+        </div>
+      </div>
+      <label>相容品牌／型號（逗號分隔，留空＝完全禁止提及其他品牌）</label>
+      <textarea name="compatible_brands" rows="1" placeholder="例如：Dyson,LG,Panasonic">{{ b.compatible_brands }}</textarea>
+      <label>CTA連結網址</label>
+      <input type="text" name="cta_url" value="{{ b.cta_url }}" placeholder="https://... 或 /pages/contact" style="width:100%;border:1px solid #ddd;border-radius:8px;padding:8px 10px;font-size:13px">
+      <button class="btn" type="submit" style="margin-top:10px">儲存主題設定</button>
+      <a class="btn" style="margin-top:10px;margin-left:8px;background:#666" href="/admin/seo-brand-preview/{{ b.key }}?key={{ key }}" target="_blank">👁 預覽版型</a>
+    </form>
+    {% else %}
+    <div class="hint2">目前沒有品牌資料。</div>
     {% endfor %}
   </div>
   <div class="section">
@@ -4156,7 +5064,8 @@ def seo_article_edit(aid):
     ok, key = check_auth()
     if not ok:
         return render_template_string(LOGIN_HTML, error=None)
-    a = _q("""SELECT id,title,slug,meta_title,meta_description,content,ai_summary,status,extra,easystore_article_id
+    a = _q("""SELECT id,title,slug,meta_title,meta_description,content,ai_summary,status,extra,easystore_article_id,
+              brand_key,blocks
               FROM seo_articles WHERE id=%s""", (aid,), fetch="one")
     if not a:
         abort(404)
@@ -4170,10 +5079,59 @@ def seo_article_edit(aid):
                            for r in rows if _parse_extra(r[2]).get("seo_role") == "pillar"]
     except Exception:
         pass
+    try:
+        publish_ok, publish_errors = _validate_article_for_publish(aid)
+    except Exception as e:
+        publish_ok, publish_errors = False, [f"檢查時發生錯誤：{e}"]
     shell = _shell_open(key, "seo", [("文章管理", "/admin/seo"), ("編輯文章", None)])
     return render_template_string(ARTICLE_HTML, key=key, shell=shell, a=a, extra=extra, default_title="",
         article_status=ARTICLE_STATUS, article_status_labels=ARTICLE_STATUS_LABELS,
-        next_action_options=NEXT_ACTION_OPTIONS, pillar_articles=pillar_articles)
+        next_action_options=NEXT_ACTION_OPTIONS, pillar_articles=pillar_articles,
+        publish_ok=publish_ok, publish_errors=publish_errors)
+
+def _render_article_output_html(aid, inline):
+    row = _q("SELECT blocks, brand_key, content FROM seo_articles WHERE id=%s", (aid,), fetch="one")
+    if not row:
+        return None
+    blocks_json, brand_key, content = row
+    try:
+        blocks = json.loads(blocks_json) if blocks_json else []
+    except Exception:
+        blocks = []
+    if blocks:
+        theme = _get_brand_theme(brand_key)
+        # 跟_validate_article_for_publish用同一套連結重新解析，確保預覽/複製HTML/實際發布三者
+        # 看到的是同一份「現在」有效的連結，不會出現驗證時擋掉的連結卻還留在畫面上的情況。
+        resolved_blocks, _ = _resolve_block_links(blocks, brand_key)
+        return _render_blocks_html(resolved_blocks, theme, inline=inline)
+    return content or ""
+
+@seo_bp.route("/admin/seo/article/<int:aid>/preview")
+def seo_article_preview(aid):
+    ok, key = check_auth()
+    if not ok:
+        return render_template_string(LOGIN_HTML, error=None)
+    row = _q("SELECT title FROM seo_articles WHERE id=%s", (aid,), fetch="one")
+    if not row:
+        abort(404)
+    device = request.args.get("device", "desktop")
+    if device not in ("desktop", "mobile"):
+        device = "desktop"
+    body_html = _render_article_output_html(aid, inline=False)
+    if body_html is None:
+        abort(404)
+    return render_template_string(ARTICLE_PREVIEW_HTML, title=row[0], body_html=body_html, device=device)
+
+@seo_bp.route("/admin/seo/article/<int:aid>/rendered-html")
+def seo_article_rendered_html(aid):
+    ok, key = check_auth()
+    if not ok:
+        return jsonify({"error": "unauthorized"}), 403
+    inline = request.args.get("inline") == "1"
+    html_out = _render_article_output_html(aid, inline=inline)
+    if html_out is None:
+        return jsonify({"error": "找不到文章"}), 404
+    return jsonify({"html": html_out})
 
 @seo_bp.route("/admin/seo/article/save", methods=["POST"])
 def seo_article_save():
@@ -4188,9 +5146,28 @@ def seo_article_save():
                    "seo_role": f.get("seo_role", ""), "longtail_keywords": f.get("longtail_keywords", ""),
                    "search_intent": f.get("search_intent", ""), "pillar_article_id": f.get("pillar_article_id", "")}
     if aid:
-        existing = _q("SELECT extra FROM seo_articles WHERE id=%s", (aid,), fetch="one")
+        existing = _q("SELECT extra, title, content, meta_title, meta_description FROM seo_articles WHERE id=%s",
+                      (aid,), fetch="one")
         extra = _parse_extra(existing[0] if existing else None)
+        old_title = existing[1] if existing else ""
+        old_content = existing[2] if existing else ""
+        old_meta_title = existing[3] if existing else ""
+        old_meta_desc = existing[4] if existing else ""
+        old_related_products = extra.get("related_products", "")
         extra.update(extra_patch)
+        # blocks/brand_key目前這個表單沒有欄位可以改，所以不需要在這裡比對；
+        # 真正的權威判斷是_validate_article_for_publish裡用完整欄位重算的指紋，這裡只是讓
+        # 使用者存檔後馬上在畫面上看到「需要重新檢查」，不用等到按發布才知道。
+        content_changed = (f.get("title", "") != (old_title or "")
+                            or f.get("content", "") != (old_content or "")
+                            or f.get("meta_title", "") != (old_meta_title or "")
+                            or f.get("meta_description", "") != (old_meta_desc or "")
+                            or extra_patch.get("related_products", "") != old_related_products)
+        if content_changed and extra.get("quality_check"):
+            # 內容／標題／Meta／對應商品改過，舊的AI品質檢查結果不再代表現在的內容，清掉逼重新檢查才能發布
+            extra.pop("quality_check", None)
+            extra.pop("ai_score", None)
+            extra.pop("quality_check_fingerprint", None)
         published_at_sql = ", published_at=CASE WHEN status!='published' AND %s='published' THEN %s ELSE published_at END"
         _q(f"""UPDATE seo_articles SET title=%s, slug=%s, meta_title=%s, meta_description=%s,
                content=%s, ai_summary=%s, status=%s, extra=%s, updated_at=%s {published_at_sql}
@@ -4768,8 +5745,10 @@ def seo_brand_rules_page():
         return render_template_string(LOGIN_HTML, error=None)
     rules = _list_brand_rules()
     brands_allowed = _list_brands_with_allowed()
+    brands_theme = _list_brands_with_theme()
     shell = _shell_open(key, "seo-brand-rules", [("品牌SEO規則", None)])
-    return render_template_string(BRAND_RULES_LIST_HTML, key=key, shell=shell, rules=rules, brands_allowed=brands_allowed)
+    return render_template_string(BRAND_RULES_LIST_HTML, key=key, shell=shell, rules=rules,
+                                   brands_allowed=brands_allowed, brands_theme=brands_theme)
 
 @seo_bp.route("/admin/seo-brand-rules/allowed/save", methods=["POST"])
 def seo_brand_allowed_save():
@@ -4779,6 +5758,33 @@ def seo_brand_allowed_save():
     _save_brand_allowed(request.form.get("brand_key", ""), request.form.get("allowed_products", ""),
                          request.form.get("allowed_services", ""))
     return redirect(f"/admin/seo-brand-rules?key={key}")
+
+@seo_bp.route("/admin/seo-brand-rules/theme/save", methods=["POST"])
+def seo_brand_theme_save():
+    ok, key = check_auth()
+    if not ok:
+        abort(403)
+    brand_key = request.form.get("brand_key", "")
+    _save_brand_theme(brand_key,
+                       request.form.get("primary_color", "") or DEFAULT_NEUTRAL_THEME["primary_color"],
+                       request.form.get("accent_color", "") or DEFAULT_NEUTRAL_THEME["accent_color"],
+                       request.form.get("bg_color", "") or DEFAULT_NEUTRAL_THEME["bg_color"],
+                       request.form.get("confirmed") == "on")
+    _save_brand_compat_cta(brand_key, request.form.get("compatible_brands", ""), request.form.get("cta_url", ""))
+    return redirect(f"/admin/seo-brand-rules?key={key}")
+
+@seo_bp.route("/admin/seo-brand-preview/<brand_key>")
+def seo_brand_preview(brand_key):
+    ok, key = check_auth()
+    if not ok:
+        return render_template_string(LOGIN_HTML, error=None)
+    device = request.args.get("device", "desktop")
+    if device not in ("desktop", "mobile"):
+        device = "desktop"
+    theme = _get_brand_theme(brand_key)
+    body_html = _render_blocks_html(SAMPLE_PREVIEW_BLOCKS, theme, inline=False)
+    return render_template_string(ARTICLE_PREVIEW_HTML, title=f"版型預覽（{brand_key}，範例內容非真實文章）",
+                                   body_html=body_html, device=device)
 
 @seo_bp.route("/admin/seo-brand-rules/item/new")
 def seo_brand_rule_new():
@@ -4835,6 +5841,143 @@ def seo_brand_rules_import_confirm():
         import sys; print(f"[SEO Brand Rules Import Error] {e}", file=sys.stderr)
         return jsonify({"error": f"寫入失敗：{_safe_job_error_msg(e)}"}), 200
     return jsonify({"inserted": inserted, "updated": updated, "failed": failed, "errors": errors})
+
+AUTO_PUBLISH_HTML = """<!DOCTYPE html>
+<html lang="zh-TW"><head><meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>每日自動發文</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:-apple-system,sans-serif;background:#f5f5f5;color:#333}
+""" + SIDEBAR_CSS + """
+.container{max-width:900px;margin:24px auto;padding:0 16px}
+.section{background:#fff;border-radius:14px;padding:20px;margin-bottom:20px;box-shadow:0 1px 4px rgba(0,0,0,.08)}
+.hint2{font-size:12px;color:#999;margin-bottom:14px;line-height:1.6}
+label{font-size:12px;color:#888;font-weight:700;display:block;margin-bottom:5px;margin-top:10px}
+label:first-child{margin-top:0}
+input[type=number]{border:1px solid #ddd;border-radius:8px;padding:8px 10px;font-size:13px;width:120px}
+.btn{padding:9px 16px;background:#0d6efd;color:#fff;border:none;border-radius:6px;font-size:13px;font-weight:700;cursor:pointer}
+.btn-outline{padding:9px 16px;background:#fff;color:#0d6efd;border:1px solid #0d6efd;border-radius:6px;font-size:13px;font-weight:700;cursor:pointer}
+.switch-row{display:flex;align-items:center;gap:10px;margin-bottom:6px}
+table{width:100%;border-collapse:collapse;font-size:13px;margin-top:6px}
+th,td{text-align:left;padding:8px 6px;border-bottom:1px solid #f0f0f0;vertical-align:top}
+th{color:#888;font-weight:600;font-size:11px;text-transform:uppercase}
+.status-done{color:#2e7d32;font-weight:700}
+.status-error{color:#c62828;font-weight:700}
+.status-running{color:#f57c00;font-weight:700}
+</style></head><body>
+{{ shell|safe }}
+<div class="container">
+  <div class="section">
+    <h3 style="font-size:15px;margin-bottom:6px">每日自動發文設定</h3>
+    <div class="hint2">流程：從「主題機會池」挑選狀態為「已確認」的主題（依SEO分數排序）→ AI生成草稿 → AI品質檢查 → 只有檢查結果是「可發布」才自動發到 EasyStore，沒過關的留在文章列表等人工審稿，不會硬發。每天固定時間（台北時區）背景執行一次。</div>
+    {% if not easystore_token_set %}
+    <div class="hint2" style="color:#c62828;font-weight:700">⚠️ 尚未設定 EASYSTORE_ACCESS_TOKEN 環境變數，就算開啟自動發文，發布步驟也會失敗（AI生成與品質檢查仍會照常執行，文章會留在草稿等你手動發）。</div>
+    {% endif %}
+    <form method="POST" action="/admin/seo-auto-publish/save?key={{ key }}">
+      <div class="switch-row">
+        <input type="checkbox" id="enabled" name="enabled" {{ 'checked' if settings.enabled else '' }} style="width:18px;height:18px">
+        <label for="enabled" style="margin:0">啟用每日自動發文</label>
+      </div>
+      <label>每天發布篇數</label>
+      <input type="number" name="daily_count" min="1" max="10" value="{{ settings.daily_count }}">
+      <label>執行時間（台北時區，24小時制）</label>
+      <input type="number" name="hour_taipei" min="0" max="23" value="{{ settings.hour_taipei }}">
+      <div style="margin-top:16px">
+        <button class="btn" type="submit">儲存設定</button>
+      </div>
+    </form>
+  </div>
+  <div class="section">
+    <h3 style="font-size:15px;margin-bottom:6px">立即測試</h3>
+    <div class="hint2">不用等到設定的執行時間，馬上跑一次今天的自動發文（用來測試流程，不影響上面「每天一次」的排程判斷）。</div>
+    <button class="btn-outline" id="btn-run-now" onclick="runNow()" type="button">▶ 立即執行一次</button>
+    <span id="run-now-msg" style="font-size:13px;margin-left:10px;color:#2e7d32"></span>
+  </div>
+  <div class="section">
+    <h3 style="font-size:15px;margin-bottom:12px">執行紀錄</h3>
+    {% if not runs %}
+    <div class="hint2">還沒有執行紀錄。</div>
+    {% endif %}
+    <table>
+      <tr><th>日期</th><th>狀態</th><th>結果摘要</th></tr>
+      {% for r in runs %}
+      <tr>
+        <td>{{ r.run_date }}</td>
+        <td class="status-{{ r.status }}">{{ r.status }}</td>
+        <td>
+          {% if r.summary.note %}<div>{{ r.summary.note }}</div>{% endif %}
+          {% if r.summary.error %}<div style="color:#c62828">{{ r.summary.error }}</div>{% endif %}
+          {% for t in r.summary.topics %}
+          <div>【{{ t.topic }}】{{ t.result }}{% if t.ai_score is defined %}（AI分數：{{ t.ai_score }}）{% endif %}</div>
+          {% endfor %}
+        </td>
+      </tr>
+      {% endfor %}
+    </table>
+  </div>
+</div>
+<script>
+async function runNow(){
+  const btn = document.getElementById('btn-run-now');
+  const msg = document.getElementById('run-now-msg');
+  btn.disabled = true; msg.style.color = '#666'; msg.textContent = '執行中，請稍候…';
+  try {
+    const res = await fetch('/admin/seo-auto-publish/run-now?key={{ key }}', {method: 'POST'});
+    const data = await res.json();
+    if (data.error) { msg.style.color = '#c62828'; msg.textContent = data.error; }
+    else { msg.style.color = '#2e7d32'; msg.textContent = '執行完成，重新整理頁面看結果'; setTimeout(() => location.reload(), 1200); }
+  } catch(e) {
+    msg.style.color = '#c62828'; msg.textContent = String(e.message || e);
+  } finally {
+    btn.disabled = false;
+  }
+}
+</script>
+""" + SHELL_CLOSE + """
+</body></html>"""
+
+@seo_bp.route("/admin/seo-auto-publish")
+def seo_auto_publish_page():
+    ok, key = check_auth()
+    if not ok:
+        return render_template_string(LOGIN_HTML, error=None)
+    settings = _get_auto_publish_settings()
+    rows = _q("""SELECT run_date, status, summary FROM seo_auto_publish_runs
+                 ORDER BY run_date DESC LIMIT 30""", fetch="all") or []
+    runs = [{"run_date": r[0], "status": r[1], "summary": _parse_extra(r[2])} for r in rows]
+    shell = _shell_open(key, "seo-auto-publish", [("每日自動發文", None)])
+    return render_template_string(AUTO_PUBLISH_HTML, key=key, shell=shell, settings=settings, runs=runs,
+        easystore_token_set=bool(EASYSTORE_ACCESS_TOKEN))
+
+@seo_bp.route("/admin/seo-auto-publish/save", methods=["POST"])
+def seo_auto_publish_save():
+    ok, key = check_auth()
+    if not ok:
+        abort(403)
+    enabled = request.form.get("enabled") == "on"
+    try:
+        daily_count = max(1, min(10, int(request.form.get("daily_count", 2))))
+    except ValueError:
+        daily_count = 2
+    try:
+        hour_taipei = max(0, min(23, int(request.form.get("hour_taipei", 9))))
+    except ValueError:
+        hour_taipei = 9
+    _save_auto_publish_settings(enabled, daily_count, hour_taipei)
+    return redirect(f"/admin/seo-auto-publish?key={key}")
+
+@seo_bp.route("/admin/seo-auto-publish/run-now", methods=["POST"])
+def seo_auto_publish_run_now():
+    ok, _ = auth_required()
+    if not ok:
+        return jsonify({"error": "unauthorized"}), 403
+    settings = _get_auto_publish_settings()
+    run_date = "manual-" + datetime.now(TAIPEI_TZ).strftime("%Y-%m-%dT%H:%M:%S")
+    _q("INSERT INTO seo_auto_publish_runs (run_date, status, created_at, updated_at) VALUES (%s,'running',%s,%s)",
+       (run_date, time.time(), time.time()))
+    _run_daily_auto_publish(run_date, settings)
+    return jsonify({"ok": True, "run_date": run_date})
 
 @seo_bp.route("/admin/seo-settings")
 def seo_settings_page():
@@ -4936,11 +6079,25 @@ def _run_generate_job(job_id, brand_key, category, topic, analysis, opp_id=None,
         brand_rule_mode, brand_rule = _resolve_brand_rule(brand_key, category, fields)
         resolved_fields, _ = _resolve_generate_fields(fields, brand_rule)
         prompt = _generate_article_prompt(brand, category, topic, analysis, knowledge_items, fields, brand_rule)
-        result, err = _ai_call_json(prompt, model="claude-sonnet-4-6", max_tokens=8000)
+        result, err, stop_reason = _ai_call_json_full(prompt, model="claude-sonnet-4-6", max_tokens=8000)
         if err:
             _q("UPDATE seo_generate_jobs SET status='error', error_msg=%s, updated_at=%s WHERE id=%s",
                (f"AI生成失敗：{err}", time.time(), job_id))
             return
+        truncated = (stop_reason == "max_tokens")
+        blocks = result.get("blocks") or []
+        blocks_errors = _validate_blocks_schema(blocks)
+        if truncated:
+            blocks_errors = (blocks_errors or []) + ["AI回應被截斷（達max_tokens），內容可能不完整"]
+        theme = _get_brand_theme(brand_key)
+        if blocks_errors:
+            resolved_blocks, missing_links = blocks, []
+            content_html = ""
+        else:
+            resolved_blocks, missing_links = _resolve_block_links(blocks, brand_key)
+            content_html = _render_blocks_html(resolved_blocks, theme, inline=False)
+        needs_confirmation = bool(result.get("needs_confirmation")) or bool(missing_links) or bool(blocks_errors)
+        has_placeholder = _content_has_placeholder(_blocks_to_plain_text(resolved_blocks))
         now = time.time()
         extra = _dump_extra({
             "main_keyword": fields.get("main_keyword", ""),
@@ -4956,14 +6113,26 @@ def _run_generate_job(job_id, brand_key, category, topic, analysis, opp_id=None,
             "brand_rule_applied": bool(brand_rule),
             "brand_rule_id": brand_rule.get("id") if brand_rule else None,
             "next_action": "AI檢查",
+            "blocks_version": BLOCKS_SCHEMA_VERSION,
+            "blocks_errors": blocks_errors,
+            "missing_links": missing_links,
+            "needs_confirmation": needs_confirmation,
+            "confirmation_notes": result.get("confirmation_notes", ""),
+            "knowledge_citations": result.get("knowledge_citations", []),
+            "truncated": truncated,
+            "has_placeholder_text": has_placeholder,
         })
+        # 生成階段有任何程式檢查沒過（blocks格式錯誤/截斷/缺連結/資料不足待確認/殘留待補充文字），
+        # 一律先落在needs_revision，不能直接進draft_review的AI覆檢排隊——避免半成品文章混進正常審稿流程
+        gen_status = "needs_revision" if (blocks_errors or needs_confirmation or has_placeholder) else "draft_review"
         new_id = _q("""INSERT INTO seo_articles
-               (title,slug,meta_title,meta_description,content,ai_summary,status,
+               (title,slug,meta_title,meta_description,content,blocks,ai_summary,status,
                 brand_key,category,extra,created_at,updated_at,published_at)
-               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id""",
+               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id""",
            (result.get("title",""), result.get("slug",""), result.get("meta_title",""),
-            result.get("meta_description",""), result.get("content",""), result.get("ai_summary",""),
-            "draft_review", brand_key, category, extra, now, now, 0), fetch="id")
+            result.get("meta_description",""), content_html, json.dumps(resolved_blocks, ensure_ascii=False),
+            result.get("ai_summary",""),
+            gen_status, brand_key, category, extra, now, now, 0), fetch="id")
         _q("""UPDATE seo_generate_jobs SET status='done', article_id=%s, updated_at=%s WHERE id=%s""",
            (new_id, time.time(), job_id))
         if opp_id:
@@ -5611,3 +6780,4 @@ def seo_dashboard_refresh_suggestion():
     return redirect(f"/admin/seo-dashboard?key={key}")
 
 init_seo_db()
+_start_auto_publish_scheduler()
