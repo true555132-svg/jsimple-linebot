@@ -387,6 +387,7 @@ threading.Thread(target=_seed_templates, daemon=True).start()
 def _db_insert_message(entry):
     if not DATABASE_URL:
         return
+    conn = None
     try:
         with _db_lock:
             conn = _pg_conn()
@@ -412,9 +413,14 @@ def _db_insert_message(entry):
             ))
             conn.commit()
             cur.close()
-            conn.close()
     except Exception as e:
         import sys; print(f"[DB Insert Error] {e}", file=sys.stderr)
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
 
 def _db_update_reply_qt(platform: str, user_id: str, time_str: str, reply_qt: str):
     if not DATABASE_URL or not reply_qt:
@@ -443,7 +449,7 @@ def _load_logs_from_db():
             SELECT time,platform,user_id,msg,intent,reply,replied,
                    image_url,sticker_url,sent_by,
                    COALESCE(quote_token,''),COALESCE(reply_quote_token,'')
-            FROM messages ORDER BY id DESC
+            FROM messages ORDER BY id DESC LIMIT 2000
         """)
         rows = cur.fetchall()
         cur.close()
@@ -461,6 +467,100 @@ def _load_logs_from_db():
     except Exception as e:
         import sys; print(f"[DB Load Error] {e}", file=sys.stderr)
         return deque()
+
+def _db_get_conversation(pf, uid, limit=5000):
+    """Fetch one conversation's full history straight from Postgres,
+    independent of the size-capped in-memory message_log cache."""
+    if not DATABASE_URL or not pf or not uid:
+        return []
+    conn = None
+    try:
+        conn = _pg_conn()
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT time,platform,user_id,msg,intent,reply,replied,
+                   image_url,sticker_url,sent_by,
+                   COALESCE(quote_token,''),COALESCE(reply_quote_token,'')
+            FROM messages WHERE platform=%s AND user_id=%s
+            ORDER BY time DESC, id DESC LIMIT %s
+        """, (pf, uid, limit))
+        rows = cur.fetchall()
+        cur.close()
+        rows.reverse()
+        return [{
+            "time": r[0], "platform": r[1], "user_id": r[2],
+            "msg": r[3], "intent": r[4], "reply": r[5],
+            "replied": bool(r[6]), "image_url": r[7] or "",
+            "sticker_url": r[8] or "", "sent_by": r[9] or "",
+            "quote_token": r[10] or "", "reply_quote_token": r[11] or "",
+        } for r in rows]
+    except Exception as e:
+        import sys; print(f"[DB Conv Load Error] {e}", file=sys.stderr)
+        return []
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+def _db_get_conversation_keys():
+    """List every (platform, user_id) that has ever messaged, straight from
+    Postgres, so a conversation can never vanish from the sidebar just
+    because its messages aged out of the size-capped in-memory cache."""
+    if not DATABASE_URL:
+        return []
+    conn = None
+    try:
+        conn = _pg_conn()
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT DISTINCT platform, user_id FROM messages
+            WHERE user_id <> 'ADMIN' AND platform <> 'FB_COMMENT'
+        """)
+        rows = cur.fetchall()
+        cur.close()
+        return [(r[0], r[1]) for r in rows]
+    except Exception as e:
+        import sys; print(f"[DB Conv Keys Error] {e}", file=sys.stderr)
+        return []
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+
+def _db_get_all_conv_summaries():
+    """Single query: last message per conversation. Avoids N+1 DB calls."""
+    if not DATABASE_URL:
+        return []
+    conn = None
+    try:
+        conn = _pg_conn()
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT DISTINCT ON (platform, user_id)
+                platform, user_id, msg, time
+            FROM messages
+            WHERE platform != 'FB_COMMENT'
+              AND user_id != 'ADMIN'
+              AND user_id != ''
+              AND user_id IS NOT NULL
+            ORDER BY platform, user_id, time DESC, id DESC
+        """)
+        rows = cur.fetchall()
+        cur.close()
+        return [{"platform": r[0], "user_id": r[1], "last_msg": r[2] or "", "last_time": r[3] or ""} for r in rows]
+    except Exception as e:
+        import sys; print(f"[DB Conv Summaries Error] {e}", file=sys.stderr)
+        return []
+    finally:
+        if conn is not None:
+            try: conn.close()
+            except: pass
+
 
 def _migrate_json_to_db():
     if not DATABASE_URL:
@@ -502,7 +602,8 @@ def _load_logs():
             pass
     return d
 
-message_log = _load_logs()
+MSG_CACHE_MAXLEN = 2000
+message_log = deque(_load_logs(), maxlen=MSG_CACHE_MAXLEN)
 
 def _save_logs():
     try:
@@ -512,20 +613,26 @@ def _save_logs():
         pass
 
 _sheets_lock = threading.Lock()
+_gc_client = None  # 共用 gspread client，避免每次建立新 session
+
+def _get_gc():
+    global _gc_client
+    if _gc_client is None:
+        import gspread
+        from google.oauth2.service_account import Credentials
+        creds = Credentials.from_service_account_info(
+            json.loads(GOOGLE_SERVICE_ACCOUNT_JSON),
+            scopes=["https://www.googleapis.com/auth/spreadsheets"]
+        )
+        _gc_client = gspread.Client(auth=creds)
+    return _gc_client
 
 def _append_to_sheets(entry):
     if not GOOGLE_SHEET_ID or not GOOGLE_SERVICE_ACCOUNT_JSON:
         return
     with _sheets_lock:
         try:
-            import gspread
-            from google.oauth2.service_account import Credentials
-            creds = Credentials.from_service_account_info(
-                json.loads(GOOGLE_SERVICE_ACCOUNT_JSON),
-                scopes=["https://www.googleapis.com/auth/spreadsheets"]
-            )
-            gc = gspread.Client(auth=creds)
-            ws = gc.open_by_key(GOOGLE_SHEET_ID).sheet1
+            ws = _get_gc().open_by_key(GOOGLE_SHEET_ID).sheet1
             ws.append_row([
                 entry["time"],
                 entry["platform"],
@@ -537,6 +644,8 @@ def _append_to_sheets(entry):
             ])
         except Exception as e:
             import sys
+            global _gc_client
+            _gc_client = None  # 重置 client，下次重建
             print(f"[Sheets Error] {e}", file=sys.stderr)
 
 def log_message(entry):
@@ -549,14 +658,7 @@ def _load_history_from_sheets():
     if not GOOGLE_SHEET_ID or not GOOGLE_SERVICE_ACCOUNT_JSON:
         return
     try:
-        import gspread
-        from google.oauth2.service_account import Credentials
-        creds = Credentials.from_service_account_info(
-            json.loads(GOOGLE_SERVICE_ACCOUNT_JSON),
-            scopes=["https://www.googleapis.com/auth/spreadsheets"]
-        )
-        gc = gspread.Client(auth=creds)
-        ws = gc.open_by_key(GOOGLE_SHEET_ID).sheet1
+        ws = _get_gc().open_by_key(GOOGLE_SHEET_ID).sheet1
         rows = ws.get_all_values()
         loaded = 0
         for row in rows[-800:]:
@@ -724,9 +826,10 @@ def handle_line_message(event):
         messages.append(ImageMessage(original_content_url=image_url, preview_image_url=image_url))
     try:
         with ApiClient(configuration) as api_client:
-            resp, _status, _hdrs = MessagingApi(api_client).reply_message_with_http_info(
+            _api_resp = MessagingApi(api_client).reply_message_with_http_info(
                 ReplyMessageRequest(reply_token=event.reply_token, messages=messages)
             )
+            resp = _api_resp.data if hasattr(_api_resp, "data") else _api_resp
         try:
             sent = getattr(resp, "sent_messages", None) or []
             reply_qt = getattr(sent[0], "quote_token", "") if sent else ""
@@ -1006,17 +1109,42 @@ def line_push_image(user_id: str, image_url: str) -> str:
     return ""
 
 def line_push_file(user_id: str, file_url: str, filename: str, file_size: int = 0) -> str:
+    # LINE Messaging API has no generic "file" message type, so a real file
+    # bubble can't be pushed to a 1:1 chat — use a Flex card with an open link instead.
     url = "https://api.line.me/v2/bot/message/push"
-    payload = json.dumps({"to": user_id, "messages": [{
-        "type": "file", "originalContentUrl": file_url,
-        "fileName": filename, "fileSize": file_size
-    }]}).encode()
+    ext = filename.rsplit(".", 1)[-1].upper() if "." in filename else "FILE"
+    flex = {
+        "type": "flex",
+        "altText": f"📎 {filename}",
+        "contents": {
+            "type": "bubble",
+            "size": "kilo",
+            "body": {
+                "type": "box", "layout": "horizontal", "spacing": "md", "paddingAll": "16px",
+                "contents": [
+                    {"type": "text", "text": "📄", "size": "xxl", "flex": 0},
+                    {"type": "box", "layout": "vertical", "flex": 1, "justifyContent": "center", "contents": [
+                        {"type": "text", "text": filename, "size": "sm", "weight": "bold", "wrap": True, "maxLines": 2},
+                        {"type": "text", "text": ext, "size": "xs", "color": "#999999", "margin": "sm"}
+                    ]}
+                ]
+            },
+            "footer": {
+                "type": "box", "layout": "vertical", "contents": [
+                    {"type": "button", "style": "primary", "color": "#0d6efd", "height": "sm",
+                     "action": {"type": "uri", "label": "開啟檔案", "uri": file_url}}
+                ]
+            }
+        }
+    }
+    payload = json.dumps({"to": user_id, "messages": [flex]}).encode()
     req = urllib.request.Request(url, data=payload, headers={
         "Content-Type": "application/json", "Authorization": f"Bearer {LINE_CHANNEL_ACCESS_TOKEN}"})
     try:
         with urllib.request.urlopen(req) as r:
             return _parse_sent_qt(r.read())
-    except Exception:
+    except Exception as e:
+        import sys; print(f"[LINE File Push Error] {e}", file=sys.stderr)
         line_push(user_id, f"📎 {filename}\n{file_url}")
     return ""
 
@@ -1223,7 +1351,7 @@ def api_logs():
                 "已回覆" if l.get("replied") else "冷卻中"
             ])
         from flask import Response
-        return Response(out.getvalue(), mimetype="text/csv; charset=utf-8",
+        return Response("﻿" + out.getvalue(), mimetype="text/csv; charset=utf-8",
                         headers={"Content-Disposition": "attachment; filename=logs.csv"})
     return jsonify(logs)
 
@@ -1236,7 +1364,7 @@ INBOX_HTML = """<!DOCTYPE html>
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
 body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#f0f2f5;color:#1a1a1a;height:100vh;overflow:hidden}
-.crm-wrap{display:grid;grid-template-columns:320px 1fr 280px;height:100vh}
+.crm-wrap{display:grid;grid-template-columns:370px 1fr 280px;height:100vh}
 .mobile-back{display:none}
 @media(max-width:820px){
   body{overflow:hidden}
@@ -1285,13 +1413,13 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
 .conv-item{padding:10px 12px;cursor:pointer;border-bottom:1px solid #f0f2f5;transition:background .15s;display:flex;gap:8px;align-items:flex-start}
 .conv-item:hover{background:#f8f9fa}
 .conv-item.active{background:#e8f4fd}
-.conv-avatar{width:38px;height:38px;border-radius:50%;object-fit:cover;flex-shrink:0;background:#e8eaed}
-.conv-avatar-placeholder{width:38px;height:38px;border-radius:50%;background:#e0e4e8;display:flex;align-items:center;justify-content:center;font-size:16px;flex-shrink:0}
+.conv-avatar{width:44px;height:44px;border-radius:50%;object-fit:cover;flex-shrink:0;background:#e8eaed}
+.conv-avatar-placeholder{width:44px;height:44px;border-radius:50%;background:#e0e4e8;display:flex;align-items:center;justify-content:center;font-size:18px;flex-shrink:0}
 .conv-info{flex:1;min-width:0}
 .conv-name-row{display:flex;align-items:center;gap:4px;margin-bottom:2px}
-.conv-name{font-size:13px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;flex:1}
-.conv-time{font-size:10px;color:#9aa0a6;white-space:nowrap}
-.conv-preview{font-size:11px;color:#9aa0a6;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-bottom:4px}
+.conv-name{font-size:15px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;flex:1}
+.conv-time{font-size:13px;color:#9aa0a6;white-space:nowrap;font-weight:600}
+.conv-preview{font-size:13px;color:#9aa0a6;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-bottom:4px}
 .conv-meta{display:flex;gap:3px;flex-wrap:wrap;align-items:center}
 .status-dot{width:7px;height:7px;border-radius:50%;flex-shrink:0}
 .s-bot{background:#6c757d}.s-human{background:#0d6efd}.s-waiting{background:#fd7e14}
@@ -1339,6 +1467,10 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
 .msg-row.them .msg-bubble{background:#fff;border-bottom-left-radius:4px;box-shadow:0 1px 2px rgba(0,0,0,.1);color:#1a1a1a}
 .msg-row.me .msg-bubble{background:#95EC69;color:#1a1a1a;border-bottom-right-radius:4px}
 
+/* Bot 標示 */
+.auto-tag{font-size:10px;color:#2e7d32;background:#e8f5e9;border-radius:6px;padding:1px 5px;margin-right:4px;font-weight:700}
+.replied-tag{font-size:10px;color:#aaa;margin-left:3px}
+
 /* hover 回覆選單 */
 .msg-actions{display:none;position:absolute;top:-32px;background:#fff;border:1px solid #e0e0e0;border-radius:18px;padding:2px 5px;box-shadow:0 2px 10px rgba(0,0,0,.15);z-index:10;align-items:center;white-space:nowrap}
 .msg-row.them .msg-actions{left:4px}
@@ -1365,6 +1497,9 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
 .msg-time{font-size:10px;color:#888;white-space:nowrap;padding-bottom:3px;flex-shrink:0;line-height:1.2}
 .msg-avatar{width:28px;height:28px;border-radius:50%;object-fit:cover;background:#e8eaed;flex-shrink:0}
 .sys-msg{text-align:center;font-size:11px;color:#888;padding:6px 0;background:rgba(0,0,0,.04);border-radius:12px;margin:6px 20px}
+.date-sep-wrap{display:flex;align-items:center;justify-content:center;margin:14px 0 6px;gap:8px}
+.date-sep-wrap::before,.date-sep-wrap::after{content:'';flex:1;height:1px;background:#e0e0e0}
+.date-sep-label{font-size:11px;color:#999;white-space:nowrap;padding:2px 8px;background:#f0f2f5;border-radius:10px}
 
 .tpl-panel{background:#fff;border-top:1px solid #e8eaed;display:none;flex-direction:column;max-height:280px}
 .tpl-panel.open{display:flex}
@@ -1619,7 +1754,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
 <script>
 const KEY = new URLSearchParams(location.search).get('key') || '';
 document.getElementById('homeBtn').href = '/admin?key=' + KEY;
-const ALL_TAGS = ['有興趣','已報價','猶豫中','要比較','問尺寸','問材質','問交期','問安裝','詢問保固','重要客戶','需要跟進','已下訂','垃圾訊息','辦公家具','設計傢俱'];
+const ALL_TAGS = ['有興趣','已下訂','辦公家具','重要客戶','其他'];
 const STATUS_COLORS = {bot:'#6c757d',human:'#0d6efd',waiting:'#fd7e14',followup:'#6f42c1',closed:'#dc3545',sold:'#198754'};
 const TPL_DATA = {
   '打招呼':['你好，我是JSIMPLE高架床專員，請問有什麼可以幫您？','感謝您的詢問，請問您的需求是？'],
@@ -1632,13 +1767,33 @@ const TPL_DATA = {
   '成交':['感謝您的訂購，我馬上幫您安排出貨，請確認收件地址是否正確。','訂單已確認，預計X月X日出貨，有任何問題請隨時告訴我。']
 };
 
+function fmtMsgTime(ts){
+  if(!ts) return '';
+  const d = new Date(ts*1000);
+  return d.toLocaleTimeString('zh-TW',{hour:'2-digit',minute:'2-digit'});
+}
+function fmtDateSep(ts){
+  if(!ts) return '';
+  const d = new Date(ts*1000);
+  const now = new Date();
+  const toDay = (x)=> new Date(x.getFullYear(),x.getMonth(),x.getDate()).getTime();
+  const diff = Math.round((toDay(now)-toDay(d))/86400000);
+  if(diff===0) return '今天';
+  if(diff===1) return '昨天';
+  return `${d.getFullYear()}年${d.getMonth()+1}月${d.getDate()}日`;
+}
+function dateKey(ts){ const d=new Date(ts*1000); return `${d.getFullYear()}-${d.getMonth()}-${d.getDate()}`; }
+
 function fmtConvTime(ts){
   if(!ts) return '';
   const d = new Date(ts*1000);
   const now = new Date();
-  const isToday = d.getFullYear()===now.getFullYear() && d.getMonth()===now.getMonth() && d.getDate()===now.getDate();
-  if(isToday) return d.toLocaleTimeString('zh-TW',{hour:'2-digit',minute:'2-digit'});
-  return d.getFullYear()+'/'+(d.getMonth()+1)+'/'+d.getDate();
+  const dayStart = (x)=> new Date(x.getFullYear(), x.getMonth(), x.getDate()).getTime();
+  const diffDays = Math.round((dayStart(now) - dayStart(d)) / 86400000);
+  if(diffDays === 0) return d.toLocaleTimeString('zh-TW',{hour:'2-digit',minute:'2-digit'});
+  if(diffDays === 1) return '昨天';
+  if(d.getFullYear() !== now.getFullYear()) return d.getFullYear()+'/'+(d.getMonth()+1)+'/'+d.getDate();
+  return (d.getMonth()+1)+'/'+d.getDate();
 }
 
 let allConvs = [], curKey = null, curStatus = 'bot', filterStatus = 'all', filterTag = null, searchQ = '', filterRead = 'all';
@@ -1862,13 +2017,22 @@ async function loadMsgs(key){
 function renderMsgs(msgs){
   const area = document.getElementById('msgArea');
   if(!msgs.length){area.innerHTML='<div class="sys-msg">沒有訊息記錄</div>';return}
-  area.innerHTML = msgs.map(m=>{
+  let html = '';
+  let lastDK = '';
+  const conv = allConvs.find(c=>c.key===curKey);
+  msgs.forEach(m=>{
+    if(m.ts > 0){
+      const dk = dateKey(m.ts);
+      if(dk !== lastDK){
+        html += `<div class="date-sep-wrap"><span class="date-sep-label">${fmtDateSep(m.ts)}</span></div>`;
+        lastDK = dk;
+      }
+    }
     const isMe = m.role==='admin';
-    const time = m.ts ? new Date(m.ts*1000).toLocaleTimeString('zh-TW',{hour:'2-digit',minute:'2-digit'}) : '';
+    const time = fmtMsgTime(m.ts);
     let content = '';
     const fileMatch = (m.content||'').match(/^\[檔案\] (.+)$/);
     if(fileMatch && m.role==='admin'){
-      // admin sent file - show link from log
       content = `<span>📎 ${escHtml(fileMatch[1])}</span>`;
     } else if(m.image_url){
       const imgUrl = m.image_url;
@@ -1890,7 +2054,6 @@ function renderMsgs(msgs){
     else content = linkify(m.content||'');
     const rawContent = m.image_url ? '[圖片]' : (m.sticker_url ? '[貼圖]' : (m.content||''));
     const safePreview = rawContent.replace(/'/g,"\\'").replace(/\\n/g,' ').slice(0,80);
-    const conv = allConvs.find(c=>c.key===curKey);
     const senderName = isMe ? '我' : (conv?.user_name || conv?.user_id || '客戶');
     const safeSender = senderName.replace(/'/g,"\\'").slice(0,30);
     const safeToken = (m.quote_token||'').replace(/'/g,"\\'");
@@ -1900,14 +2063,17 @@ function renderMsgs(msgs){
     const replyBtn = hasQt
       ? `<button class="msg-act-btn" onclick="${quoteCall}">↩ 回覆</button>`
       : `<button class="msg-act-btn no-qt" disabled title="舊訊息無法原生引用">↩ 舊訊息</button>`;
-    return `<div class="msg-row ${isMe?'me':'them'}">
+    const autoTag = (isMe && m.is_auto) ? '<span class="auto-tag">Bot</span>' : '';
+    const repliedTag = (!isMe && m.bot_replied) ? '<span class="replied-tag">✓已回</span>' : '';
+    html += `<div class="msg-row ${isMe?'me':'them'}">
       <div class="msg-bubble"${hasQt?` ondblclick="${quoteCall}" title="雙擊引用"`:''}>${content}</div>
-      <span class="msg-time">${time}</span>
+      <span class="msg-time">${autoTag}${time}${repliedTag}</span>
       <div class="msg-actions">
         ${replyBtn}
       </div>
     </div>`;
-  }).join('');
+  });
+  area.innerHTML = html;
   area.scrollTop = area.scrollHeight;
 }
 
@@ -2190,6 +2356,12 @@ function renderTplCats(){
     `<div class="tcat${c===curTplCat?' active':''}" onclick="selectTplCat('${escAttr(c)}',this)">${escHtml(c)}</div>`
   ).join('');
 }
+
+document.getElementById('tplCats').addEventListener('wheel', e=>{
+  if(e.deltaY===0) return;
+  e.preventDefault();
+  e.currentTarget.scrollLeft += e.deltaY;
+}, {passive:false});
 
 function selectTplCat(cat, el){
   curTplCat = cat;
@@ -3625,10 +3797,22 @@ def api_messages():
     parts = key.split(":", 1)
     pf = parts[0] if len(parts) > 1 else ""
     uid = parts[1] if len(parts) > 1 else key
+
+    entries = _db_get_conversation(pf, uid, 5000)
+    if entries:
+        # Dedup key: (time, msg) only — Sheets entries lack sent_by so we can't include it
+        seen = {(e.get("time",""), e.get("msg","")) for e in entries}
+        recent = [l for l in reversed(list(message_log))
+                  if l.get("platform","") == pf and l.get("user_id","") == uid
+                  and (l.get("time",""), l.get("msg","")) not in seen]
+        entries = entries + recent
+    else:
+        entries = [l for l in reversed(list(message_log))
+                   if l.get("platform","") == pf and l.get("user_id","") == uid]
+
     msgs = []
-    for l in reversed(list(message_log)):
-        if l.get("platform", "") != pf or l.get("user_id", "") != uid:
-            continue
+    seen_content = set()  # prevent exact duplicates slipping through
+    for l in entries:
         ts = 0
         try:
             ts = int(time.mktime(time.strptime(l.get("time", ""), "%Y/%m/%d %H:%M:%S")) - 8*3600)
@@ -3638,16 +3822,29 @@ def api_messages():
             content = l.get("reply", "")
             img = l.get("image_url", "")
             if content or img:
-                msgs.append({"role": "admin", "content": content, "ts": ts, "image_url": img,
-                             "quote_token": l.get("quote_token", "")})
+                ck = (ts, "admin", content, img)
+                if ck not in seen_content:
+                    seen_content.add(ck)
+                    msgs.append({"role": "admin", "content": content, "ts": ts, "image_url": img,
+                                 "quote_token": l.get("quote_token", "")})
         else:
             if l.get("msg"):
-                msgs.append({"role": "user", "content": l["msg"], "ts": ts,
-                             "image_url": l.get("image_url", ""), "sticker_url": l.get("sticker_url", ""),
-                             "quote_token": l.get("quote_token", "")})
+                ck = (ts, "user", l["msg"])
+                if ck not in seen_content:
+                    seen_content.add(ck)
+                    msgs.append({"role": "user", "content": l["msg"], "ts": ts,
+                                 "image_url": l.get("image_url", ""), "sticker_url": l.get("sticker_url", ""),
+                                 "quote_token": l.get("quote_token", ""),
+                                 "bot_replied": bool(l.get("replied"))})
             if l.get("reply") and l.get("replied"):
-                msgs.append({"role": "admin", "content": l["reply"], "ts": ts + 1,
-                             "quote_token": l.get("reply_quote_token", "")})
+                ck = (ts + 1, "auto", l["reply"])
+                if ck not in seen_content:
+                    seen_content.add(ck)
+                    msgs.append({"role": "admin", "content": l["reply"], "ts": ts + 1,
+                                 "quote_token": l.get("reply_quote_token", ""),
+                                 "is_auto": True})
+    # sort ascending: oldest at top (ts=0 = broken timestamp → push to bottom)
+    msgs.sort(key=lambda m: m["ts"] if m["ts"] > 0 else 9_999_999_999)
     return jsonify({"messages": msgs})
 
 @app.route("/api/conversations")
@@ -3655,48 +3852,59 @@ def api_conversations():
     ok, _ = auth_required()
     if not ok:
         return jsonify({"error": "unauthorized"}), 403
-    logs = list(message_log)
-    convs = {}
-    for l in reversed(logs):
+
+    # Pre-build unread counts from in-memory log (O(n) single pass)
+    unread_counts = {}
+    for l in message_log:
+        pf  = l.get("platform", "")
         uid = l.get("user_id", "")
-        pf = l.get("platform", "")
-        if not uid or not pf or pf == "FB_COMMENT" or uid == "ADMIN":
+        if not pf or not uid or pf == "FB_COMMENT" or uid == "ADMIN":
+            continue
+        if l.get("sent_by", "") == "admin":
             continue
         key = f"{pf}:{uid}"
-        if key not in convs:
-            profile = user_profiles.get(key, {"name": "", "avatar": ""})
-            if not profile.get("name"):
-                threading.Thread(target=get_user_profile, args=(pf, uid), daemon=True).start()
-            convs[key] = {"key": key, "platform": pf, "user_id": uid, "messages": [],
-                          "last_time": l.get("time",""), "last_msg": l.get("msg",""),
-                          "last_message": l.get("msg",""),
-                          "manual": key in manual_takeover,
-                          "status": _pg_get_status(key),
-                          "name": profile.get("name",""),
-                          "user_name": profile.get("name","") or uid,
-                          "avatar": profile.get("avatar",""),
-                          "user_avatar": profile.get("avatar",""),
-                          "note": _pg_get_note(key),
-                          "tags": _pg_get_tags(key),
-                          "unread": 0}
-        convs[key]["messages"].append(l)
-        convs[key]["last_time"] = l.get("time","")
-        convs[key]["last_msg"] = l.get("msg","")
-        convs[key]["last_message"] = l.get("msg","")
         seen_ts = _pg_get_last_seen(key)
         try:
             msg_ts = time.mktime(time.strptime(l.get("time",""), "%Y/%m/%d %H:%M:%S")) - 8*3600
-            if msg_ts > seen_ts and l.get("user_id","") != "ADMIN" and l.get("sent_by","") != "admin":
-                convs[key]["unread"] += 1
+            if msg_ts > seen_ts:
+                unread_counts[key] = unread_counts.get(key, 0) + 1
         except Exception:
             pass
-    for v in convs.values():
+
+    # Single DB query for all conversation summaries (no N+1)
+    summaries = _db_get_all_conv_summaries()
+
+    result = []
+    for s in summaries:
+        pf  = s["platform"]
+        uid = s["user_id"]
+        key = f"{pf}:{uid}"
+        profile = user_profiles.get(key, {"name": "", "avatar": ""})
+        if not profile.get("name"):
+            threading.Thread(target=get_user_profile, args=(pf, uid), daemon=True).start()
         try:
-            ts = time.mktime(time.strptime(v.get("last_time",""), "%Y/%m/%d %H:%M:%S")) - 8*3600
-            v["last_time"] = int(ts)
+            last_ts = int(time.mktime(time.strptime(s["last_time"], "%Y/%m/%d %H:%M:%S")) - 8*3600)
         except Exception:
-            v["last_time"] = 0
-    result = sorted(convs.values(), key=lambda x: x["last_time"], reverse=True)
+            last_ts = 0
+        result.append({
+            "key":          key,
+            "platform":     pf,
+            "user_id":      uid,
+            "last_time":    last_ts,
+            "last_msg":     s["last_msg"],
+            "last_message": s["last_msg"],
+            "manual":       key in manual_takeover,
+            "status":       _pg_get_status(key),
+            "name":         profile.get("name",""),
+            "user_name":    profile.get("name","") or uid,
+            "avatar":       profile.get("avatar",""),
+            "user_avatar":  profile.get("avatar",""),
+            "note":         _pg_get_note(key),
+            "tags":         _pg_get_tags(key),
+            "unread":       unread_counts.get(key, 0),
+        })
+
+    result.sort(key=lambda x: x["last_time"], reverse=True)
     return jsonify(result)
 
 @app.route("/api/note", methods=["POST"])
@@ -4136,6 +4344,10 @@ app.register_blueprint(ai_images_bp)
 # ═══ AI 對話生成 Blueprint ════════════════════════════════════════════
 from ai_image_chat_api import ai_image_chat_bp
 app.register_blueprint(ai_image_chat_bp)
+
+# ═══ CRM 對話分析 Blueprint ════════════════════════════════════════════
+from crm_analytics import crm_analytics_bp
+app.register_blueprint(crm_analytics_bp)
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))

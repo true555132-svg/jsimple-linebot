@@ -14,6 +14,7 @@ from flask import Blueprint, request, jsonify, render_template_string, redirect,
 DATABASE_URL          = os.getenv("DATABASE_URL", "")
 ADMIN_PASSWORD        = os.getenv("ADMIN_PASSWORD", "")
 ANTHROPIC_API_KEY     = os.getenv("ANTHROPIC_API_KEY", "")
+OPENAI_API_KEY        = os.getenv("OPENAI_API_KEY", "")
 GA4_CREDENTIALS_JSON  = os.getenv("GA4_CREDENTIALS_JSON", "")
 GA4_CREDENTIALS_FILE  = os.getenv("GA4_CREDENTIALS_FILE", r"C:\Users\user\jsimple-ga-credentials.json")
 GA4_PROPERTY_ID       = os.getenv("GA4_PROPERTY_ID", "395475976")
@@ -851,13 +852,22 @@ def _resolve_allowed_products(brand, category):
         return ap, "品牌預設 allowed_products"
     return "", "無商品資料"
 
-def _list_articles_with_ga4():
-    """文章列表 + 最新一筆 GA4 來源的 seo_tracking 資料（LATERAL JOIN，不額外打 GA4 API）"""
+def _list_articles_with_ga4(brand_key="", category=""):
+    """文章列表 + 最新一筆 GA4 來源的 seo_tracking 資料（LATERAL JOIN，不額外打 GA4 API）
+    可選擇依品牌/品類篩選"""
     if not DATABASE_URL:
         return []
     try:
-        rows = _q("""
+        where = []
+        params = []
+        if brand_key:
+            where.append("a.brand_key=%s"); params.append(brand_key)
+        if category:
+            where.append("a.category=%s"); params.append(category)
+        where_sql = (" WHERE " + " AND ".join(where)) if where else ""
+        rows = _q(f"""
             SELECT a.id, a.title, a.status, a.slug, a.updated_at, a.extra,
+                   a.brand_key, a.category,
                    t.page_views, t.active_users, t.sessions, t.engagement_rate,
                    t.bounce_rate, t.avg_duration, t.record_date, t.notes
             FROM seo_articles a
@@ -869,28 +879,31 @@ def _list_articles_with_ga4():
                 ORDER BY created_at DESC
                 LIMIT 1
             ) t ON TRUE
+            {where_sql}
             ORDER BY a.id DESC
-        """, fetch="all") or []
+        """, tuple(params), fetch="all") or []
         articles = []
         for r in rows:
             extra = _parse_extra(r[5])
-            notes = r[13] or ""
+            notes = r[15] or ""
             ga4_match = "slug" if "slug:" in notes else ("title" if "title" in notes else "")
-            has_ga4 = r[6] is not None
+            has_ga4 = r[8] is not None
             articles.append({
                 "id": r[0], "title": r[1], "status": r[2], "slug": r[3] or "",
                 "updated_at": time.strftime("%Y-%m-%d %H:%M", time.localtime(r[4])) if r[4] else "",
+                "brand_key": r[6] or "",
+                "category": r[7] or "",
                 "main_keyword": extra.get("main_keyword", ""),
                 "ai_score": extra.get("ai_score", 0),
                 "related_products": extra.get("related_products", ""),
                 "next_action": extra.get("next_action", ""),
-                "page_views":      r[6] or 0 if has_ga4 else None,
-                "active_users":    r[7] or 0 if has_ga4 else None,
-                "sessions":        r[8] or 0 if has_ga4 else None,
-                "engagement_rate": r[9] or 0 if has_ga4 else None,
-                "bounce_rate":     r[10] or 0 if has_ga4 else None,
-                "avg_duration":    r[11] or 0 if has_ga4 else None,
-                "ga4_date":        r[12] or "" if has_ga4 else "",
+                "page_views":      r[8] or 0 if has_ga4 else None,
+                "active_users":    r[9] or 0 if has_ga4 else None,
+                "sessions":        r[10] or 0 if has_ga4 else None,
+                "engagement_rate": r[11] or 0 if has_ga4 else None,
+                "bounce_rate":     r[12] or 0 if has_ga4 else None,
+                "avg_duration":    r[13] or 0 if has_ga4 else None,
+                "ga4_date":        r[14] or "" if has_ga4 else "",
                 "ga4_match":       ga4_match,
             })
         return articles
@@ -1828,6 +1841,33 @@ CTA方向：{rule.get('cta_direction','')}
 常用關鍵字：{rule.get('keywords','')}
 禁用關鍵字／不建議方向：{rule.get('negative_keywords','')}"""
 
+# ── 圖片生成 ────────────────────────────────────────────────────
+
+def _build_image_prompt(title, brand_name, brand_style, category):
+    """根據文章標題/品牌/品類組出英文圖片 prompt，供 gpt-image-2 使用。"""
+    style_hint = (brand_style or "").strip()
+    cat_hint   = (category or "").strip()
+    # 把中文 category 轉成英文關鍵詞（best-effort）
+    cat_map = {
+        "家具": "furniture", "收納": "home storage", "辦公": "office",
+        "臥室": "bedroom", "客廳": "living room", "廚房": "kitchen",
+        "浴室": "bathroom", "戶外": "outdoor", "兒童": "kids room",
+        "燈具": "lighting", "地板": "flooring", "門": "door",
+    }
+    eng_cat = next((v for k, v in cat_map.items() if k in cat_hint), cat_hint)
+    prompt = (
+        f"Professional blog hero image for an article titled '{title}'. "
+        f"Brand: {brand_name}. Product category: {eng_cat}. "
+        f"Clean, modern interior design style, bright natural lighting, "
+        f"lifestyle photography feel, no text overlay, no watermark, "
+        f"suitable for a {eng_cat} e-commerce brand blog. "
+        f"Wide landscape format, high quality."
+    )
+    if style_hint:
+        prompt += f" Brand style reference: {style_hint[:80]}."
+    return prompt
+
+
 # ── AI 文章品質檢查 ─────────────────────────────────────────────
 
 PLACEHOLDER_MARKERS = ["待補充", "待確認", "TBD", "TODO", "[待", "（待", "(待"]
@@ -2221,9 +2261,14 @@ DEFAULT_ANALYZE_PROMPT = """你是台灣SEO/GEO/AEO內容策略專家。
 
 直接輸出分析內容，不要加開頭結尾的客套話。
 
-分析內容結束後，另起一行，輸出你判斷這個主題最適合的文章類型，格式固定為：
-建議文章類型：（從[[ARTICLE_TYPE_OPTIONS]]裡面選一個最貼切的，只能輸出類型名稱，不要其他文字）
-建議主關鍵字：（針對這個主題，輸出1個最重要的SEO主關鍵字，4~10個繁體中文字，不含標點符號）"""
+分析內容結束後，另起一行，依序輸出以下7行建議，每行格式固定，不要換行不要加說明：
+建議文章類型：（從[[ARTICLE_TYPE_OPTIONS]]裡面選一個最貼切的，只能輸出類型名稱）
+建議主關鍵字：（1個最重要的SEO主關鍵字，4~10個繁體中文字，不含標點符號）
+建議搜尋意圖：（一句話說明搜尋者的核心需求，20字以內）
+建議目標客群：（一句話描述主要受眾，20字以內）
+建議對應商品：（從上面「可用商品資料」裡選1~3個最相關的商品名稱，逗號分隔；若無資料則填「待補充」）
+建議禁止方向：（應避免提到的主題或偏離方向，20字以內；若無則填「無」）
+建議CTA方向：（最適合的Call-To-Action方向，20字以內）"""
 
 DEFAULT_GENERATE_PROMPT = """你是台灣SEO/GEO/AEO內容策略專家與文案編輯，為「[[BRAND_NAME]]」（[[BRAND_CATEGORY]]）撰寫一篇繁體中文SEO文章。
 
@@ -2372,6 +2417,15 @@ def _extract_suggested_main_keyword(text):
     keyword = m.group(1).strip().lstrip('「').rstrip('」').strip()
     cleaned = (text[:m.start()] + text[m.end():]).strip()
     return cleaned, keyword
+
+def _extract_suggested_field(text, label):
+    """通用：從AI分析結果裡拆出「{label}：XXX」這一行，回傳(清理後的分析文字, 建議值)。"""
+    m = re.search(rf'{re.escape(label)}[：:]\s*([^\n]+)', text)
+    if not m:
+        return text, ""
+    val = m.group(1).strip().lstrip('（').rstrip('）').strip()
+    cleaned = (text[:m.start()] + text[m.end():]).strip()
+    return cleaned, val
 
 def _resolve_generate_fields(fields, brand_rule):
     """把 fields（用戶表單輸入）和 brand_rule（seo_brand_rules）合併，
@@ -3033,6 +3087,16 @@ textarea{resize:vertical;line-height:1.7}
 </div>
 
 <div class="section">
+  <label>🎨 AI 生成配圖</label>
+  <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+    <button class="btn btn-outline" id="btn-genimg" type="button" onclick="doGenerateImage({{ a[0] }})">🎨 生成配圖（下載）</button>
+    <span id="genimg-loading" style="display:none;font-size:13px;color:#888">圖片生成中，約需 15-30 秒...</span>
+  </div>
+  <div class="err" id="genimg-err" style="margin-top:6px"></div>
+  <div class="hint" style="font-size:11px;color:#999;margin-top:6px">使用 gpt-image-2 根據文章標題與品牌風格自動生成部落格首圖，每次約 NT$1-4，生成後直接下載。</div>
+</div>
+
+<div class="section">
   <label style="font-size:13px;color:#555;font-weight:800">🔗 內部連結建議</label>
   <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
     <button class="btn btn-outline" id="btn-links" onclick="suggestLinks({{ a[0] }})" type="button">AI 分析相關文章</button>
@@ -3152,6 +3216,32 @@ function applyNextStatus(){
   if (!_qcNextStatus) return;
   const sel = document.getElementById('status-select');
   for (const opt of sel.options) { if (opt.value === _qcNextStatus) { sel.value = _qcNextStatus; break; } }
+}
+async function doGenerateImage(articleId){
+  const btn = document.getElementById('btn-genimg');
+  const loading = document.getElementById('genimg-loading');
+  const err = document.getElementById('genimg-err');
+  btn.disabled = true; loading.style.display = 'inline'; err.textContent = '';
+  try {
+    const res = await fetch('/admin/seo/article/'+articleId+'/generate-image?key='+encodeURIComponent(KEY));
+    const ct = res.headers.get('Content-Type') || '';
+    if (ct.includes('application/json')) {
+      const data = await res.json();
+      err.textContent = data.error || '生成失敗（未知錯誤）';
+    } else {
+      const blob = await res.blob();
+      const cd = res.headers.get('Content-Disposition') || '';
+      const m = cd.match(/filename="([^"]+)"/);
+      const fname = m ? m[1] : 'seo-image.png';
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url; a.download = fname; document.body.appendChild(a); a.click();
+      document.body.removeChild(a); URL.revokeObjectURL(url);
+    }
+  } catch(e) {
+    err.textContent = String(e.message || e);
+  }
+  btn.disabled = false; loading.style.display = 'none';
 }
 async function suggestLinks(articleId){
   const btn = document.getElementById('btn-links');
@@ -4833,14 +4923,38 @@ async function doAnalyze(){
       if (!mkEl.value.trim() && data.suggested_main_keyword) {
         mkEl.value = data.suggested_main_keyword;
       }
-      // #3 自動填入搜尋意圖（取分析結果前2句）
+      // #3 自動填入搜尋意圖（優先用AI建議，fallback取分析結果前2句）
       const siEl = document.getElementById('search_intent');
-      if (!siEl.value.trim() && data.analysis) {
-        const sents = data.analysis.replace(/\\r\\n/g,'\\n')
-          .replace(/([。！？])/g,'$1 ').split(' ')
-          .map(s=>s.trim()).filter(s=>s.length>4);
-        const summary = sents.slice(0,2).join('').replace(/^\s*\d+[.、．]\s*/,'').trim();
-        if (summary.length > 10) siEl.value = summary.substring(0, 100);
+      if (!siEl.value.trim()) {
+        if (data.suggested_search_intent) {
+          siEl.value = data.suggested_search_intent;
+        } else if (data.analysis) {
+          const sents = data.analysis.replace(/\\r\\n/g,'\\n')
+            .replace(/([。！？])/g,'$1 ').split(' ')
+            .map(s=>s.trim()).filter(s=>s.length>4);
+          const summary = sents.slice(0,2).join('').replace(/^\\s*\\d+[.、．]\\s*/,'').trim();
+          if (summary.length > 10) siEl.value = summary.substring(0, 100);
+        }
+      }
+      // #4 自動填入目標客群
+      const taEl = document.getElementById('target_audience');
+      if (!taEl.value.trim() && data.suggested_target_audience) {
+        taEl.value = data.suggested_target_audience;
+      }
+      // #5 自動填入對應商品（避免蓋掉用戶已填的內容）
+      const rpEl = document.getElementById('related_products');
+      if (!rpEl.value.trim() && data.suggested_related_products && data.suggested_related_products !== '待補充') {
+        rpEl.value = data.suggested_related_products;
+      }
+      // #6 自動填入禁止方向
+      const adEl = document.getElementById('avoid_directions');
+      if (!adEl.value.trim() && data.suggested_avoid_directions && data.suggested_avoid_directions !== '無') {
+        adEl.value = data.suggested_avoid_directions;
+      }
+      // #7 自動填入CTA方向
+      const ctaEl = document.getElementById('cta_direction');
+      if (!ctaEl.value.trim() && data.suggested_cta_direction) {
+        ctaEl.value = data.suggested_cta_direction;
       }
       // 顯示分析階段的 brand_rule debug 資訊
       if (data.debug) {
@@ -5302,6 +5416,48 @@ def seo_article_quality_check_status(job_id):
     elif status == "done":
         out["result"] = _parse_extra(result)
     return jsonify(out)
+
+@seo_bp.route("/admin/seo/article/<int:aid>/generate-image")
+def seo_article_generate_image(aid):
+    ok, _ = auth_required()
+    if not ok:
+        return jsonify({"error": "unauthorized"}), 403
+    if not OPENAI_API_KEY:
+        return jsonify({"error": "尚未設定 OPENAI_API_KEY，請在 Render → Environment 加上此環境變數"}), 200
+    row = _q("SELECT title, extra FROM seo_articles WHERE id=%s", (aid,), fetch="one")
+    if not row:
+        return jsonify({"error": "找不到文章"}), 404
+    title, extra_raw = row
+    extra      = _parse_extra(extra_raw)
+    brand_key  = extra.get("brand", "")
+    category   = extra.get("category", "")
+    brand      = _get_brand(brand_key) if brand_key else {}
+    brand_name = brand.get("name", brand_key) if brand else brand_key
+    brand_style= brand.get("style", "") if brand else ""
+    img_prompt = _build_image_prompt(title, brand_name, brand_style, category)
+    try:
+        import requests as _req, base64 as _b64
+        resp = _req.post(
+            "https://api.openai.com/v1/images/generations",
+            headers={"Authorization": f"Bearer {OPENAI_API_KEY}", "Content-Type": "application/json"},
+            json={"model": "gpt-image-2", "prompt": img_prompt, "n": 1,
+                  "size": "1536x1024", "quality": "medium", "response_format": "b64_json"},
+            timeout=90,
+        )
+        resp.raise_for_status()
+        b64 = resp.json()["data"][0]["b64_json"]
+        img_bytes = _b64.b64decode(b64)
+    except Exception as e:
+        return jsonify({"error": f"圖片生成失敗：{e}"}), 200
+    safe_title = re.sub(r'[^\w\-]', '_', title)[:40]
+    filename   = f"seo-image-{aid}-{safe_title}.png"
+    from flask import Response as _Resp
+    return _Resp(
+        img_bytes,
+        mimetype="image/png",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
 
 @seo_bp.route("/admin/seo/article/<int:aid>/tracking")
 def seo_tracking_view(aid):
@@ -6054,13 +6210,23 @@ def seo_generator_analyze():
     text, err  = _ai_call(prompt, model="claude-haiku-4-5", max_tokens=1500)
     if err:
         return jsonify({"error": f"AI分析失敗：{err}"}), 200
-    analysis, suggested_article_type = _extract_suggested_article_type(text)
-    analysis, suggested_main_keyword = _extract_suggested_main_keyword(analysis)
+    analysis, suggested_article_type  = _extract_suggested_article_type(text)
+    analysis, suggested_main_keyword  = _extract_suggested_main_keyword(analysis)
+    analysis, suggested_search_intent = _extract_suggested_field(analysis, "建議搜尋意圖")
+    analysis, suggested_target_audience = _extract_suggested_field(analysis, "建議目標客群")
+    analysis, suggested_related_products = _extract_suggested_field(analysis, "建議對應商品")
+    analysis, suggested_avoid_directions = _extract_suggested_field(analysis, "建議禁止方向")
+    analysis, suggested_cta_direction    = _extract_suggested_field(analysis, "建議CTA方向")
     rule = brand_rule or {}
     return jsonify({
         "analysis": analysis,
-        "suggested_article_type": suggested_article_type,
-        "suggested_main_keyword": suggested_main_keyword,
+        "suggested_article_type":    suggested_article_type,
+        "suggested_main_keyword":    suggested_main_keyword,
+        "suggested_search_intent":   suggested_search_intent,
+        "suggested_target_audience": suggested_target_audience,
+        "suggested_related_products": suggested_related_products,
+        "suggested_avoid_directions": suggested_avoid_directions,
+        "suggested_cta_direction":   suggested_cta_direction,
         "brand_rule_label": _brand_rule_label(brand_rule),
         "debug": {
             "rule_hit":    bool(rule),
@@ -6578,7 +6744,10 @@ th{color:#888;font-weight:600;font-size:11px;text-transform:uppercase}
     <div class="stat-card"><div class="label">本月成交金額</div><div class="value">${{ stats.cur.revenue }}</div>
       {% if stats.pct.revenue is not none %}<div class="delta {{ 'delta-up' if stats.pct.revenue>=0 else 'delta-down' }}">{{ '↑' if stats.pct.revenue>=0 else '↓' }} {{ stats.pct.revenue|abs }}% 較上月</div>{% endif %}
     </div>
+    <div class="stat-card"><div class="label">GA4 總瀏覽數</div><div class="value">{{ "{:,}".format(ga4_summary.total_page_views) }}</div><div style="font-size:11px;color:#888">{{ ga4_summary.synced_count }}/{{ ga4_summary.total_count }} 篇已同步</div></div>
+    <div class="stat-card"><div class="label">GA4 活躍用戶</div><div class="value">{{ "{:,}".format(ga4_summary.total_active_users) }}</div><div style="font-size:11px;color:#888">平均互動率 {{ "%.1f%%"|format(ga4_summary.avg_engagement*100) }}</div></div>
   </div>
+  {% if ga4_no_creds %}<div style="color:#c00;font-size:12px;padding:10px;background:#fdecea;border-radius:8px;margin-bottom:14px">⚠️ 未設定 GA4_CREDENTIALS_JSON，無法同步 GA4 數據。請在 Render 設定環境變數後重新部署。</div>{% endif %}
 
   <div class="section">
     <h3>📋 今日 SEO 任務（{{ today_tasks|length }}）</h3>
@@ -6650,6 +6819,7 @@ th{color:#888;font-weight:600;font-size:11px;text-transform:uppercase}
       <div class="rank-tab" data-panel="rk-inquiries" onclick="showRank(this)">詢價最高</div>
       <div class="rank-tab" data-panel="rk-orders" onclick="showRank(this)">成交最高</div>
       <div class="rank-tab" data-panel="rk-revenue" onclick="showRank(this)">營收最高</div>
+      <div class="rank-tab" data-panel="rk-ga4" onclick="showRank(this)">GA4流量最高</div>
     </div>
     <div class="lb-card rank-panel active" id="rk-clicks">
       {% for i in top_clicks %}<div class="lb-item"><span>{{ i.title }}</span><span class="v">{{ i.clicks }}</span></div>{% endfor %}
@@ -6665,6 +6835,13 @@ th{color:#888;font-weight:600;font-size:11px;text-transform:uppercase}
     </div>
     <div class="lb-card rank-panel" id="rk-revenue">
       {% for i in top_revenue %}<div class="lb-item"><span>{{ i.title }}</span><span class="v">${{ i.revenue }}</span></div>{% endfor %}
+    </div>
+    <div class="lb-card rank-panel" id="rk-ga4">
+      {% if top_ga4 %}
+        {% for i in top_ga4 %}<div class="lb-item"><span>{{ i.title }}</span><span class="v">{{ "{:,}".format(i.page_views) }}</span></div>{% endfor %}
+      {% else %}
+        <p style="color:#999;font-size:12px;padding:8px 0">目前沒有 GA4 數據。</p>
+      {% endif %}
     </div>
     <script>
     function showRank(el){
@@ -6721,6 +6898,22 @@ def seo_dashboard_page():
     except Exception as e:
         import sys; print(f"[SEO Dashboard] 讀取文章數據失敗：{e}", file=sys.stderr)
         items = []
+    ga4_summary = {"total_page_views": 0, "total_active_users": 0, "avg_engagement": 0, "synced_count": 0, "total_count": 0}
+    top_ga4 = []
+    ga4_no_creds = not GA4_CREDENTIALS_JSON and not (GA4_CREDENTIALS_FILE and os.path.exists(GA4_CREDENTIALS_FILE))
+    try:
+        ga4_items = _list_articles_with_ga4(brand_key, category)
+        ga4_synced = [a for a in ga4_items if a["page_views"] is not None]
+        ga4_summary = {
+            "total_page_views": sum(a["page_views"] for a in ga4_synced),
+            "total_active_users": sum(a["active_users"] for a in ga4_synced),
+            "avg_engagement": round(sum(a["engagement_rate"] for a in ga4_synced)/len(ga4_synced), 4) if ga4_synced else 0,
+            "synced_count": len(ga4_synced),
+            "total_count": len(ga4_items),
+        }
+        top_ga4 = sorted(ga4_synced, key=lambda x: x["page_views"], reverse=True)[:5]
+    except Exception as e:
+        import sys; print(f"[SEO Dashboard] GA4 統計計算失敗：{e}", file=sys.stderr)
     try:
         stats = _dashboard_stats(brand_key, category)
     except Exception as e:
@@ -6767,6 +6960,7 @@ def seo_dashboard_page():
         top_clicks=_top_n(items, "clicks"), top_ctr=_top_n(items, "ctr"),
         top_inquiries=_top_n(items, "line_inquiries"), top_orders=_top_n(items, "orders"),
         top_revenue=_top_n(items, "revenue"),
+        ga4_summary=ga4_summary, top_ga4=top_ga4, ga4_no_creds=ga4_no_creds,
         low_score_articles=low_score_articles,
         suggestion=suggestion,
         suggestion_time=time.strftime("%Y-%m-%d %H:%M", time.localtime(gen_at)) if gen_at else "尚未生成")
