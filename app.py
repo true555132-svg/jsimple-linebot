@@ -351,6 +351,16 @@ def _pg_save_customer_extra(key, pf, uid, data):
     threading.Thread(target=_pg_upsert_customer, args=(key,),
                      kwargs={"extra": json.dumps(data, ensure_ascii=False)}, daemon=True).start()
 
+def _pg_get_pinned(key):
+    return bool(_customer_cache.get(key, {}).get("extra", {}).get("pinned", False))
+
+def _pg_set_pinned(key, value: bool):
+    extra = dict(_customer_cache.get(key, {}).get("extra", {}))
+    extra["pinned"] = value
+    _customer_cache.setdefault(key, {})["extra"] = extra
+    threading.Thread(target=_pg_upsert_customer, args=(key,),
+                     kwargs={"extra": json.dumps(extra, ensure_ascii=False)}, daemon=True).start()
+
 _DEFAULT_TEMPLATES = [
     ("打招呼","你好，我是JSIMPLE高架床專員，請問有什麼可以幫您？",""),
     ("打招呼","感謝您的詢問，請問您的需求是？",""),
@@ -1797,8 +1807,22 @@ function fmtConvTime(ts){
 }
 
 let allConvs = [], curKey = null, curStatus = 'bot', filterStatus = 'all', filterTag = null, searchQ = '', filterRead = 'all';
+// pinnedKeys 現在從 server 的 c.pinned 欄位取得，localStorage 僅供一次性遷移
+function _buildPinnedKeys(){ return new Set((allConvs||[]).filter(c=>c.pinned).map(c=>c.key)); }
 let pinnedKeys = new Set();
-try{ pinnedKeys = new Set(JSON.parse(localStorage.getItem('pinnedKeys')||'[]')); }catch(e){ localStorage.removeItem('pinnedKeys'); }
+// 遷移：若 localStorage 有舊釘選，載入後自動同步到 DB（只做一次）
+async function _migrateLegacyPins(){
+  try{
+    const old = JSON.parse(localStorage.getItem('pinnedKeys')||'[]');
+    if(!old.length || localStorage.getItem('_pinsMigrated')) return;
+    for(const k of old){
+      if(!allConvs.find(c=>c.key===k && c.pinned))
+        await fetch('/api/pin',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({key:k,admin_key:KEY})});
+    }
+    localStorage.setItem('_pinsMigrated','1');
+    localStorage.removeItem('pinnedKeys');
+  }catch(e){}
+}
 let curTags = [], curCustomer = {}, noteTimer = null;
 
 // INIT
@@ -1873,6 +1897,8 @@ async function loadConvs(){
     else if(d && d.conversations) allConvs = d.conversations;
     else if(Array.isArray(d) && d.length === 0 && allConvs.length === 0) allConvs = [];
     // 若回傳空陣列但本地有資料 → 可能是 DB 暫時超時，保留舊資料不清空
+    pinnedKeys = _buildPinnedKeys();
+    _migrateLegacyPins();
     try{ renderList(); }catch(e2){
       document.getElementById('convList').innerHTML=`<div style="padding:16px;color:#e53935;font-size:12px">錯誤: ${e2.message}</div>`;
     }
@@ -1941,12 +1967,24 @@ function renderList(){
   }).join('');
 }
 
-function togglePin(evt, key){
+async function togglePin(evt, key){
   evt.stopPropagation();
-  if(pinnedKeys.has(key)) pinnedKeys.delete(key);
-  else pinnedKeys.add(key);
-  localStorage.setItem('pinnedKeys', JSON.stringify([...pinnedKeys]));
+  // 樂觀更新：立即更新 UI
+  const conv = allConvs.find(c=>c.key===key);
+  if(conv) conv.pinned = !conv.pinned;
+  pinnedKeys = _buildPinnedKeys();
   renderList();
+  // 非同步寫入 DB
+  try{
+    await fetch('/api/pin',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({key,admin_key:KEY})});
+  }catch(e){
+    // 寫入失敗：還原
+    if(conv) conv.pinned = !conv.pinned;
+    pinnedKeys = _buildPinnedKeys();
+    renderList();
+    toast('置頂儲存失敗，請重試');
+  }
 }
 
 function setReadFilter(val){
@@ -3903,10 +3941,24 @@ def api_conversations():
             "note":         _pg_get_note(key),
             "tags":         _pg_get_tags(key),
             "unread":       unread_counts.get(key, 0),
+            "pinned":       _pg_get_pinned(key),
         })
 
-    result.sort(key=lambda x: x["last_time"], reverse=True)
+    result.sort(key=lambda x: (not x["pinned"], -x["last_time"]))
     return jsonify(result)
+
+@app.route("/api/pin", methods=["POST"])
+def api_pin():
+    ok, _ = auth_required()
+    if not ok:
+        return jsonify({"error": "unauthorized"}), 403
+    data = request.get_json(silent=True) or {}
+    key = data.get("key", "")
+    if not key:
+        return jsonify({"error": "missing key"}), 400
+    current = _pg_get_pinned(key)
+    _pg_set_pinned(key, not current)
+    return jsonify({"ok": True, "pinned": not current})
 
 @app.route("/api/note", methods=["POST"])
 def api_note():
