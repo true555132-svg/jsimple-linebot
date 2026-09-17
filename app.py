@@ -1869,9 +1869,10 @@ async function loadConvs(){
     const r = await fetch(`/api/conversations?key=${KEY}`);
     if(!r.ok){ document.getElementById('convList').innerHTML=`<div style="padding:16px;color:#e53935;font-size:12px">載入失敗 (${r.status})</div>`; return; }
     const d = await r.json();
-    if(Array.isArray(d)) allConvs = d;
+    if(Array.isArray(d) && d.length > 0) allConvs = d;
     else if(d && d.conversations) allConvs = d.conversations;
-    else allConvs = [];
+    else if(Array.isArray(d) && d.length === 0 && allConvs.length === 0) allConvs = [];
+    // 若回傳空陣列但本地有資料 → 可能是 DB 暫時超時，保留舊資料不清空
     try{ renderList(); }catch(e2){
       document.getElementById('convList').innerHTML=`<div style="padding:16px;color:#e53935;font-size:12px">錯誤: ${e2.message}</div>`;
     }
@@ -1885,7 +1886,10 @@ async function loadConvs(){
 }
 
 function renderList(){
+  // 置頂對話永遠顯示，不受篩選條件影響
+  const pinnedList = allConvs.filter(c => pinnedKeys.has(c.key));
   let list = allConvs.filter(c=>{
+    if(pinnedKeys.has(c.key)) return false; // 已在 pinnedList，不重複
     if(filterStatus !== 'all' && (c.status||'bot') !== filterStatus) return false;
     if(filterTag && !(c.tags||[]).includes(filterTag)) return false;
     if(filterRead === 'unread' && !(c.unread>0)) return false;
@@ -1897,14 +1901,11 @@ function renderList(){
     }
     return true;
   });
-  // 置頂排序：已置頂的排最前面，各自維持原有順序
-  list.sort((a,b)=>{
-    const ap = pinnedKeys.has(a.key)?1:0, bp = pinnedKeys.has(b.key)?1:0;
-    return bp - ap;
-  });
+  // 置頂列表在最前面，其餘依原順序
+  const combined = [...pinnedList, ...list];
   const el = document.getElementById('convList');
-  if(!list.length){el.innerHTML='<div style="padding:20px;text-align:center;color:#9aa0a6;font-size:13px">沒有符合的對話</div>';return}
-  el.innerHTML = list.map(c=>{
+  if(!combined.length){el.innerHTML='<div style="padding:20px;text-align:center;color:#9aa0a6;font-size:13px">沒有符合的對話</div>';return}
+  el.innerHTML = combined.map(c=>{
     const s = c.status||'bot';
     const unread = c.unread||0;
     const isPinned = pinnedKeys.has(c.key);
