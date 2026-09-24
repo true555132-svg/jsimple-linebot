@@ -1375,10 +1375,14 @@ def _check_unsafe_html(content):
     lowered = (content or "").lower()
     return [f"內容含有不安全的HTML片段（{p}）" for p in UNSAFE_HTML_PATTERNS if p in lowered]
 
-def _check_products_brand_ownership(brand, related_products):
+def _check_products_brand_ownership(brand, category, related_products):
     """粗略檢查related_products是否都在品牌允許商品清單內，避免混入其他品牌商品名稱。
+    用跟生成階段guardrail同一套三層fallback（_resolve_allowed_products：品類規則key_products優先於
+    品牌預設allowed_products），否則用品類規則key_products生成出來的商品，會被只認brand.allowed_products
+    的這支檢查誤擋（例如品類規則裡登記了「穀倉門」相關商品，但品牌預設清單沒有，發布前就會被錯誤攔下）。
     allowed清單是空的代表這品牌還沒建檔案商品，無法核對，視為通過（不誤擋），但仍會反映在missing項目讓後台知道。"""
-    allowed = (brand.get("allowed_products") or "").strip()
+    allowed, _ = _resolve_allowed_products(brand, category)
+    allowed = allowed.strip()
     if not allowed or not (related_products or "").strip():
         return []
     allowed_set = {x.strip().lower() for x in allowed.split(",") if x.strip()}
@@ -1452,7 +1456,7 @@ def _validate_article_for_publish(aid):
         errors.append("正文或標題殘留「待補充／待確認」等佔位文字")
     errors += _check_empty_links_in_html(effective_html)
     errors += _check_unsafe_html(effective_html)
-    errors += _check_products_brand_ownership(brand, extra.get("related_products", ""))
+    errors += _check_products_brand_ownership(brand, category, extra.get("related_products", ""))
     qc = extra.get("quality_check") or {}
     current_fp = _content_fingerprint(title, meta_title, meta_desc, content, blocks_raw, brand_key,
                                        extra.get("related_products", ""))

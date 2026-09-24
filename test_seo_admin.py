@@ -40,6 +40,15 @@ BRANDS = {
     },
 }
 
+# seo_brand_rules：id,brand,category,article_type,priority,positioning,target_audience,key_products,
+#                   avoid_directions,tone,cta_direction,keywords,negative_keywords
+# JSIMPLE「穀倉門」品類規則：key_products登記的商品不在brand_profiles.allowed_products品牌預設清單裡，
+# 用來驗證_check_products_brand_ownership必須用_resolve_allowed_products的三層fallback，
+# 不能只認品牌預設清單，否則品類規則生出來的商品會被誤擋（見seo_admin.py的_check_products_brand_ownership）。
+SEO_BRAND_RULES = [
+    (1, "jsimple", "穀倉門", "", 100, "", "", "穀倉門滑軌組,穀倉門五金", "", "", "", "", ""),
+]
+
 THEMES = {
     "filterbreath": {"brand_key": "filterbreath", "primary_color": "#1B3F6E", "accent_color": "#2F80ED",
                       "bg_color": "#F5F8FC", "confirmed": True},
@@ -197,6 +206,10 @@ def fake_q(sql, params=None, fetch=None):
             BRANDS[bk]["compatible_brands"] = compat
             BRANDS[bk]["cta_url"] = cta
         return None
+
+    # seo_brand_rules（_match_brand_rule全撈後在Python端比對）
+    if "FROM seo_brand_rules ORDER BY id" in s:
+        return SEO_BRAND_RULES
 
     # seo_brand_themes
     if "FROM seo_brand_themes WHERE brand_key=%s" in s:
@@ -374,6 +387,34 @@ resolved_pub, missing_pub = SA._resolve_block_links(
     [{"type": "related_links", "items": [{"url": "/blog/js-desk-guide", "text": "連到已發布文章"}]}], "jsimple")
 linked_urls_pub = [it["url"] for it in resolved_pub[0]["items"]]
 check("related_links可以連到已發布文章的slug", "/blog/js-desk-guide" in linked_urls_pub, resolved_pub)
+
+print("=" * 70)
+print("3b. _check_products_brand_ownership必須用品類規則key_products的三層fallback，不能只認品牌預設清單")
+print("=" * 70)
+
+# 17) JSIMPLE「穀倉門」品類：related_products命中品類規則key_products，但不在brand.allowed_products品牌預設清單裡
+#     -> 應該通過（三層fallback第一優先是品類規則），修這支bug之前會被誤擋
+add_article(17, title="穀倉門五金怎麼挑", slug="/blog/js-barn-door", meta_title="mt", meta_description="md",
+            content="", brand_key="jsimple", category="穀倉門", status="draft_review",
+            blocks=json.dumps(sample_blocks(bad_url="/pages/contact-js"), ensure_ascii=False),
+            extra=json.dumps({"related_products": "穀倉門滑軌組", "quality_check": {"brand_consistency_pass": True, "recommend_publish": True}}, ensure_ascii=False))
+_stamp_fingerprint(17)
+
+# 18) 同品類，但related_products既不在品類規則key_products、也不在品牌預設清單 -> 仍然應該被擋
+#     （驗證修法不是把檢查整個關掉，只是換一套更完整的允許清單來源）
+add_article(18, title="穀倉門亂帶商品測試", slug="/blog/js-barn-door-bad", meta_title="mt", meta_description="md",
+            content="", brand_key="jsimple", category="穀倉門", status="draft_review",
+            blocks=json.dumps(sample_blocks(bad_url="/pages/contact-js"), ensure_ascii=False),
+            extra=json.dumps({"related_products": "濾網", "quality_check": {"brand_consistency_pass": True, "recommend_publish": True}}, ensure_ascii=False))
+_stamp_fingerprint(18)
+
+ok17, err17 = SA._validate_article_for_publish(17)
+check("品類規則key_products有登記的商品（穀倉門滑軌組），即使不在品牌預設allowed_products清單，也應該通過（文章17）",
+      ok17 is True, err17)
+
+ok18, err18 = SA._validate_article_for_publish(18)
+check("品類規則key_products、品牌預設清單都沒有的商品（濾網），在穀倉門品類文章裡仍應被擋（文章18）",
+      ok18 is False and any("不在本品牌允許商品清單內" in e for e in err18), err18)
 
 print("=" * 70)
 print("4. AI檢查失敗 / 缺欄位 / 截斷時不能發布；乾淨案例應該要過")
