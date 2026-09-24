@@ -2283,7 +2283,8 @@ DEFAULT_GENERATE_PROMPT = """你是台灣SEO/GEO/AEO內容策略專家與文案�
 主關鍵字：[[MAIN_KEYWORD]]
 搜尋意圖：[[SEARCH_INTENT]]
 目標客群：[[TARGET_AUDIENCE]]
-對應商品（文章必須自然導向這些商品，只能從這裡面挑，不可自創其他商品或服務）：[[RELATED_PRODUCTS]]
+對應商品（如果下面有列商品，文章必須自然導向這些商品，只能從裡面挑，不可自創其他商品或服務；
+如果下面是空的，代表這篇不需要對應特定商品，當作純資訊型內容寫即可，不要因為這裡空白就不生成內容或設needs_confirmation=true）：[[RELATED_PRODUCTS]]
 禁止偏離方向（絕對不要寫到這些主題或方向）：[[AVOID_DIRECTIONS]]
 CTA方向：[[CTA_DIRECTION]]
 
@@ -2307,8 +2308,9 @@ CTA方向：[[CTA_DIRECTION]]
 
 ━━━ 品牌規則與目標客群（重要） ━━━
 - 嚴格遵守上面的「禁止偏離方向」，絕對不要往那些方向寫
-- 目標客群是[[TARGET_AUDIENCE]]，全文視角、用詞、案例都要對著這群人寫
-- 文章不能只講知識，要自然帶到「對應商品」的適用情境，但不用特別劃出一整段「商品導購」
+- 目標客群如果有指定是[[TARGET_AUDIENCE]]，全文視角、用詞、案例都要對著這群人寫；如果沒指定，依主題內容判斷合理的讀者輪廓即可
+- 如果上面有「對應商品」，文章不能只講知識，要自然帶到這些商品的適用情境，但不用特別劃出一整段「商品導購」；
+  如果「對應商品」是空的，整篇就專心把知識講清楚、講完整即可，不用硬掰商品段落
 - CTA要呼應「CTA方向」，1~3句話講清楚下一步該做什麼，不要硬銷，也不用刻意寫到很長
 
 ━━━ 第一步：依文章類型規劃架構 ━━━
@@ -2431,11 +2433,17 @@ def _extract_suggested_field(text, label):
     cleaned = (text[:m.start()] + text[m.end():]).strip()
     return cleaned, val
 
-def _resolve_generate_fields(fields, brand_rule):
+def _resolve_generate_fields(fields, brand_rule, brand=None, category=None):
     """把 fields（用戶表單輸入）和 brand_rule（seo_brand_rules）合併，
     回傳 (resolved_dict, source_dict)。
     規則：用戶有填 → 用用戶值；沒填 → 從 brand_rule 補；兩邊都沒有 → 空字串。
-    source_dict 供 Preview 偵錯區塊顯示資料來源。"""
+    source_dict 供 Preview 偵錯區塊顯示資料來源。
+    related_products 額外補第三層 fallback：沒有命中 seo_brand_rules 時，改用
+    _resolve_allowed_products()（跟guardrail的ALLOWED_PRODUCTS同一套三層fallback：
+    品類規則key_products > 品牌預設allowed_products）。沒有這層時，只要這個brand+category
+    沒有對應的seo_brand_rules列，RELATED_PRODUCTS就會是空字串，即使品牌其實有登記allowed_products，
+    導致generate prompt裡「對應商品」是空的、卻又被要求「必須自然導向這些商品」，這個矛盾指令
+    會讓Sonnet因為guardrail不准自創商品、又無商品可用，而回傳空blocks+needs_confirmation=true。"""
     rule = brand_rule or {}
     resolved, sources = {}, {}
     for field_key, rule_key, label in [
@@ -2452,6 +2460,10 @@ def _resolve_generate_fields(fields, brand_rule):
         elif rule_val:
             resolved[field_key] = rule_val
             sources[label] = {"value": rule_val, "src": "seo_brand_rules"}
+        elif field_key == "related_products" and brand is not None:
+            ap, ap_src = _resolve_allowed_products(brand, category)
+            resolved[field_key] = ap
+            sources[label] = {"value": ap, "src": ap_src if ap else "空（無資料）"}
         else:
             resolved[field_key] = ""
             sources[label] = {"value": "", "src": "空（無資料）"}
@@ -2463,7 +2475,7 @@ def _generate_article_prompt(brand, category, topic, intent_analysis, knowledge_
     RELATED_PRODUCTS / TARGET_AUDIENCE / AVOID_DIRECTIONS / CTA_DIRECTION：
       用戶有填 → 優先；沒填 → 自動從 seo_brand_rules 補，確保 AI 不會因欄位空白而亂猜。"""
     fields = fields or {}
-    resolved, _ = _resolve_generate_fields(fields, brand_rule)
+    resolved, _ = _resolve_generate_fields(fields, brand_rule, brand, category)
     tmpl = _get_prompt_template("generate", DEFAULT_GENERATE_PROMPT)
     body = _fill_tokens(tmpl,
         BRAND_NAME=brand.get('name', ''), BRAND_CATEGORY=category or brand.get('category', ''),
@@ -6247,7 +6259,7 @@ def _run_generate_job(job_id, brand_key, category, topic, analysis, opp_id=None,
         brand = _get_brand(brand_key)
         knowledge_items = _get_knowledge_for_prompt(brand_key, category, limit=10)
         brand_rule_mode, brand_rule = _resolve_brand_rule(brand_key, category, fields)
-        resolved_fields, _ = _resolve_generate_fields(fields, brand_rule)
+        resolved_fields, _ = _resolve_generate_fields(fields, brand_rule, brand, category)
         prompt = _generate_article_prompt(brand, category, topic, analysis, knowledge_items, fields, brand_rule)
         result, err, stop_reason = _ai_call_json_full(prompt, model="claude-sonnet-4-6", max_tokens=8000)
         if err:
@@ -6256,6 +6268,14 @@ def _run_generate_job(job_id, brand_key, category, topic, analysis, opp_id=None,
             return
         truncated = (stop_reason == "max_tokens")
         blocks = result.get("blocks") or []
+        if not blocks:
+            notes = (result.get("confirmation_notes") or "").strip()
+            msg = "AI沒有產生任何文章內容（blocks為空），不會建立半成品草稿。請確認主關鍵字/對應商品/目標客群等欄位是否足夠明確後再重新生成。"
+            if notes:
+                msg += f"\nAI備註：{notes}"
+            _q("UPDATE seo_generate_jobs SET status='error', error_msg=%s, updated_at=%s WHERE id=%s",
+               (msg, time.time(), job_id))
+            return
         blocks_errors = _validate_blocks_schema(blocks)
         if truncated:
             blocks_errors = (blocks_errors or []) + ["AI回應被截斷（達max_tokens），內容可能不完整"]
@@ -6345,10 +6365,14 @@ def seo_generator_preview():
     brand = _get_brand(brand_key)
     knowledge_items = _get_knowledge_for_prompt(brand_key, category, limit=10)
     brand_rule_mode, brand_rule = _resolve_brand_rule(brand_key, category, fields)
-    resolved_fields, field_sources = _resolve_generate_fields(fields, brand_rule)
+    resolved_fields, field_sources = _resolve_generate_fields(fields, brand_rule, brand, category)
     prompt = _generate_article_prompt(brand, category, topic, analysis, knowledge_items, fields, brand_rule)
     _, ap_source = _resolve_allowed_products(brand, category)
     rule = brand_rule or {}
+    main_keyword  = (fields.get("main_keyword") or "").strip()
+    search_intent = (fields.get("search_intent") or "").strip()
+    field_sources["MAIN_KEYWORD"]  = {"value": main_keyword,  "src": "手動輸入/分析建議" if main_keyword  else "空（未填，AI不會自動補）"}
+    field_sources["SEARCH_INTENT"] = {"value": search_intent, "src": "手動輸入/分析建議" if search_intent else "空（無資料）"}
     debug = {
         "brand": brand_key,
         "category": category,
@@ -6377,6 +6401,8 @@ def seo_generator_generate():
     opp_id = data.get("opp_id") or None
     if not topic.strip():
         return jsonify({"error": "請輸入主題"}), 400
+    if not fields.get("main_keyword", "").strip():
+        return jsonify({"error": "請先填寫主關鍵字（可先按「分析」取得AI建議，或手動輸入），沒有主關鍵字AI無法決定文章骨架，不會呼叫AI生成"}), 400
     if not ANTHROPIC_API_KEY:
         return jsonify({"error": "尚未設定 ANTHROPIC_API_KEY，請在 Render → Environment 加上這個環境變數才能使用AI功能"}), 200
     now = time.time()

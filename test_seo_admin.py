@@ -56,6 +56,7 @@ THEMES = {
 }
 
 ARTICLES = {}  # id -> dict
+JOBS = {}      # id -> dict，模擬 seo_generate_jobs 資料表，供_run_generate_job測試用
 
 def _stamp_fingerprint(aid, fp_override=None):
     """模擬「這篇文章的quality_check是針對目前這個版本跑的」：算出正確指紋寫回extra。
@@ -290,6 +291,30 @@ def fake_q(sql, params=None, fetch=None):
         add_article(new_id, title=title, slug=slug, meta_title=meta_title, meta_description=meta_desc,
                     content=content, ai_summary=ai_summary, status=status, extra=extra, brand_key="")
         return new_id
+
+    # _run_generate_job: 生成完成後INSERT新文章（帶blocks/category，跟上面seo_article_save的INSERT欄位不同）
+    if s.startswith("INSERT INTO seo_articles (title,slug,meta_title,meta_description,content,blocks,ai_summary,status,"):
+        new_id = max(ARTICLES.keys()) + 1
+        (title, slug, meta_title, meta_desc, content, blocks, ai_summary, status,
+         brand_key, category, extra, ca, ua, pa) = params
+        add_article(new_id, title=title, slug=slug, meta_title=meta_title, meta_description=meta_desc,
+                    content=content, blocks=blocks, ai_summary=ai_summary, status=status,
+                    brand_key=brand_key, category=category, extra=extra)
+        return new_id
+
+    # _run_generate_job: seo_generate_jobs 狀態更新
+    if s.startswith("UPDATE seo_generate_jobs SET status='running', updated_at=%s WHERE id=%s"):
+        _, job_id = params
+        JOBS[job_id]["status"] = "running"
+        return None
+    if s.startswith("UPDATE seo_generate_jobs SET status='error', error_msg=%s, updated_at=%s WHERE id=%s"):
+        error_msg, _, job_id = params
+        JOBS[job_id].update(status="error", error_msg=error_msg)
+        return None
+    if s.startswith("UPDATE seo_generate_jobs SET status='done', article_id=%s, updated_at=%s WHERE id=%s"):
+        article_id, _, job_id = params
+        JOBS[job_id].update(status="done", article_id=article_id)
+        return None
 
     raise AssertionError("fake_q沒有處理到這個SQL，測試腳本要補：\n" + s + f"\nparams={params}")
 
@@ -596,6 +621,113 @@ check("儲存後重開預覽，標題真的更新成新標題(修改有生效)",
 check("儲存後重開預覽，仍然是blocks渲染出來的正文(重點整理還在)", "重點整理" in preview16_after, preview16_after[:300])
 check("儲存後重開預覽，不會出現剛剛改過的content文字(blocks文章的content本來就不影響輸出)",
       "理論上預覽不該變" not in preview16_after, preview16_after[:300])
+
+print("=" * 70)
+print("13. blocks=[]（空氣清淨機濾網多久換？案例）：RELATED_PRODUCTS三層fallback / prompt不矛盾 / main_keyword擋下 / blocks=[]不入庫")
+print("=" * 70)
+
+# 13a) 情境還原：filterbreath沒有命中任何seo_brand_rules（SEO_BRAND_RULES目前只有jsimple穀倉門那筆），
+#      舊版_resolve_generate_fields只查brand_rule.key_products，這裡一定是空字串；
+#      修正後應該再往下fallback到_resolve_allowed_products()（跟guardrail的ALLOWED_PRODUCTS同一套三層），
+#      結果要等於品牌預設allowed_products，不能是空字串。
+brand_lu = SA._get_brand("filterbreath")
+brand_rule_mode_lu, brand_rule_lu = SA._resolve_brand_rule("filterbreath", "空氣清淨機濾網", {})
+resolved_lu, sources_lu = SA._resolve_generate_fields({}, brand_rule_lu, brand_lu, "空氣清淨機濾網")
+check("沒有命中seo_brand_rules時，RELATED_PRODUCTS要fallback到品牌預設allowed_products，不能是空字串",
+      resolved_lu["related_products"] == BRANDS["filterbreath"]["allowed_products"], resolved_lu)
+check("field_sources要如實標示這個值來自_resolve_allowed_products的哪一層，不能假裝是seo_brand_rules",
+      sources_lu["RELATED_PRODUCTS"]["src"] in ("品牌預設 allowed_products", "品類規則 key_products"), sources_lu)
+
+# 13b) 舊呼叫方式（不傳brand/category）要維持原行為不變，不能因為加了新參數就強制要求呼叫端都要改
+resolved_old_sig, _ = SA._resolve_generate_fields({}, brand_rule_lu)
+check("_resolve_generate_fields不傳brand時要維持原本行為（不fallback），向下相容舊呼叫方式",
+      resolved_old_sig["related_products"] == "", resolved_old_sig)
+
+# 13c) 送進Sonnet的實際prompt：RELATED_PRODUCTS這格要真的填上商品，不能是空的
+prompt_lu = SA._generate_article_prompt(brand_lu, "空氣清淨機濾網", "空氣清淨機濾網多久換？",
+                                         "（分析內容略）", [], {}, brand_rule_lu)
+check("最終prompt的「對應商品」欄位要帶入品牌預設商品，不能因為沒有品類規則就整格空白",
+      f"）：{BRANDS['filterbreath']['allowed_products']}" in prompt_lu, prompt_lu)
+
+# 13d) 就算真的沒有任何商品資料（品牌allowed_products也是空的），prompt文字本身也不該再是「必須從裡面挑」
+#      這種無論如何都成立的絕對指令——確認新版模板已經把「對應商品是空的」講清楚是允許的，
+#      不是靠碰巧有資料才不矛盾。
+check("DEFAULT_GENERATE_PROMPT模板已經把「對應商品欄位是空的」明確講成可接受，不再是無條件的强制指令",
+      "如果下面是空的，代表這篇不需要對應特定商品" in SA.DEFAULT_GENERATE_PROMPT and
+      "如果「對應商品」是空的，整篇就專心把知識講清楚" in SA.DEFAULT_GENERATE_PROMPT)
+
+# 13e) 生成前擋下：main_keyword沒填就不該呼叫AI、也不該建立生成任務
+resp_gen_no_kw = client.post(f"/admin/seo-generator/generate?key={KEY}", json={
+    "brand": "filterbreath", "category": "空氣清淨機濾網", "topic": "空氣清淨機濾網多久換？",
+    "analysis": "", "main_keyword": "",
+})
+check("main_keyword沒填時，/generate要回400並擋下，不建立生成任務、不呼叫AI",
+      resp_gen_no_kw.status_code == 400 and "主關鍵字" in resp_gen_no_kw.get_json().get("error", ""),
+      (resp_gen_no_kw.status_code, resp_gen_no_kw.get_data(as_text=True)))
+
+# 13f) Sonnet真的回傳blocks=[]時（模擬guardrail矛盾情境下AI選擇不生成正文），
+#      _run_generate_job不能把這個半成品塞進seo_articles，要讓job落在錯誤狀態、讓使用者知道要重試。
+JOBS[901] = {"id": 901, "status": "pending", "article_id": None, "error_msg": ""}
+before_article_ids = set(ARTICLES.keys())
+
+def fake_ai_call_json_full_empty_blocks(prompt, model=None, max_tokens=None):
+    return ({
+        "title": "空氣清淨機濾網多久換？", "slug": "/blog/filter-change-cycle",
+        "meta_title": "mt", "meta_description": "md", "ai_summary": "ai_summary",
+        "needs_confirmation": True, "confirmation_notes": "缺少對應商品/主關鍵字，AI選擇不生成正文",
+        "blocks": [], "internal_links": "", "long_tail_keywords": "", "knowledge_citations": [],
+    }, None, "end_turn")
+
+_orig_ai_call_json_full = SA._ai_call_json_full
+SA._ai_call_json_full = fake_ai_call_json_full_empty_blocks
+try:
+    SA._run_generate_job(901, "filterbreath", "空氣清淨機濾網", "空氣清淨機濾網多久換？", "（分析內容略）",
+                          opp_id=None, fields={"main_keyword": ""})
+finally:
+    SA._ai_call_json_full = _orig_ai_call_json_full
+
+check("blocks=[]時不能新增半成品seo_articles", set(ARTICLES.keys()) == before_article_ids, ARTICLES.keys())
+check("blocks=[]時job要落在錯誤狀態，不是done", JOBS[901]["status"] == "error", JOBS[901])
+check("錯誤訊息要講清楚是blocks為空、不是建立半成品，方便使用者知道要重試",
+      "blocks為空" in JOBS[901]["error_msg"] and "半成品" in JOBS[901]["error_msg"], JOBS[901])
+
+# 13g) 正常情境對照組：main_keyword/related_products都有填、AI回傳正常blocks時，仍然要能正常入庫成草稿，
+#      確認這次修正沒有連帶把「正常生成」的路徑弄壞。
+JOBS[902] = {"id": 902, "status": "pending", "article_id": None, "error_msg": ""}
+before_article_ids_2 = set(ARTICLES.keys())
+
+def fake_ai_call_json_full_ok(prompt, model=None, max_tokens=None):
+    return ({
+        "title": "濾網多久換一次？完整週期指南", "slug": "/blog/filter-change-guide",
+        "meta_title": "mt", "meta_description": "md", "ai_summary": "ai_summary",
+        "needs_confirmation": False, "confirmation_notes": "",
+        "blocks": sample_blocks(bad_url="/pages/contact-lu"),
+        "internal_links": "", "long_tail_keywords": "", "knowledge_citations": [],
+    }, None, "end_turn")
+
+SA._ai_call_json_full = fake_ai_call_json_full_ok
+try:
+    SA._run_generate_job(902, "filterbreath", "空氣清淨機濾網", "空氣清淨機濾網多久換？", "（分析內容略）",
+                          opp_id=None, fields={"main_keyword": "濾網更換週期"})
+finally:
+    SA._ai_call_json_full = _orig_ai_call_json_full
+
+check("正常案例（有main_keyword、AI回傳正常blocks）要真的新增一篇文章，證明這次修正沒擋到正常路徑",
+      JOBS[902]["status"] == "done" and JOBS[902]["article_id"] in ARTICLES, JOBS[902])
+if JOBS[902]["article_id"] in ARTICLES:
+    new_article = ARTICLES[JOBS[902]["article_id"]]
+    check("正常案例新文章狀態應該是draft_review（沒有blocks_errors/needs_confirmation/placeholder）",
+          new_article["status"] == "draft_review", new_article["status"])
+
+# 13h) debug要能看到main_keyword/search_intent的值與來源，方便後台判斷「AI沒填正文」是不是因為這兩個沒填
+resp_preview = client.post(f"/admin/seo-generator/preview?key={KEY}", json={
+    "brand": "filterbreath", "category": "空氣清淨機濾網", "topic": "空氣清淨機濾網多久換？",
+    "analysis": "", "main_keyword": "", "search_intent": "",
+})
+preview_debug = resp_preview.get_json()["debug"]["fields"]
+check("Preview debug要顯示MAIN_KEYWORD欄位且標示為空（未填）", preview_debug["MAIN_KEYWORD"]["src"] == "空（未填，AI不會自動補）", preview_debug)
+check("Preview debug要顯示RELATED_PRODUCTS已經fallback到品牌預設商品，不是空的",
+      preview_debug["RELATED_PRODUCTS"]["value"] == BRANDS["filterbreath"]["allowed_products"], preview_debug)
 
 print("=" * 70)
 print("結果")
