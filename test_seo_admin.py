@@ -57,6 +57,7 @@ THEMES = {
 
 ARTICLES = {}  # id -> dict
 JOBS = {}      # id -> dict，模擬 seo_generate_jobs 資料表，供_run_generate_job測試用
+PROMPT_TEMPLATES = {}  # key -> content，模擬 seo_prompt_templates 資料表
 
 def _stamp_fingerprint(aid, fp_override=None):
     """模擬「這篇文章的quality_check是針對目前這個版本跑的」：算出正確指紋寫回extra。
@@ -282,6 +283,15 @@ def fake_q(sql, params=None, fetch=None):
         if a:
             a.update(title=title, slug=slug, meta_title=meta_title, meta_description=meta_desc,
                       content=content, ai_summary=ai_summary, status=status, extra=extra)
+        return None
+
+    # seo_prompt_templates：_get_prompt_template / _save_prompt_template
+    if s.startswith("SELECT content FROM seo_prompt_templates WHERE key=%s"):
+        k = params[0]
+        return (PROMPT_TEMPLATES[k],) if k in PROMPT_TEMPLATES else None
+    if s.startswith("INSERT INTO seo_prompt_templates"):
+        k, content, _ = params
+        PROMPT_TEMPLATES[k] = content
         return None
 
     # seo_article_save: INSERT (新文章)
@@ -728,6 +738,52 @@ preview_debug = resp_preview.get_json()["debug"]["fields"]
 check("Preview debug要顯示MAIN_KEYWORD欄位且標示為空（未填）", preview_debug["MAIN_KEYWORD"]["src"] == "空（未填，AI不會自動補）", preview_debug)
 check("Preview debug要顯示RELATED_PRODUCTS已經fallback到品牌預設商品，不是空的",
       preview_debug["RELATED_PRODUCTS"]["value"] == BRANDS["filterbreath"]["allowed_products"], preview_debug)
+
+print("=" * 70)
+print("14. Prompt設定存檔前的輸出契約檢查：擋下會把blocks換成content、或砍掉分析建議格式的自訂Prompt")
+print("=" * 70)
+
+# 14a) 情境還原：濾呼吸的luair-filter-blog SOP把generate輸出從blocks陣列換成content純文字，
+#      這種存檔不能成功，否則之後所有品牌生成都會變成blocks永遠是空的（_run_generate_job只認blocks）
+bad_generate_prompt = SA.DEFAULT_GENERATE_PROMPT.replace('"blocks": [ {"type":"heading","level":2,"text":"..."} ]',
+                                                          '"content": "完整文章內容，純HTML格式"')
+check("bad_generate_prompt真的把blocks拿掉了（測試前提要成立）", '"blocks"' not in bad_generate_prompt)
+resp_bad_gen = client.post(f"/admin/seo-settings/save?key={KEY}", data={
+    "prompt_key": "generate", "content": bad_generate_prompt,
+})
+check("拿掉blocks輸出格式的generate Prompt存檔要被擋下（回200顯示錯誤，不是302導回列表）",
+      resp_bad_gen.status_code == 200, resp_bad_gen.status_code)
+check("擋下的錯誤訊息要講清楚是缺少blocks欄位",
+      "blocks" in resp_bad_gen.get_data(as_text=True) and "擋下儲存" in resp_bad_gen.get_data(as_text=True),
+      resp_bad_gen.get_data(as_text=True)[:300])
+check("擋下之後不能真的寫進seo_prompt_templates，generate仍要維持系統預設值",
+      "generate" not in PROMPT_TEMPLATES, PROMPT_TEMPLATES.get("generate"))
+
+# 14b) 情境還原：分析Prompt砍掉「建議主關鍵字」等固定格式行，會讓後台自動帶入的欄位全部變空
+bad_analyze_prompt = SA.DEFAULT_ANALYZE_PROMPT.replace("建議主關鍵字：（1個最重要的SEO主關鍵字，4~10個繁體中文字，不含標點符號）", "")
+check("bad_analyze_prompt真的把「建議主關鍵字」這行拿掉了（測試前提要成立）", "建議主關鍵字" not in bad_analyze_prompt)
+resp_bad_an = client.post(f"/admin/seo-settings/save?key={KEY}", data={
+    "prompt_key": "analyze", "content": bad_analyze_prompt,
+})
+check("砍掉建議主關鍵字這行的analyze Prompt存檔要被擋下",
+      resp_bad_an.status_code == 200 and "建議主關鍵字" in resp_bad_an.get_data(as_text=True), resp_bad_an.status_code)
+check("擋下之後analyze仍要維持系統預設值，不能真的存進去",
+      "analyze" not in PROMPT_TEMPLATES, PROMPT_TEMPLATES.get("analyze"))
+
+# 14c) 正常案例：格式正確、只改風格/規則文字的自訂Prompt，要能正常存檔成功（不能因為新增檢查就連正常案例都擋掉）
+good_generate_prompt = SA.DEFAULT_GENERATE_PROMPT.replace("你是台灣SEO/GEO/AEO內容策略專家與文案編輯", "你是資深家電耗材文案編輯")
+resp_good_gen = client.post(f"/admin/seo-settings/save?key={KEY}", data={
+    "prompt_key": "generate", "content": good_generate_prompt,
+})
+check("只調整風格文字、有保留blocks輸出格式的generate Prompt要能正常存檔成功（302導回列表+flash=已儲存）",
+      resp_good_gen.status_code == 302 and "flash" in resp_good_gen.headers.get("Location", ""), resp_good_gen.status_code)
+check("正常案例真的寫進seo_prompt_templates了", PROMPT_TEMPLATES.get("generate") == good_generate_prompt)
+
+# 14d) 還原預設值路徑本來就是用DEFAULT_*_PROMPT，不用經過使用者輸入檢查，也不該被這次新增的檢查誤擋
+resp_reset = client.post(f"/admin/seo-settings/reset?key={KEY}", data={"prompt_key": "generate"})
+check("還原預設值本身一定合法，不會被新的契約檢查擋下", resp_reset.status_code == 302, resp_reset.status_code)
+check("還原後seo_prompt_templates裡的generate確實變回系統預設值",
+      PROMPT_TEMPLATES.get("generate") == SA.DEFAULT_GENERATE_PROMPT)
 
 print("=" * 70)
 print("結果")

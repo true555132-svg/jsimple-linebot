@@ -4570,7 +4570,7 @@ textarea{width:100%;border:1px solid #ddd;border-radius:8px;padding:10px;font-si
     </form>
   </div>
 
-  {% if flash %}<div class="section" style="color:#2e7d32;font-weight:700">{{ flash }}</div>{% endif %}
+  {% if flash %}<div class="section" style="color:{{ '#c62828' if flash_error else '#2e7d32' }};font-weight:700;white-space:pre-line">{{ flash }}</div>{% endif %}
 
 </div>
 """ + SHELL_CLOSE + """
@@ -6160,7 +6160,32 @@ def seo_settings_page():
     generate_prompt = _get_prompt_template("generate", DEFAULT_GENERATE_PROMPT)
     shell = _shell_open(key, "seo-settings", [("Prompt 設定", None)])
     return render_template_string(SETTINGS_HTML, key=key, shell=shell,
-        analyze_prompt=analyze_prompt, generate_prompt=generate_prompt, flash=request.args.get("flash", ""))
+        analyze_prompt=analyze_prompt, generate_prompt=generate_prompt,
+        flash=request.args.get("flash", ""), flash_error=False)
+
+def _validate_prompt_contract(prompt_key, content):
+    """自訂Prompt存檔前的輸出契約檢查：避免改壞程式賴以解析AI回應的固定欄位／格式，
+    導致存檔當下不會報錯、但之後全品牌生成/分析都悄悄失敗（例如把generate的輸出從
+    blocks陣列換成content純文字，_run_generate_job只認blocks，會讓AI寫得再好都被當空文章擋下）。
+    回傳非空字串代表擋下存檔，字串內容是要顯示給使用者的錯誤說明；回傳空字串代表通過。"""
+    if prompt_key == "generate":
+        if '"blocks"' not in content:
+            return ('擋下儲存：生成文章Prompt的輸出格式一定要包含 "blocks" 這個JSON欄位，'
+                     '程式是靠這個欄位讀取AI寫的文章內容。目前這份內容裡沒有 "blocks"，'
+                     '存下去會讓所有品牌的生成都變成「blocks為空、不會建立草稿」。'
+                     '如果是要客製化寫作風格／架構要求，請保留原本的blocks輸出格式，'
+                     '只調整風格、規則、字數這些描述文字就好。')
+    elif prompt_key == "analyze":
+        required_labels = ["建議文章類型", "建議主關鍵字", "建議搜尋意圖", "建議目標客群",
+                            "建議對應商品", "建議禁止方向", "建議CTA方向"]
+        missing = [lbl for lbl in required_labels if lbl not in content]
+        if missing:
+            return ('擋下儲存：搜尋意圖分析Prompt結尾一定要保留這幾行固定格式的建議輸出，'
+                     '「分析」按鈕產生結果後，後台會自動抓這幾行帶入生成表單的對應欄位：'
+                     + '、'.join(missing) + '。'
+                     '目前內容裡缺少這幾行，存下去之後每次分析完，這些欄位都會是空的，'
+                     '要你自己手動一個個填。')
+    return ""
 
 @seo_bp.route("/admin/seo-settings/save", methods=["POST"])
 def seo_settings_save():
@@ -6171,6 +6196,14 @@ def seo_settings_save():
     content = request.form.get("content", "")
     if prompt_key not in ("analyze", "generate") or not content.strip():
         return redirect(f"/admin/seo-settings?key={key}")
+    err = _validate_prompt_contract(prompt_key, content)
+    if err:
+        analyze_prompt  = content if prompt_key == "analyze"  else _get_prompt_template("analyze", DEFAULT_ANALYZE_PROMPT)
+        generate_prompt = content if prompt_key == "generate" else _get_prompt_template("generate", DEFAULT_GENERATE_PROMPT)
+        shell = _shell_open(key, "seo-settings", [("Prompt 設定", None)])
+        return render_template_string(SETTINGS_HTML, key=key, shell=shell,
+            analyze_prompt=analyze_prompt, generate_prompt=generate_prompt,
+            flash=err, flash_error=True)
     _save_prompt_template(prompt_key, content)
     return redirect(f"/admin/seo-settings?key={key}&flash=已儲存")
 
