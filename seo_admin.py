@@ -1929,8 +1929,10 @@ Meta Description：{article.get('meta_description','')}
 12. 是否需要拆成多篇文章
 13. 是否有內容太泛、太像AI文的問題
 14. 是否有錯誤或不適合品牌的方向（尤其注意是否偏離「禁止偏離方向」）
-15. 品牌一致性檢查（重要）{compat_line}—— 逐項檢查文章裡是否出現：(a) 白名單以外的其他品牌名稱 (b) 不屬於{brand.get('name','')}的商品 (c) 不屬於{brand.get('name','')}的服務 (d) 違反上面「可用商品資料」清單的商品/服務 (e) 混用其他品牌（含白名單相容品牌）自己的知識庫內容 (f) 暗示原廠/官方授權 (g) 具體規格、價格、承重、認證等數據卻沒有資料佐證 (h) 用「全系列相容」「所有型號皆適用」「均相容」等籠統說法宣稱相容性，而非針對個別商品逐一佐證。只要出現其中任何一項，這篇文章的品牌一致性就算未通過，必須在brand_consistency_issues欄位具體列出疑似違規的文字段落。
+15. 品牌一致性檢查（重要）{compat_line}—— 逐項檢查文章裡是否出現：(a) 白名單以外的其他品牌名稱 (b) 不屬於{brand.get('name','')}的商品 (c) 不屬於{brand.get('name','')}的服務 (d) 違反上面「可用商品資料」清單的商品/服務 (e) 混用其他品牌（含白名單相容品牌）自己的知識庫內容 (f) 暗示原廠/官方授權 (g) 具體規格、價格、承重、認證等數據卻沒有資料佐證 (h) 用「全系列相容」「所有型號皆適用」「均相容」等籠統說法宣稱相容性，而非針對個別商品逐一佐證 (i) 具體型號的相容/適用宣稱（例如「適用於XX型號」「對應OO料號」）卻找不到「品牌知識庫」或「品牌SEO規則」的資料佐證。只要出現其中任何一項，這篇文章的品牌一致性就算未通過，必須在brand_consistency_issues欄位具體列出疑似違規的文字段落。
 16. 正文是否還殘留「待補充」「待確認」「TODO」等佔位文字尚未填寫（若有，視為未完成，必須在issues指出，且not recommend_publish）
+17. 正文是否直接外露內部／後台用語（例如「知識庫未列出」「品牌SEO規則」「knowledge_citations」「confirmation_notes」這類明顯是系統內部溝通用的詞彙或制式套話，而不是說給讀者聽的自然語言）——資料真的不足時應該用消費者語言解釋，不是照抄系統內部欄位名稱或反覆貼同一句套話
+18. 如果標題或Meta Title語意上承諾了「比較」「差異」「怎麼選」（例如「A跟B差在哪」「哪個好」「怎麼挑」），檢查正文是否真的給出具體的比較結論或選購依據——只是把各項目分別介紹一遍、卻沒有講出實際差異或建議，視為標題與內容不符
 
 輸出格式（只輸出JSON，不要其他文字，不要markdown code block）：
 {{
@@ -1939,7 +1941,9 @@ Meta Description：{article.get('meta_description','')}
   "brand_consistency_pass": true或false,
   "brand_consistency_issues": "列出第15項找到的疑似違反品牌一致性的具體內容，沒有問題就輸出空字串",
   "has_placeholder_text": true或false,
-  "issues": "主要問題，條列式文字，找到的問題具體寫出來",
+  "internal_jargon_leaked": true或false,
+  "title_content_mismatch": true或false,
+  "issues": "主要問題，條列式文字，找到的問題具體寫出來（第17、18項若為true，也要在這裡具體指出是哪一句）",
   "suggestions": "修改建議，具體可執行",
   "next_status": "從 draft_review/needs_revision/ready_to_publish 選一個",
   "suggested_sections": "建議補強的段落，例如：補FAQ、補商品導購段落",
@@ -1976,6 +1980,11 @@ def _merge_quality_check_results(results):
         "brand_consistency_pass": all(r.get("brand_consistency_pass") is not False for r in results),
         "brand_consistency_issues": " / ".join(x for x in (r.get("brand_consistency_issues", "") for r in results) if x),
         "has_placeholder_text": any(bool(r.get("has_placeholder_text")) for r in results),
+        "internal_jargon_leaked": any(bool(r.get("internal_jargon_leaked")) for r in results),
+        # title_content_mismatch是整篇標題vs全文內容的判斷，分段檢查時每段只看得到部分正文，
+        # 用all()：只有「每一段都認為沒看到比較結論」才視為整篇真的沒回答，避免答案剛好落在
+        # 另一段、卻被誤判成標題文不對題
+        "title_content_mismatch": all(bool(r.get("title_content_mismatch")) for r in results),
         "issues": "\n".join(f"[第{i+1}段] {r.get('issues','')}" for i, r in enumerate(results) if r.get("issues")),
         "suggestions": "\n".join(f"[第{i+1}段] {r.get('suggestions','')}" for i, r in enumerate(results) if r.get("suggestions")),
         "next_status": "needs_revision",
@@ -2049,10 +2058,18 @@ def _run_quality_check_job(job_id, article_id):
         if result.get("has_placeholder_text") or _content_has_placeholder(article.get("content", "")):
             result["recommend_publish"] = False
             result["has_placeholder_text"] = True
+        # 內部用語外露／標題與內容不符：這兩項一樣是硬性規則，不讓AI自己判斷的recommend_publish蓋過去
+        # （避免AI發現問題卻覺得「大致還好」就放行，跟brand_consistency_pass/has_placeholder_text同一套邏輯）
+        if result.get("internal_jargon_leaked"):
+            result["recommend_publish"] = False
+        if result.get("title_content_mismatch"):
+            result["recommend_publish"] = False
         next_status = result.get("next_status", "")
         if next_status not in ARTICLE_STATUS:
             next_status = "needs_revision"
         if result.get("brand_consistency_pass") is False:
+            next_status = "needs_revision"
+        if result.get("internal_jargon_leaked") or result.get("title_content_mismatch"):
             next_status = "needs_revision"
         if result.get("has_placeholder_text"):
             next_status = "draft_review" if next_status == "ready_to_publish" else next_status
@@ -2306,13 +2323,36 @@ CTA方向：[[CTA_DIRECTION]]
 [[KNOWLEDGE]]
 
 ━━━ 資料不足時的處理原則（重要） ━━━
+0. 動筆前先盤點：這個主題目前有哪些「品牌知識庫」裡查證過的商品規格、完整型號、適用/相容對應關係、
+   安裝步驟、常見選購錯誤——只能用盤點到的真實資料，不能為了增加篇幅或塞關鍵字，
+   自行擴充型號筆數、規格項目，或把型號對應關係「湊」出來
 1. 優先引用「品牌知識庫」的內容，不要憑空想像規格、價格、承重、認證、案例等具體數據
 2. 不影響文章核心結論的次要資訊，資料不足就直接省略，不用為了寫滿硬湊內容
-3. 如果缺少的資料會影響文章的核心結論（例如比較表裡某個關鍵數字、選購建議依據的規格），
-   該處內容請填「待確認」，並在最終輸出JSON的 needs_confirmation 設為 true、
-   confirmation_notes 具體說明哪裡待確認——不要為了讓文章看起來完整就編造內容
-4. 額外用JSON欄位 knowledge_citations（陣列）列出這篇實際引用到的知識庫條目標題，沒有引用就輸出空陣列。
+3. 如果缺少的資料會影響文章的核心結論（例如比較表裡某個關鍵數字、選購建議依據的規格）：
+   不要編造「同等級」「差不多」「只差尺寸」這類沒有根據的結論，也不要整篇反覆重複
+   「知識庫未列出」「目前資料不足」這種制式套話——改用讀者聽得懂的說法，具體說明「這件事目前
+   還沒辦法確認」「現在可以依據哪些資料先選」「怎麼用完整機型/料號核對」，並在最終輸出JSON的
+   needs_confirmation 設為 true、confirmation_notes 具體說明哪裡待確認
+4. 如果盤點完發現，這篇主題最核心的問題（例如標題或主關鍵字明確要問的比較/差異/選擇依據）
+   完全沒有對應的真實資料可以回答——不要硬寫一篇看起來完整、實際上答非所問的文章。
+   請直接輸出空的 blocks 陣列（[]），並在 confirmation_notes 具體說明缺少哪些資料、
+   建議編輯補充什麼或調整題目方向；有部分資料可以回答、只是不夠完整時，適用上面第3點，不適用這一點
+5. 額外用JSON欄位 knowledge_citations（陣列）列出這篇實際引用到的知識庫條目標題，沒有引用就輸出空陣列。
    這個欄位只存後台紀錄用，不要把它寫進文章正文裡（正文不需要「本篇引用知識庫」這種段落）
+
+━━━ 品牌觀點的可信度（重要） ━━━
+- 品牌定位、優勢、選購建議這類「品牌觀點」內容，只能引用品牌SEO規則／知識庫裡真實記載的
+  實測結果、商品照片佐證、量測數據、客服常見誤購問題、選購流程等第一手資料
+- 沒有這些第一手資料時，不要把「建議」寫成既有事實塞進正文；改用JSON欄位
+  suggested_first_hand_data 列出建議之後蒐集的第一手資料（例如：實測影片、選購教學圖、
+  客服常見誤購案例），沒有需要建議就輸出空字串
+- 這部分內容夠不夠「資訊增益」不用湊到某個字數或項目數，以讀者能不能因此選對商品為準
+
+━━━ 型號對應關係的呈現方式 ━━━
+- 有查證來源時，用「完整設備型號 → 對應零件/耗材完整料號 → 對應商品」的方式呈現對應關係，
+  只列真的有來源根據的幾筆，不用湊到3~5筆，兩筆就寫兩筆
+- 清楚區分兩種相容性來源，不要混為一談：(a) 設備原廠文件證實的料號對應
+  (b)「[[BRAND_NAME]]」自己判斷/宣稱的相容性——(b)不能說成原廠認證或官方對應
 
 ━━━ 品牌規則與目標客群（重要） ━━━
 - 嚴格遵守上面的「禁止偏離方向」，絕對不要往那些方向寫
@@ -2371,6 +2411,7 @@ CTA方向：[[CTA_DIRECTION]]
   "knowledge_citations": ["引用的知識庫條目標題"],
   "needs_confirmation": true或false,
   "confirmation_notes": "哪些地方標了待確認、為什麼，沒有就空字串",
+  "suggested_first_hand_data": "建議之後蒐集的第一手資料，沒有需要建議就空字串",
   "blocks": [ {"type":"heading","level":2,"text":"..."} ]
 }"""
 
@@ -6357,6 +6398,7 @@ def _run_generate_job(job_id, brand_key, category, topic, analysis, opp_id=None,
             "missing_links": missing_links,
             "needs_confirmation": needs_confirmation,
             "confirmation_notes": result.get("confirmation_notes", ""),
+            "suggested_first_hand_data": result.get("suggested_first_hand_data", ""),
             "knowledge_citations": result.get("knowledge_citations", []),
             "truncated": truncated,
             "has_placeholder_text": has_placeholder,

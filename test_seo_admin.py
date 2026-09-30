@@ -59,6 +59,7 @@ THEMES = {
 ARTICLES = {}  # id -> dict
 JOBS = {}      # id -> dict，模擬 seo_generate_jobs 資料表，供_run_generate_job測試用
 PROMPT_TEMPLATES = {}  # key -> content，模擬 seo_prompt_templates 資料表
+QC_JOBS = {}   # id -> dict，模擬 seo_quality_check_jobs 資料表，供_run_quality_check_job測試用
 
 def _stamp_fingerprint(aid, fp_override=None):
     """模擬「這篇文章的quality_check是針對目前這個版本跑的」：算出正確指紋寫回extra。
@@ -284,6 +285,34 @@ def fake_q(sql, params=None, fetch=None):
         if a:
             a.update(title=title, slug=slug, meta_title=meta_title, meta_description=meta_desc,
                       content=content, ai_summary=ai_summary, status=status, extra=extra)
+        return None
+
+    # _run_quality_check_job 專用查詢/更新
+    if s.startswith("SELECT title,meta_title,meta_description,content,brand_key,category,extra,blocks"):
+        aid = params[0]
+        a = ARTICLES.get(aid)
+        if not a:
+            return None
+        return (a["title"], a["meta_title"], a["meta_description"], a["content"],
+                a["brand_key"], a["category"], a["extra"], a["blocks"])
+    if s.startswith("UPDATE seo_articles SET extra=%s, status=%s, updated_at=%s WHERE id=%s"):
+        extra, status, updated_at, aid = params
+        aid = int(aid)
+        a = ARTICLES.get(aid)
+        if a:
+            a.update(extra=extra, status=status)
+        return None
+    if s.startswith("UPDATE seo_quality_check_jobs SET status='running', updated_at=%s WHERE id=%s"):
+        _, job_id = params
+        QC_JOBS[job_id]["status"] = "running"
+        return None
+    if s.startswith("UPDATE seo_quality_check_jobs SET status='error', error_msg=%s, updated_at=%s WHERE id=%s"):
+        error_msg, _, job_id = params
+        QC_JOBS[job_id].update(status="error", error_msg=error_msg)
+        return None
+    if s.startswith("UPDATE seo_quality_check_jobs SET status='done', result=%s, updated_at=%s WHERE id=%s"):
+        result, _, job_id = params
+        QC_JOBS[job_id].update(status="done", result=result)
         return None
 
     # seo_prompt_templates：_get_prompt_template / _save_prompt_template
@@ -849,6 +878,114 @@ check("7行建議（移到最前面後）依然能被正確解析出來，跟原
       ok_data.get("suggested_avoid_directions") == "不要提到其他品牌的濾網" and
       ok_data.get("suggested_cta_direction") == "引導確認機型後選購對應濾網",
       ok_data)
+
+print("=" * 70)
+print("16. 品質檢查新增的硬性規則：內部用語外露 / 標題承諾比較但正文沒回答，都要強制擋下不能發布")
+print("=" * 70)
+
+add_article(200, title="00820跟108850差在哪？高矮款怎麼選", slug="/blog/lu-model-compare",
+            meta_title="mt", meta_description="md", content="<p>內容略</p>", brand_key="filterbreath",
+            category="製冰機濾網", status="draft_review",
+            blocks=json.dumps(sample_blocks(bad_url="/pages/contact-lu"), ensure_ascii=False),
+            extra=json.dumps({"related_products": "濾網"}, ensure_ascii=False))
+
+_orig_ai_call_json = SA._ai_call_json
+
+def _run_qc(article_id, fake_result):
+    job_id = f"qc_{article_id}_{len(QC_JOBS)}"
+    QC_JOBS[job_id] = {"id": job_id, "status": "pending", "result": None, "error_msg": ""}
+    SA._ai_call_json = lambda prompt, model=None, max_tokens=None: (dict(fake_result), None)
+    try:
+        SA._run_quality_check_job(job_id, article_id)
+    finally:
+        SA._ai_call_json = _orig_ai_call_json
+    return QC_JOBS[job_id]
+
+# 16a) AI自己覺得可以發布(recommend_publish=True)，但同時標了internal_jargon_leaked=True
+#      —— 程式要強制蓋掉AI自己的樂觀判斷，不能真的放行
+job_a = _run_qc(200, {
+    "score": 85, "recommend_publish": True, "brand_consistency_pass": True,
+    "brand_consistency_issues": "", "has_placeholder_text": False,
+    "internal_jargon_leaked": True, "title_content_mismatch": False,
+    "issues": "正文出現「知識庫未列出」這種內部用語", "suggestions": "改成消費者語言",
+    "next_status": "ready_to_publish", "suggested_sections": "", "suggested_internal_links": "",
+    "suggested_related_products": "",
+})
+extra_a = SA._parse_extra(ARTICLES[200]["extra"])
+check("internal_jargon_leaked=True時，就算AI自己說recommend_publish=True也要被強制蓋成False",
+      extra_a["quality_check"]["recommend_publish"] is False, extra_a["quality_check"])
+check("internal_jargon_leaked=True時，文章狀態要落在needs_revision，不能是ready_to_publish",
+      ARTICLES[200]["status"] == "needs_revision", ARTICLES[200]["status"])
+
+# 16b) 標題承諾了「差在哪、怎麼選」這種比較語意，但AI檢查認定正文沒有真的回答差異
+job_b = _run_qc(200, {
+    "score": 80, "recommend_publish": True, "brand_consistency_pass": True,
+    "brand_consistency_issues": "", "has_placeholder_text": False,
+    "internal_jargon_leaked": False, "title_content_mismatch": True,
+    "issues": "標題問兩款差在哪，正文只各自介紹沒有給出差異結論", "suggestions": "補上實際差異或選購依據",
+    "next_status": "ready_to_publish", "suggested_sections": "", "suggested_internal_links": "",
+    "suggested_related_products": "",
+})
+extra_b = SA._parse_extra(ARTICLES[200]["extra"])
+check("title_content_mismatch=True時，同樣要被強制蓋成recommend_publish=False",
+      extra_b["quality_check"]["recommend_publish"] is False, extra_b["quality_check"])
+check("title_content_mismatch=True時，文章狀態要落在needs_revision",
+      ARTICLES[200]["status"] == "needs_revision", ARTICLES[200]["status"])
+
+# 16c) 對照組：兩項都是False、AI也判斷可以發布 —— 這次新增的規則不能誤傷正常過關的案例
+job_c = _run_qc(200, {
+    "score": 92, "recommend_publish": True, "brand_consistency_pass": True,
+    "brand_consistency_issues": "", "has_placeholder_text": False,
+    "internal_jargon_leaked": False, "title_content_mismatch": False,
+    "issues": "", "suggestions": "", "next_status": "ready_to_publish",
+    "suggested_sections": "", "suggested_internal_links": "", "suggested_related_products": "",
+})
+extra_c = SA._parse_extra(ARTICLES[200]["extra"])
+check("兩項新規則都沒觸發時，正常案例應該維持recommend_publish=True，新檢查沒有誤傷正常流程",
+      extra_c["quality_check"]["recommend_publish"] is True, extra_c["quality_check"])
+check("正常案例狀態應該是ready_to_publish", ARTICLES[200]["status"] == "ready_to_publish", ARTICLES[200]["status"])
+
+# 16d) _quality_check_prompt本身要真的問到這兩項新規則，不能只是程式端硬加欄位、Prompt卻沒要求AI檢查
+qc_prompt_text = SA._quality_check_prompt(
+    {"title": "00820跟108850差在哪？", "meta_title": "mt", "meta_description": "md", "content": "內容略"},
+    SA._get_brand("filterbreath"), "製冰機濾網", {}, {})
+check("品質檢查Prompt要包含「內部/後台用語」外露的檢查項目", "內部" in qc_prompt_text and "後台用語" in qc_prompt_text, None)
+check("品質檢查Prompt要包含「標題與內容不符」比較類的檢查項目", "標題與內容不符" in qc_prompt_text, None)
+check("品質檢查Prompt輸出JSON schema要包含新的兩個欄位",
+      "internal_jargon_leaked" in qc_prompt_text and "title_content_mismatch" in qc_prompt_text, None)
+
+print("=" * 70)
+print("17. DEFAULT_GENERATE_PROMPT新增的內容品質指示：資料盤點/不編造/核心問題答不出來就blocks=[]/型號呈現方式")
+print("=" * 70)
+
+check("generate Prompt要有「動筆前先盤點」的指示（目標1：只用已查證資料，不湊筆數）",
+      "動筆前先盤點" in SA.DEFAULT_GENERATE_PROMPT)
+check("generate Prompt要明確禁止「同等級」「差不多」這類編造結論（目標2）",
+      "同等級" in SA.DEFAULT_GENERATE_PROMPT and "差不多" in SA.DEFAULT_GENERATE_PROMPT)
+check("generate Prompt要有「核心問題答不出來就輸出空blocks」的指示（目標2）",
+      "完全沒有對應的真實資料可以回答" in SA.DEFAULT_GENERATE_PROMPT and
+      "請直接輸出空的 blocks 陣列（[]）" in SA.DEFAULT_GENERATE_PROMPT)
+check("generate Prompt要有「品牌觀點的可信度」段落跟suggested_first_hand_data欄位（目標3）",
+      "品牌觀點的可信度" in SA.DEFAULT_GENERATE_PROMPT and
+      "suggested_first_hand_data" in SA.DEFAULT_GENERATE_PROMPT)
+check("generate Prompt要有「完整設備型號→料號→對應商品」的呈現方式指示，且不強制3~5筆（目標4）",
+      "完整設備型號" in SA.DEFAULT_GENERATE_PROMPT and "兩筆就寫兩筆" in SA.DEFAULT_GENERATE_PROMPT)
+check("generate Prompt輸出JSON schema仍然保留blocks（沒有被改成content，符合修改範圍限制）",
+      '"blocks"' in SA.DEFAULT_GENERATE_PROMPT and '"content"' not in SA.DEFAULT_GENERATE_PROMPT)
+
+# 用三品牌各生成一次，確認新增的內容品質指示不會brand-specific、不會跨品牌污染、也不會讓blocks變空
+for bk, cat, topic, mk in [
+    ("jsimple", "", "高架床下方空間怎麼利用最實用？", "高架床下方空間利用"),
+    ("lander", "", "客廳燈具怎麼選才不會太暗或太刺眼？", "客廳燈具怎麼選"),
+    ("filterbreath", "", "空氣清淨機濾網多久該換一次？", "空氣清淨機濾網更換週期"),
+]:
+    prompt_text = SA._generate_article_prompt(SA._get_brand(bk), cat, topic, "（分析內容略）", [],
+                                               {"main_keyword": mk}, {})
+    check(f"[{bk}] 新版generate prompt組出來時要包含這次新增的內容品質指示，且沒有寫死其他品牌名稱",
+          "動筆前先盤點" in prompt_text and "品牌觀點的可信度" in prompt_text, None)
+    other_brand_names = [BRANDS[b]["name"] for b in BRANDS if b != bk]
+    check(f"[{bk}] prompt裡不該出現其他品牌的名稱（確認新增內容不是寫死給特定品牌）",
+          all(name not in prompt_text.replace(BRANDS[bk]["name"], "") for name in other_brand_names), None)
 
 print("=" * 70)
 print("結果")
