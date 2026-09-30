@@ -988,6 +988,26 @@ for bk, cat, topic, mk in [
           all(name not in prompt_text.replace(BRANDS[bk]["name"], "") for name in other_brand_names), None)
 
 print("=" * 70)
+print("18. 濾呼吸專屬文章版型：只對filterbreath生效、不寫進全站共用的generate Prompt")
+print("=" * 70)
+
+lu_prompt = SA._generate_article_prompt(SA._get_brand("filterbreath"), "製冰機濾網",
+    "國際牌製冰室濾網00820與108850怎麼選", "（分析內容略）", [], {"main_keyword": "測試"}, {})
+check("濾呼吸的generate prompt要包含專屬版型指引", "濾呼吸文章版型" in lu_prompt and "快答" in lu_prompt, None)
+
+js_prompt = SA._generate_article_prompt(SA._get_brand("jsimple"), "", "高架床下方空間怎麼利用",
+    "（分析內容略）", [], {"main_keyword": "測試"}, {})
+ld_prompt = SA._generate_article_prompt(SA._get_brand("lander"), "", "客廳燈具怎麼選",
+    "（分析內容略）", [], {"main_keyword": "測試"}, {})
+check("JSIMPLE的generate prompt不該出現濾呼吸專屬版型指引", "濾呼吸文章版型" not in js_prompt, None)
+check("朗德的generate prompt不該出現濾呼吸專屬版型指引", "濾呼吸文章版型" not in ld_prompt, None)
+
+check("這段版型指引不在DEFAULT_GENERATE_PROMPT裡（證明是code分支加的，不是全站共用範本本身的內容）",
+      "濾呼吸文章版型" not in SA.DEFAULT_GENERATE_PROMPT)
+check("這段版型指引也沒有被存進seo_prompt_templates（不會跟著全站共用Prompt一起被存檔）",
+      "generate" not in PROMPT_TEMPLATES or "濾呼吸文章版型" not in PROMPT_TEMPLATES.get("generate", ""))
+
+print("=" * 70)
 print("結果")
 print("=" * 70)
 print(f"PASS: {len(PASS)}  FAIL: {len(FAIL)}")

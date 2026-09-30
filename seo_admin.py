@@ -2518,6 +2518,32 @@ def _resolve_generate_fields(fields, brand_rule, brand=None, category=None):
             sources[label] = {"value": "", "src": "空（無資料）"}
     return resolved, sources
 
+def _filterbreath_article_template_note():
+    """濾呼吸專屬版型指引——只在_generate_article_prompt裡對brand key=="filterbreath"時附加，
+    用程式碼判斷brand，不走_get_prompt_template/seo_prompt_templates，所以不會跟著全站共用的
+    「AI生成文章Prompt」一起存檔，也不會影響JSIMPLE、朗德的生成流程。
+    版型參考真實上線文章（luairtw.com一篇「一天開幾小時」的文章）的閱讀節奏，但只學排版習慣，
+    不複製參考文章本身的任何數字/規格/品牌主張——這篇文章的事實內容一律只能用當次的品牌知識庫/
+    商品資料/品牌規則，跟參考文章無關。全部對應到既有的10種block type，沒有新增任何格式。"""
+    return """━━━ 濾呼吸文章版型（只對這個品牌生效，其他品牌不用管這段） ━━━
+這是官網已上線文章證實有效的閱讀節奏，照這個節奏安排blocks，但下面提到的任何具體數字、
+規格、品牌主張都只是排版示範，不能真的寫進這篇文章——這篇的事實內容一律只能用上面
+「品牌知識庫」「品牌SEO規則」給的資料，跟這段版型說明本身無關。
+
+1. 標題直接寫成讀者會搜尋的問題句
+2. 第一個paragraph直接回答核心問題、說清楚這篇要解決什麼，不要用「以下為您介紹」這種開場白
+3. 開頭放一個summary block當作「本文重點」，3~5點條列，不看完全文也能抓到答案
+4. 緊接著的heading要像「快答：〇〇〇」或「先看結論」，比較/選擇型主題在這裡搭一個table
+   清楚列出關鍵差異；不適合表格的主題用list列步驟或重點，不要為了套版型硬塞表格
+5. 後面的heading要像真人下標題一樣自然、貼著這篇實際內容，不要每篇都套同樣幾個罐頭大標題
+   （例如不用每篇都硬寫「常見疑問」「注意事項」，這篇不需要就不要放）
+6. table不是只能出現一次——這篇如果有多處適合表格對照（例如不同規格、不同情境），
+   可以分散放在對應段落裡，不用集中成一張大表；沒有真實資料佐證的表格內容不能編
+7. paragraph維持2~4句、一段一個概念，手機閱讀不要連續塞大塊文字
+8. 商品相關內容先講「怎麼核對自己的型號/怎麼選」，讀者判斷得出來之後才自然接到對應商品或
+   客服CTA，不要一開頭就導購
+9. 結尾放FAQ（跟這篇主題真的相關的問題）、一個cta、一個related_links（只列確實存在且相關的頁面）"""
+
 def _generate_article_prompt(brand, category, topic, intent_analysis, knowledge_items=None, fields=None, brand_rule=None):
     """fields: 結構化表單欄位 dict（main_keyword/search_intent/target_audience/related_products/
     avoid_directions/cta_direction/article_type），缺省時用空字串，不影響舊呼叫方式。
@@ -2540,6 +2566,8 @@ def _generate_article_prompt(brand, category, topic, intent_analysis, knowledge_
         ARTICLE_TYPE=fields.get('article_type', ''),
         ARTICLE_TYPE_GUIDE=_article_type_guide(fields.get('article_type', '')),
         BRAND_RULE=_brand_rule_block(brand_rule))
+    if brand.get("key") == "filterbreath":
+        body += "\n\n" + _filterbreath_article_template_note()
     return _brand_guardrail_header(brand, category) + "\n\n" + body + "\n\n" + _brand_guardrail_footer(brand)
 
 # ── Auth（複製自 app.py，避免 circular import，與既有後台共用同一支密碼）──
