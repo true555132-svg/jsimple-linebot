@@ -25,6 +25,14 @@ EASYSTORE_DOMAIN       = os.getenv("EASYSTORE_DOMAIN", "www.jsimple.tw")
 EASYSTORE_BLOG_IDS     = {"jsimple": os.getenv("EASYSTORE_BLOG_ID_JSIMPLE", "164646")}
 TAIPEI_TZ = timezone(timedelta(hours=8))
 
+# 搜尋意圖分析（Haiku）的輸出token上限。系統預設的DEFAULT_ANALYZE_PROMPT在1500 tokens內夠用，
+# 但admin可以在/admin/seo-settings自訂分析Prompt——2026-10-01發現有品牌把Prompt加長很多
+# （多要求客群矩陣、AI Overview、People Also Ask等段落），實測1500 tokens會在寫到一半就被截斷。
+# 4096是依那次截斷實測結果（1500 tokens時只寫完約40%內容）往上抓的合理值，不是憑感覺亂猜；
+# 如果之後自訂Prompt又加長導致還是被截斷，seo_generator_analyze()會偵測到stop_reason並
+# 明確回錯誤（不會把截斷的分析當成功結果），到時候再依實際情況調高這個數字。
+SEO_ANALYZE_MAX_TOKENS = 4096
+
 seo_bp = Blueprint("seo", __name__)
 _db_lock = threading.Lock()
 
@@ -6256,9 +6264,17 @@ def seo_generator_analyze():
     brand      = _get_brand(brand_key)
     brand_rule = _match_brand_rule(brand_key, category, article_type)
     prompt     = _analyze_intent_prompt(brand, category, topic, brand_rule)
-    text, err  = _ai_call(prompt, model="claude-haiku-4-5", max_tokens=1500)
+    # 用_ai_call_full（不是_ai_call）是為了拿到stop_reason：自訂分析Prompt可能被改得很長
+    # （例如客製化SOP多加了客群矩陣、AI Overview、People Also Ask等段落），舊版1500 tokens
+    # 的上限不夠用時，AI回應會在寫到一半被硬切斷——這種情況絕對不能當成功結果處理，
+    # 否則後面拆「建議XXX」那幾行時什麼都抓不到，卻讓使用者以為分析正常完成了。
+    text, err, stop_reason = _ai_call_full(prompt, model="claude-haiku-4-5", max_tokens=SEO_ANALYZE_MAX_TOKENS)
     if err:
         return jsonify({"error": f"AI分析失敗：{err}"}), 200
+    if stop_reason == "max_tokens":
+        return jsonify({"error": f"AI分析回應被截斷（超過{SEO_ANALYZE_MAX_TOKENS} tokens上限），這份分析不完整、"
+                                  "建議欄位可能沒有正確產生，不能當成功結果使用。請簡化分析Prompt的要求量"
+                                  "（例如減少要求列出的項目數），或提高程式裡的token上限後再試一次。"}), 200
     analysis, suggested_article_type  = _extract_suggested_article_type(text)
     analysis, suggested_main_keyword  = _extract_suggested_main_keyword(analysis)
     analysis, suggested_search_intent = _extract_suggested_field(analysis, "建議搜尋意圖")

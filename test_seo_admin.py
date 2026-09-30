@@ -8,6 +8,7 @@ import seo_admin as SA
 from flask import Flask
 
 SA.DATABASE_URL = "fake"  # 讓_get_brand/_get_brand_theme等函式不要因為DATABASE_URL為空而提早return {}
+SA.ANTHROPIC_API_KEY = "fake"  # 讓analyze/generate路由不要因為沒設金鑰而提早return，才能測到後面monkeypatch的_ai_call_full邏輯
 
 PASS = []
 FAIL = []
@@ -784,6 +785,70 @@ resp_reset = client.post(f"/admin/seo-settings/reset?key={KEY}", data={"prompt_k
 check("還原預設值本身一定合法，不會被新的契約檢查擋下", resp_reset.status_code == 302, resp_reset.status_code)
 check("還原後seo_prompt_templates裡的generate確實變回系統預設值",
       PROMPT_TEMPLATES.get("generate") == SA.DEFAULT_GENERATE_PROMPT)
+
+print("=" * 70)
+print("15. seo_generator_analyze()：AI回應被截斷時要明確回錯誤，不能把不完整分析當成功結果")
+print("=" * 70)
+
+_orig_ai_call_full = SA._ai_call_full
+
+# 15a) 情境還原：自訂分析Prompt被加長後，Haiku在max_tokens內寫不完，stop_reason="max_tokens"
+def fake_ai_call_full_truncated(prompt, model=None, max_tokens=None):
+    return ("建議文章類型：教學型\n建議主關鍵字：HEPA濾網更換\n（後面還沒寫完就被截斷了...",
+            "", "max_tokens")
+
+SA._ai_call_full = fake_ai_call_full_truncated
+try:
+    resp_trunc = client.post(f"/admin/seo-generator/analyze?key={KEY}", json={
+        "brand": "filterbreath", "category": "", "topic": "HEPA濾網多久該換一次？",
+    })
+finally:
+    SA._ai_call_full = _orig_ai_call_full
+
+trunc_data = resp_trunc.get_json()
+check("stop_reason=max_tokens時，回應要有error欄位，不能是正常成功結果",
+      bool(trunc_data.get("error")), trunc_data)
+check("截斷的錯誤訊息要講清楚是被截斷，不是其他原因",
+      "截斷" in (trunc_data.get("error") or ""), trunc_data)
+check("截斷時不能回傳suggested_main_keyword等建議欄位（避免前端誤以為分析成功並自動填入不完整的值）",
+      "suggested_main_keyword" not in trunc_data, trunc_data)
+
+# 15b) 正常案例：沒有被截斷，7個建議欄位都要能正確解析出來（對照組，確保新檢查沒有誤傷正常情況）
+FAKE_COMPLETE_ANALYSIS = """在開始詳細分析之前，請先依序輸出以下7行建議：
+建議文章類型：教學型
+建議主關鍵字：HEPA濾網更換週期
+建議搜尋意圖：想知道HEPA濾網多久該換一次
+建議目標客群：使用空氣清淨機、擔心濾網效能下降的使用者
+建議對應商品：HEPA濾網,活性碳濾網
+建議禁止方向：不要提到其他品牌的濾網
+建議CTA方向：引導確認機型後選購對應濾網
+
+---
+接下來才開始詳細分析：
+（這裡是完整分析內容，略）"""
+
+def fake_ai_call_full_ok(prompt, model=None, max_tokens=None):
+    return (FAKE_COMPLETE_ANALYSIS, "", "end_turn")
+
+SA._ai_call_full = fake_ai_call_full_ok
+try:
+    resp_ok = client.post(f"/admin/seo-generator/analyze?key={KEY}", json={
+        "brand": "filterbreath", "category": "", "topic": "HEPA濾網多久該換一次？",
+    })
+finally:
+    SA._ai_call_full = _orig_ai_call_full
+
+ok_data = resp_ok.get_json()
+check("沒有截斷時不能誤報error", not ok_data.get("error"), ok_data)
+check("7行建議（移到最前面後）依然能被正確解析出來，跟原本放在結尾時抓法一致",
+      ok_data.get("suggested_article_type") == "教學型" and
+      ok_data.get("suggested_main_keyword") == "HEPA濾網更換週期" and
+      ok_data.get("suggested_search_intent") == "想知道HEPA濾網多久該換一次" and
+      ok_data.get("suggested_target_audience") == "使用空氣清淨機、擔心濾網效能下降的使用者" and
+      ok_data.get("suggested_related_products") == "HEPA濾網,活性碳濾網" and
+      ok_data.get("suggested_avoid_directions") == "不要提到其他品牌的濾網" and
+      ok_data.get("suggested_cta_direction") == "引導確認機型後選購對應濾網",
+      ok_data)
 
 print("=" * 70)
 print("結果")
