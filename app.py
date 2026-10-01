@@ -1807,20 +1807,21 @@ function fmtConvTime(ts){
 }
 
 let allConvs = [], curKey = null, curStatus = 'bot', filterStatus = 'all', filterTag = null, searchQ = '', filterRead = 'all';
-// pinnedKeys 現在從 server 的 c.pinned 欄位取得，localStorage 僅供一次性遷移
 function _buildPinnedKeys(){ return new Set((allConvs||[]).filter(c=>c.pinned).map(c=>c.key)); }
 let pinnedKeys = new Set();
-// 遷移：若 localStorage 有舊釘選，載入後自動同步到 DB（只做一次）
+// _pendingPinToggles: 防止 loadConvs 輪詢覆蓋進行中的 togglePin 結果
+const _pendingPinToggles = new Map();
+// 一次性遷移：把舊 localStorage pins 同步到 DB（標記先設，API 失敗也不會重跑）
 async function _migrateLegacyPins(){
   try{
+    if(localStorage.getItem('_pinsMigrated')) return;
     const old = JSON.parse(localStorage.getItem('pinnedKeys')||'[]');
-    if(!old.length || localStorage.getItem('_pinsMigrated')) return;
+    localStorage.setItem('_pinsMigrated','1'); // 先標記，確保只跑一次
+    localStorage.removeItem('pinnedKeys');
     for(const k of old){
       if(!allConvs.find(c=>c.key===k && c.pinned))
         await fetch('/api/pin',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({key:k,admin_key:KEY})});
     }
-    localStorage.setItem('_pinsMigrated','1');
-    localStorage.removeItem('pinnedKeys');
   }catch(e){}
 }
 let curTags = [], curCustomer = {}, noteTimer = null;
@@ -1893,8 +1894,12 @@ async function loadConvs(){
     const r = await fetch(`/api/conversations?key=${KEY}`);
     if(!r.ok){ document.getElementById('convList').innerHTML=`<div style="padding:16px;color:#e53935;font-size:12px">載入失敗 (${r.status})</div>`; return; }
     const d = await r.json();
-    if(Array.isArray(d) && d.length > 0) allConvs = d;
-    else if(d && d.conversations) allConvs = d.conversations;
+    if(Array.isArray(d) && d.length > 0){
+      // 若有進行中的 togglePin，保留本地 pin 狀態，避免輪詢覆蓋樂觀更新
+      if(_pendingPinToggles.size > 0)
+        d.forEach(c=>{ if(_pendingPinToggles.has(c.key)) c.pinned = _pendingPinToggles.get(c.key); });
+      allConvs = d;
+    } else if(d && d.conversations) allConvs = d.conversations;
     else if(Array.isArray(d) && d.length === 0 && allConvs.length === 0) allConvs = [];
     // 若回傳空陣列但本地有資料 → 可能是 DB 暫時超時，保留舊資料不清空
     pinnedKeys = _buildPinnedKeys();
@@ -1969,18 +1974,19 @@ function renderList(){
 
 async function togglePin(evt, key){
   evt.stopPropagation();
-  // 樂觀更新：立即更新 UI
   const conv = allConvs.find(c=>c.key===key);
-  if(conv) conv.pinned = !conv.pinned;
+  const newState = conv ? !conv.pinned : true;
+  if(conv) conv.pinned = newState;
+  _pendingPinToggles.set(key, newState); // 鎖定，防止輪詢覆蓋
   pinnedKeys = _buildPinnedKeys();
   renderList();
-  // 非同步寫入 DB
   try{
     await fetch('/api/pin',{method:'POST',headers:{'Content-Type':'application/json'},
       body:JSON.stringify({key,admin_key:KEY})});
+    _pendingPinToggles.delete(key); // API 成功後解鎖
   }catch(e){
-    // 寫入失敗：還原
-    if(conv) conv.pinned = !conv.pinned;
+    if(conv) conv.pinned = !newState; // 還原
+    _pendingPinToggles.delete(key);
     pinnedKeys = _buildPinnedKeys();
     renderList();
     toast('置頂儲存失敗，請重試');
