@@ -465,7 +465,8 @@ def _list_brands_with_theme():
 # 支援型別：paragraph/heading/summary/table/takeaway/note/list/faq/related_links/cta
 # 所有文字欄位一律html escape，AI輸出不可能夾帶可執行HTML/script，從架構上排除多數AI來源的HTML注入風險。
 BLOCKS_SCHEMA_VERSION = 1
-BLOCK_TYPES = ["heading", "paragraph", "summary", "table", "takeaway", "note", "list", "faq", "related_links", "cta"]
+BLOCK_TYPES = ["heading", "paragraph", "summary", "table", "takeaway", "note", "list", "faq", "related_links", "cta", "image"]
+IMAGE_SLOTS = ["cover", "inline_1", "inline_2"]
 
 def _esc(s):
     return html_mod.escape(str(s if s is not None else ""), quote=True)
@@ -500,6 +501,9 @@ def _block_style_rules(theme):
         "related_link": f"color:{accent};text-decoration:underline;",
         "cta": f"background:{primary};color:#ffffff;border-radius:8px;padding:18px 22px;margin:28px 0;text-align:center;",
         "cta_link": "color:#ffffff;font-weight:700;text-decoration:underline;",
+        "img": "max-width:100%;height:auto;border-radius:10px;display:block;margin:20px auto;",
+        "img_placeholder": f"border:2px dashed {accent};border-radius:10px;padding:28px 18px;margin:20px 0;"
+                            f"text-align:center;color:#666666;font-size:14px;background:{bg};",
     }
 
 def _blocks_body_html(blocks, rules, inline):
@@ -560,6 +564,13 @@ def _blocks_body_html(blocks, rules, inline):
             label = _esc(b.get("label") or "了解更多")
             link_html = f'<p><a href="{_esc(url)}"{a("cta_link")}>{label} →</a></p>' if url else ""
             parts.append(f'<div{a("cta")}><p>{_esc(b.get("text",""))}</p>{link_html}</div>')
+        elif t == "image":
+            url = b.get("url", "") if _is_safe_url(b.get("url", "")) else ""
+            alt = b.get("alt", "")
+            if url:
+                parts.append(f'<img src="{_esc(url)}" alt="{_esc(alt)}" loading="lazy"{a("img")}>')
+            else:
+                parts.append(f'<div{a("img_placeholder")}>🖼️ 圖片待完成：{_esc(alt) or "（尚未填寫ALT）"}</div>')
         # 未知type直接略過，不讓不認識的區塊污染輸出
     return "\n".join(parts)
 
@@ -587,6 +598,8 @@ def _scoped_style_block(rules):
 .jxsa-related-link{{{rules['related_link']}}}
 .jxsa-cta{{{rules['cta']}}}
 .jxsa-cta-link{{{rules['cta_link']}}}
+.jxsa-img{{{rules['img']}}}
+.jxsa-img-placeholder{{{rules['img_placeholder']}}}
 @media (max-width:600px){{
 .jxsa-wrap{{{rules['wrap_mobile']}}}
 }}
@@ -637,6 +650,8 @@ def _blocks_to_plain_text(blocks):
             lines += [it.get("text", "") for it in (b.get("items") or [])]
         elif t == "cta":
             lines.append(b.get("text", ""))
+        elif t == "image":
+            lines.append(f"[圖片：{b.get('alt','')}]")
     return "\n".join(l for l in lines if l)
 
 def _is_safe_url(url):
@@ -739,6 +754,14 @@ def _validate_blocks_schema(blocks):
             for j, it in enumerate(items):
                 if not (it.get("q") or "").strip() or not (it.get("a") or "").strip():
                     errors.append(f"第{idx+1}個faq區塊第{j+1}題缺Q或A")
+        elif t == "image":
+            if b.get("slot") not in IMAGE_SLOTS:
+                errors.append(f"第{idx+1}個image區塊的slot「{b.get('slot')}」不合法（只能是{IMAGE_SLOTS}之一）")
+            if not (b.get("prompt") or "").strip():
+                errors.append(f"第{idx+1}個image區塊缺少生圖Prompt")
+            if not (b.get("alt") or "").strip():
+                errors.append(f"第{idx+1}個image區塊缺少ALT文字")
+            # url可以是空字串（代表圖片待完成，等後台回填），這不算schema錯誤
     if heading_count == 0:
         errors.append("整篇文章沒有任何H2/H3標題")
     return errors
@@ -1438,6 +1461,11 @@ def _validate_article_for_publish(aid):
     if blocks:
         errors += _validate_blocks_schema(blocks)
         errors += _check_heading_hierarchy(blocks)
+        pending_images = [b.get("alt", "（無ALT）") for b in blocks
+                          if b.get("type") == "image" and not (b.get("url") or "").strip()]
+        if pending_images:
+            errors.append(f"圖片待完成：還有{len(pending_images)}張圖片網址尚未回填（{'、'.join(pending_images)}），"
+                           "請先在編輯頁用生圖Prompt製作圖片、上傳後回填網址，不得帶佔位圖發布")
         # 發布前重新驗證內部連結，不沿用生成當下寫死的extra.missing_links（那是舊快照，
         # 目標文章可能在生成之後又被下架/改回草稿）；一律以「現在」的已發布清單為準，
         # 失效的連結直接擋下發布並提示，不要偷偷拿掉連結卻讓文章照樣發布。
@@ -2388,8 +2416,13 @@ CTA方向：[[CTA_DIRECTION]]
   絕對不要自己編網址，程式會依後台已確認的連結資料補上或直接移除
 - cta：{"type":"cta","text":"1~3句話講清楚下一步該做什麼，呼應CTA方向","url":"","label":"按鈕文字，例如：立即詢價"}——
   全文只需要1個，放在文章最後；url留空，程式會自動補上品牌設定的連結
+- image：{"type":"image","slot":"cover/inline_1/inline_2","prompt":"生圖用的Prompt（英文，16:9橫式構圖，寫清楚畫面內容）",
+  "alt":"ALT文字（中文，具體描述畫面）","url":""}——不是每篇都需要，沒有特別要求配圖就不要放；
+  url一律留空字串，絕對不要自己填網址，圖片是後台人工用你寫的Prompt生成、上傳後才會回填網址；
+  slot只能是cover（封面，若用請放在blocks陣列最前面）、inline_1、inline_2（內文圖，放在對應段落附近）之一，
+  一篇最多3個image block（1個cover+2個inline），不要超過
 
-不需要每種type都用到，也沒有固定順序或固定數量，依這篇文章實際需要的內容安排。不要自創第11種type，
+不需要每種type都用到，也沒有固定順序或固定數量，依這篇文章實際需要的內容安排。不要自創清單以外的type，
 不要寫「品牌定位」這種獨立自我介紹段落，品牌調性自然融入內容語氣就好。
 
 ━━━ 語言與品質規範 ━━━
@@ -2518,13 +2551,31 @@ def _resolve_generate_fields(fields, brand_rule, brand=None, category=None):
             sources[label] = {"value": "", "src": "空（無資料）"}
     return resolved, sources
 
-def _filterbreath_article_template_note():
+def _filterbreath_article_template_note(has_category_product=True):
     """濾呼吸專屬版型指引——只在_generate_article_prompt裡對brand key=="filterbreath"時附加，
     用程式碼判斷brand，不走_get_prompt_template/seo_prompt_templates，所以不會跟著全站共用的
     「AI生成文章Prompt」一起存檔，也不會影響JSIMPLE、朗德的生成流程。
     版型參考真實上線文章（luairtw.com一篇「一天開幾小時」的文章）的閱讀節奏，但只學排版習慣，
     不複製參考文章本身的任何數字/規格/品牌主張——這篇文章的事實內容一律只能用當次的品牌知識庫/
-    商品資料/品牌規則，跟參考文章無關。全部對應到既有的10種block type，沒有新增任何格式。"""
+    商品資料/品牌規則，跟參考文章無關。全部對應到既有的block type，沒有新增輸出格式之外的東西。
+    has_category_product=False時加掛KNOWLEDGE_ONLY段落：這裡特意不是看RELATED_PRODUCTS的值
+    是不是空字串，而是看呼叫端算出來的「這個品類有沒有專屬商品資料」這個信號——因為品牌預設
+    allowed_products的三層fallback，就算這個品類根本沒商品，也常常會填進其他品類的商品名稱
+    （例如製冰機濾網這個案例，RELATED_PRODUCTS不會是空的，但那些商品跟這篇主題完全無關）。"""
+    knowledge_only_section = "" if has_category_product else """
+
+━━━ 濾呼吸的純知識文模式（KNOWLEDGE_ONLY，重要） ━━━
+這個主題所屬的品類目前沒有對應到濾呼吸已上架的專屬商品資料（例如商品還沒上架，或這個品類
+根本不是濾呼吸在賣的）。上面「對應商品」就算顯示了其他品類的商品名稱，也跟這篇主題無關，
+不要把那些商品當成這篇的對應商品來寫。這種情況請把這篇當作「純知識文」寫，不是錯誤或拒絕生成的理由：
+- 用「LuAir 濾呼吸」作為文章的說明者／來源角色自然帶入（例如「LuAir 濾呼吸提醒您...」），
+  但不要用銷售口吻，不要暗示「我們有賣這個」或「我們沒有賣這個」
+- 不放cta block導購、不放商品頁連結、不做任何相容性宣稱（不寫「相容」「適用於」「副廠替代」這類詞）
+- 如果要放cta，只能是中性的「有疑問歡迎洽詢LINE客服」這種協助性質，不能是導購用語
+- 「這個品類沒有商品」本身不是生成失敗或拒絕生成的理由——這篇文章只要主題本身有搜尋價值、
+  內容不依賴特定商品/型號/料號就能成立，就正常生成完整文章，不要因為沒有商品就輸出空blocks
+- 這種情況下的image block，Prompt只能寫「概念示意圖／流程示意圖」（例如檢查步驟流程圖、
+  結構位置示意圖），不要生成看起來像濾呼吸在賣的實體商品照片，也不要畫出具體型號或品牌標示"""
     return """━━━ 濾呼吸文章版型（只對這個品牌生效，其他品牌不用管這段） ━━━
 這是官網已上線文章證實有效的閱讀節奏，照這個節奏安排blocks，但下面提到的任何具體數字、
 規格、品牌主張都只是排版示範，不能真的寫進這篇文章——這篇的事實內容一律只能用上面
@@ -2542,7 +2593,9 @@ def _filterbreath_article_template_note():
 7. paragraph維持2~4句、一段一個概念，手機閱讀不要連續塞大塊文字
 8. 商品相關內容先講「怎麼核對自己的型號/怎麼選」，讀者判斷得出來之後才自然接到對應商品或
    客服CTA，不要一開頭就導購
-9. 結尾放FAQ（跟這篇主題真的相關的問題）、一個cta、一個related_links（只列確實存在且相關的頁面）"""
+9. 結尾放FAQ（跟這篇主題真的相關的問題）、一個cta、一個related_links（只列確實存在且相關的頁面）
+10. 這篇最多放3個image block（1個cover+2個inline_1/inline_2），cover放在blocks陣列最前面，
+    inline圖放在對應段落附近；不是每篇都要有圖，這篇主題如果不需要配圖就不要放""" + knowledge_only_section
 
 def _generate_article_prompt(brand, category, topic, intent_analysis, knowledge_items=None, fields=None, brand_rule=None):
     """fields: 結構化表單欄位 dict（main_keyword/search_intent/target_audience/related_products/
@@ -2550,7 +2603,7 @@ def _generate_article_prompt(brand, category, topic, intent_analysis, knowledge_
     RELATED_PRODUCTS / TARGET_AUDIENCE / AVOID_DIRECTIONS / CTA_DIRECTION：
       用戶有填 → 優先；沒填 → 自動從 seo_brand_rules 補，確保 AI 不會因欄位空白而亂猜。"""
     fields = fields or {}
-    resolved, _ = _resolve_generate_fields(fields, brand_rule, brand, category)
+    resolved, sources = _resolve_generate_fields(fields, brand_rule, brand, category)
     tmpl = _get_prompt_template("generate", DEFAULT_GENERATE_PROMPT)
     body = _fill_tokens(tmpl,
         BRAND_NAME=brand.get('name', ''), BRAND_CATEGORY=category or brand.get('category', ''),
@@ -2567,7 +2620,13 @@ def _generate_article_prompt(brand, category, topic, intent_analysis, knowledge_
         ARTICLE_TYPE_GUIDE=_article_type_guide(fields.get('article_type', '')),
         BRAND_RULE=_brand_rule_block(brand_rule))
     if brand.get("key") == "filterbreath":
-        body += "\n\n" + _filterbreath_article_template_note()
+        # RELATED_PRODUCTS即使非空也可能只是品牌預設清單的通用fallback（例如這個品類根本沒登記
+        # 專屬商品，卻被其他品類的商品填進來——製冰機濾網案例就是這樣）。KNOWLEDGE_ONLY要看的是
+        # 「這個品類有沒有專屬商品資料」，不是「RELATED_PRODUCTS這個字串是不是空的」，
+        # 所以用來源標籤判斷，不是看值本身。
+        rp_source = sources.get("RELATED_PRODUCTS", {}).get("src", "")
+        has_category_product = rp_source not in ("品牌預設 allowed_products", "空（無資料）", "")
+        body += "\n\n" + _filterbreath_article_template_note(has_category_product)
     return _brand_guardrail_header(brand, category) + "\n\n" + body + "\n\n" + _brand_guardrail_footer(brand)
 
 # ── Auth（複製自 app.py，避免 circular import，與既有後台共用同一支密碼）──
@@ -5391,6 +5450,47 @@ def seo_article_save():
             f.get("content",""), f.get("ai_summary",""), f.get("status","draft_review"), _dump_extra(extra_patch), now, now,
             now if f.get("status") == "published" else 0), fetch="id")
     return redirect(f"/admin/seo/article/{new_id}?key={key}")
+
+@seo_bp.route("/admin/seo/article/<int:aid>/image/fill", methods=["POST"])
+def seo_article_image_fill(aid):
+    """填回某個image block的實際圖片網址（admin自己把AI給的Prompt拿去生圖、上傳後把網址貼回來）。
+    不接受AI自己填網址——這支路由只給後台人工操作，網址一律經過_is_safe_url檢查。"""
+    ok, _ = auth_required()
+    if not ok:
+        return jsonify({"error": "unauthorized"}), 403
+    data = request.get_json(silent=True) or {}
+    slot = data.get("slot", "")
+    url = (data.get("url") or "").strip()
+    if slot not in IMAGE_SLOTS:
+        return jsonify({"error": f"slot不合法，只能是{IMAGE_SLOTS}之一"}), 400
+    if not url:
+        return jsonify({"error": "請提供圖片網址"}), 400
+    if not _is_safe_url(url):
+        return jsonify({"error": "網址格式不安全或不合法（只允許http/https完整網址，或/開頭的站內路徑）"}), 400
+    row = _q("SELECT blocks, extra FROM seo_articles WHERE id=%s", (aid,), fetch="one")
+    if not row:
+        return jsonify({"error": "找不到文章"}), 404
+    blocks_raw, extra_raw = row
+    try:
+        blocks = json.loads(blocks_raw) if blocks_raw else []
+    except Exception:
+        return jsonify({"error": "blocks資料損毀，無法回填"}), 200
+    found = False
+    for b in blocks:
+        if b.get("type") == "image" and b.get("slot") == slot:
+            b["url"] = url
+            found = True
+    if not found:
+        return jsonify({"error": f"這篇文章沒有slot={slot}的圖片區塊"}), 404
+    extra = _parse_extra(extra_raw)
+    # 圖片是正文的一部分，網址填回去等同內容變了，舊的AI品質檢查結果不該再被當成現在內容的結論
+    extra.pop("quality_check", None)
+    extra.pop("ai_score", None)
+    extra.pop("quality_check_fingerprint", None)
+    now = time.time()
+    _q("UPDATE seo_articles SET blocks=%s, extra=%s, updated_at=%s WHERE id=%s",
+       (json.dumps(blocks, ensure_ascii=False), _dump_extra(extra), now, aid))
+    return jsonify({"ok": True, "slot": slot, "url": url})
 
 @seo_bp.route("/admin/seo/article/<int:aid>/delete", methods=["POST"])
 def seo_article_delete(aid):

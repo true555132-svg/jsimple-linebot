@@ -260,6 +260,21 @@ def fake_q(sql, params=None, fetch=None):
             return None
         return (a["blocks"], a["brand_key"], a["content"])
 
+    # seo_article_image_fill 專用查詢/更新
+    if s.startswith("SELECT blocks, extra FROM seo_articles WHERE id=%s"):
+        aid = params[0]
+        a = ARTICLES.get(aid)
+        if not a:
+            return None
+        return (a["blocks"], a["extra"])
+    if s.startswith("UPDATE seo_articles SET blocks=%s, extra=%s, updated_at=%s WHERE id=%s"):
+        blocks, extra, _, aid = params
+        aid = int(aid)
+        a = ARTICLES.get(aid)
+        if a:
+            a.update(blocks=blocks, extra=extra)
+        return None
+
     # preview route 標題查詢
     if s.startswith("SELECT title FROM seo_articles WHERE id=%s"):
         aid = params[0]
@@ -1006,6 +1021,108 @@ check("這段版型指引不在DEFAULT_GENERATE_PROMPT裡（證明是code分支�
       "濾呼吸文章版型" not in SA.DEFAULT_GENERATE_PROMPT)
 check("這段版型指引也沒有被存進seo_prompt_templates（不會跟著全站共用Prompt一起被存檔）",
       "generate" not in PROMPT_TEMPLATES or "濾呼吸文章版型" not in PROMPT_TEMPLATES.get("generate", ""))
+
+print("=" * 70)
+print("19. 新增image block：待完成佔位渲染 / schema檢查 / 發布前擋下 / 回填網址API")
+print("=" * 70)
+
+IMG_BLOCKS = [
+    {"type": "heading", "level": 2, "text": "測試標題"},
+    {"type": "paragraph", "text": "測試內文。"},
+    {"type": "image", "slot": "cover", "prompt": "wide landscape banner test prompt",
+     "alt": "測試封面圖ALT", "url": ""},
+    {"type": "image", "slot": "inline_1", "prompt": "process diagram test prompt",
+     "alt": "測試內文圖ALT", "url": ""},
+    {"type": "faq", "items": [{"q": "測試問題？", "a": "測試回答。"}]},
+]
+
+check("_validate_blocks_schema：image block只要prompt/alt/slot齊全，url空字串不算錯誤",
+      SA._validate_blocks_schema(IMG_BLOCKS) == [], SA._validate_blocks_schema(IMG_BLOCKS))
+
+bad_img_blocks = [
+    {"type": "heading", "level": 2, "text": "測試標題"},
+    {"type": "image", "slot": "not_a_real_slot", "prompt": "", "alt": "", "url": ""},
+]
+bad_img_errors = SA._validate_blocks_schema(bad_img_blocks)
+check("_validate_blocks_schema：image block的slot不合法、缺prompt、缺alt都要各自報錯",
+      any("slot" in e for e in bad_img_errors) and any("Prompt" in e for e in bad_img_errors)
+      and any("ALT" in e for e in bad_img_errors), bad_img_errors)
+
+theme = SA._get_brand_theme("filterbreath")
+rendered = SA._render_blocks_html(IMG_BLOCKS, theme, inline=False)
+check("渲染時，url空的image block要顯示「圖片待完成」佔位，不是破圖的<img>標籤",
+      "圖片待完成" in rendered and "測試封面圖ALT" in rendered, None)
+check("渲染時，url空的image block不應該輸出<img src=\"\">這種破圖標籤",
+      '<img src=""' not in rendered, None)
+
+filled_blocks = json.loads(json.dumps(IMG_BLOCKS))
+filled_blocks[2]["url"] = "https://cdn.example.com/cover.jpg"
+rendered_filled = SA._render_blocks_html(filled_blocks, theme, inline=False)
+check("網址填好之後，該張圖要渲染成真正的<img>標籤",
+      '<img src="https://cdn.example.com/cover.jpg"' in rendered_filled, None)
+check("另一張還沒填網址的圖，仍然要顯示待完成佔位（不能因為填了一張就全部當作完成）",
+      "圖片待完成" in rendered_filled, None)
+
+# 19a) 發布前檢查：還有image url沒填 -> 擋下；全部填好 -> 這項檢查不再擋
+add_article(201, title="冰塊有異味怎麼排查？", slug="/blog/lu-ice-smell-check",
+            meta_title="mt", meta_description="md", content="", brand_key="filterbreath",
+            category="製冰機濾網", status="draft_review",
+            blocks=json.dumps(IMG_BLOCKS, ensure_ascii=False),
+            extra=json.dumps({"quality_check": {"brand_consistency_pass": True, "recommend_publish": True}},
+                              ensure_ascii=False))
+_stamp_fingerprint(201)
+ok201, err201 = SA._validate_article_for_publish(201)
+check("有image待完成時，發布前檢查要擋下並明確列出待完成張數",
+      ok201 is False and any("圖片待完成" in e and "2張" in e for e in err201), err201)
+
+add_article(202, title="冰塊有異味怎麼排查？", slug="/blog/lu-ice-smell-check-2",
+            meta_title="mt", meta_description="md", content="", brand_key="filterbreath",
+            category="製冰機濾網", status="draft_review",
+            blocks=json.dumps(filled_blocks[:3] + filled_blocks[4:], ensure_ascii=False),  # 拿掉還沒填的inline_1
+            extra=json.dumps({"quality_check": {"brand_consistency_pass": True, "recommend_publish": True}},
+                              ensure_ascii=False))
+_stamp_fingerprint(202)
+ok202, err202 = SA._validate_article_for_publish(202)
+check("image都填好網址之後，「圖片待完成」這項檢查不應該再出現",
+      not any("圖片待完成" in e for e in err202), err202)
+
+# 19b) 回填網址的API
+resp_fill_bad_slot = client.post(f"/admin/seo/article/201/image/fill?key={KEY}",
+                                  json={"slot": "not_real", "url": "https://cdn.example.com/x.jpg"})
+check("回填API：slot不合法要回400", resp_fill_bad_slot.status_code == 400, resp_fill_bad_slot.status_code)
+
+resp_fill_unsafe = client.post(f"/admin/seo/article/201/image/fill?key={KEY}",
+                                json={"slot": "cover", "url": "javascript:alert(1)"})
+check("回填API：不安全的url(javascript:)要被擋下，不能真的存進去",
+      resp_fill_unsafe.status_code == 400, resp_fill_unsafe.status_code)
+
+resp_fill_ok = client.post(f"/admin/seo/article/201/image/fill?key={KEY}",
+                            json={"slot": "cover", "url": "https://cdn.example.com/real-cover.jpg"})
+check("回填API：合法slot+安全網址要成功", resp_fill_ok.status_code == 200 and resp_fill_ok.get_json().get("ok"),
+      resp_fill_ok.get_data(as_text=True))
+
+a201_blocks = json.loads(ARTICLES[201]["blocks"])
+cover_block = next(b for b in a201_blocks if b.get("slot") == "cover")
+check("回填API：真的把網址寫回對應slot的block裡，其他block不受影響",
+      cover_block["url"] == "https://cdn.example.com/real-cover.jpg" and
+      next(b for b in a201_blocks if b.get("slot") == "inline_1")["url"] == "", a201_blocks)
+
+a201_extra = SA._parse_extra(ARTICLES[201]["extra"])
+check("回填網址等同內容變了，舊的quality_check要被清掉，逼重新檢查才能發布",
+      not a201_extra.get("quality_check"), a201_extra)
+
+print("=" * 70)
+print("20. 濾呼吸KNOWLEDGE_ONLY模式：沒有對應商品時正常生成純知識文，不放商品CTA/連結/相容性宣稱")
+print("=" * 70)
+
+lu_know_prompt = SA._generate_article_prompt(SA._get_brand("filterbreath"), "製冰機濾網",
+    "冰塊有異味怎麼排查？製冰盒、供水與濾芯檢查順序", "（分析內容略）", [], {"main_keyword": "測試"}, {})
+check("濾呼吸商品是空的時候，prompt要包含KNOWLEDGE_ONLY純知識文指引",
+      "純知識文模式" in lu_know_prompt and "不是生成失敗或拒絕生成的理由" in lu_know_prompt, None)
+check("KNOWLEDGE_ONLY指引要明確禁止商品CTA/商品頁連結/相容性宣稱",
+      "不放cta block導購" in lu_know_prompt and "不做任何相容性宣稱" in lu_know_prompt, None)
+check("KNOWLEDGE_ONLY指引要求圖片只能是概念/流程示意圖，不是真實商品照",
+      "概念示意圖" in lu_know_prompt and "不要生成看起來像濾呼吸在賣的實體商品照片" in lu_know_prompt, None)
 
 print("=" * 70)
 print("結果")
