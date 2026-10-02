@@ -2578,6 +2578,30 @@ def _resolve_generate_fields(fields, brand_rule, brand=None, category=None):
             sources[label] = {"value": "", "src": "空（無資料）"}
     return resolved, sources
 
+def _apply_filterbreath_knowledge_only_override(brand, category, resolved, sources):
+    """濾呼吸專屬、暫時解法（等「官網商品/舊文章索引」下一階段功能做好就可以拿掉）：
+    category在FILTERBREATH_CONFIRMED_UNAVAILABLE_CATEGORIES裡時，強制清空related_products——
+    不管原本是從seo_brand_rules（例如之前查證後發現其實查無根據的舊型號清單）、品牌預設
+    allowed_products、還是完全沒資料解出來的，都一視同仁清空，避免已確認不相關品類的資料
+    繼續被當成這篇文章的對應商品。使用者這次手動輸入的值（"手動輸入"來源）予以保留，
+    尊重當下明確的輸入，不強制蓋掉。
+    _generate_article_prompt、_run_generate_job、seo_generator_preview三處都要呼叫這支，
+    確保「送給AI的Prompt」「存進文章extra的對應商品」「Preview debug顯示的來源」三者一致，
+    不會有Prompt清空了、但後台欄位/debug還是顯示舊資料的落差。
+    回傳 (resolved, sources, has_category_product)。"""
+    has_category_product = True
+    if brand.get("key") == "filterbreath":
+        rp_source = sources.get("RELATED_PRODUCTS", {}).get("src", "")
+        no_real_data = rp_source in ("空（無資料）", "")
+        category_confirmed_unavailable = category in FILTERBREATH_CONFIRMED_UNAVAILABLE_CATEGORIES
+        if category_confirmed_unavailable and rp_source != "手動輸入":
+            resolved = dict(resolved, related_products="")
+            sources = dict(sources, RELATED_PRODUCTS={"value": "", "src": "品類已確認無商品，強制清空"})
+            has_category_product = False
+        else:
+            has_category_product = not no_real_data
+    return resolved, sources, has_category_product
+
 def _filterbreath_article_template_note(has_category_product=True):
     """濾呼吸專屬版型指引——只在_generate_article_prompt裡對brand key=="filterbreath"時附加，
     用程式碼判斷brand，不走_get_prompt_template/seo_prompt_templates，所以不會跟著全站共用的
@@ -2631,26 +2655,15 @@ def _generate_article_prompt(brand, category, topic, intent_analysis, knowledge_
       用戶有填 → 優先；沒填 → 自動從 seo_brand_rules 補，確保 AI 不會因欄位空白而亂猜。"""
     fields = fields or {}
     resolved, sources = _resolve_generate_fields(fields, brand_rule, brand, category)
+    resolved, sources, has_category_product = _apply_filterbreath_knowledge_only_override(
+        brand, category, resolved, sources)
     is_filterbreath = brand.get("key") == "filterbreath"
-    has_category_product = True
     guardrail_brand = brand
-    if is_filterbreath:
-        # RELATED_PRODUCTS即使非空也可能只是品牌預設清單的通用fallback（例如這個品類根本沒登記
-        # 專屬商品，卻被其他品類的商品填進來——製冰機濾網案例就是這樣）。KNOWLEDGE_ONLY要看的是
-        # 「這個品類有沒有專屬商品資料」，不是「RELATED_PRODUCTS這個字串是不是空的」，
-        # 所以用來源標籤判斷，不是看值本身。
-        rp_source = sources.get("RELATED_PRODUCTS", {}).get("src", "")
-        no_real_data = rp_source in ("空（無資料）", "")
-        category_confirmed_unavailable = category in FILTERBREATH_CONFIRMED_UNAVAILABLE_CATEGORIES
-        has_category_product = not no_real_data and not category_confirmed_unavailable
-        if not has_category_product:
-            # 確認是不相關品類後，直接在資料組裝階段清空，不要只在文字指示裡要求AI「忽略它」——
-            # 不管AI忽略得好不好，Preview Prompt跟最終送進Sonnet的內容都不該出現HEPA/空氣清淨機
-            # 這些跟這篇主題無關的商品名稱。guardrail的「允許提到的商品」同理也要清空，
-            # 用一份暫時拿掉allowed_products/allowed_services的brand副本去組guardrail，
-            # 不動原本brand dict（避免影響呼叫端其他用途）。
-            resolved = dict(resolved, related_products="")
-            guardrail_brand = dict(brand, allowed_products="", allowed_services="")
+    if is_filterbreath and not has_category_product:
+        # guardrail的「允許提到的商品」同理也要清空，不要讓AI以為可以提這些不相關商品；
+        # 用一份暫時拿掉allowed_products/allowed_services的brand副本去組guardrail，
+        # 不動原本brand dict（避免影響呼叫端其他用途）。
+        guardrail_brand = dict(brand, allowed_products="", allowed_services="")
     tmpl = _get_prompt_template("generate", DEFAULT_GENERATE_PROMPT)
     body = _fill_tokens(tmpl,
         BRAND_NAME=brand.get('name', ''), BRAND_CATEGORY=category or brand.get('category', ''),
@@ -6605,7 +6618,9 @@ def _run_generate_job(job_id, brand_key, category, topic, analysis, opp_id=None,
         brand = _get_brand(brand_key)
         knowledge_items = _get_knowledge_for_prompt(brand_key, category, limit=10)
         brand_rule_mode, brand_rule = _resolve_brand_rule(brand_key, category, fields)
-        resolved_fields, _ = _resolve_generate_fields(fields, brand_rule, brand, category)
+        resolved_fields, _rf_sources = _resolve_generate_fields(fields, brand_rule, brand, category)
+        resolved_fields, _rf_sources, _ = _apply_filterbreath_knowledge_only_override(
+            brand, category, resolved_fields, _rf_sources)
         prompt = _generate_article_prompt(brand, category, topic, analysis, knowledge_items, fields, brand_rule)
         result, err, stop_reason = _ai_call_json_full(prompt, model="claude-sonnet-4-6", max_tokens=8000)
         if err:
@@ -6713,6 +6728,8 @@ def seo_generator_preview():
     knowledge_items = _get_knowledge_for_prompt(brand_key, category, limit=10)
     brand_rule_mode, brand_rule = _resolve_brand_rule(brand_key, category, fields)
     resolved_fields, field_sources = _resolve_generate_fields(fields, brand_rule, brand, category)
+    resolved_fields, field_sources, _ = _apply_filterbreath_knowledge_only_override(
+        brand, category, resolved_fields, field_sources)
     prompt = _generate_article_prompt(brand, category, topic, analysis, knowledge_items, fields, brand_rule)
     _, ap_source = _resolve_allowed_products(brand, category)
     rule = brand_rule or {}

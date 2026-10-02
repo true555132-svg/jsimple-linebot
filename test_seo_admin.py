@@ -48,6 +48,14 @@ BRANDS = {
 # 不能只認品牌預設清單，否則品類規則生出來的商品會被誤擋（見seo_admin.py的_check_products_brand_ownership）。
 SEO_BRAND_RULES = [
     (1, "jsimple", "穀倉門", "", 100, "", "", "穀倉門滑軌組,穀倉門五金", "", "", "", "", ""),
+    # 還原正式站實際情況：filterbreath/製冰機濾網這筆規則裡的key_products是之前查證後
+    # 發現其實查無根據的舊型號清單——這筆資料「存在」(不是rp_source="品牌預設"或"空"那種情況)，
+    # 用來驗證_apply_filterbreath_knowledge_only_override對這種「有seo_brand_rules資料，
+    # 但品類本身已確認跟品牌無關」的情況，一樣要正確清空，不能只處理brand-level fallback那條路徑。
+    (2, "filterbreath", "製冰機濾網", "", 100, "", "",
+     "Panasonic 國際牌製冰室濾網：00820（矮）、108850（高）、C13；Hitachi 日立 RD-30 製冰濾芯；"
+     "Mitsubishi 三菱 MR-BX52 製冰濾芯。商品型號與相容機種須依濾呼吸實際商品頁資料核對，不得推定型號通用。",
+     "", "", "", "", ""),
 ]
 
 THEMES = {
@@ -1150,6 +1158,49 @@ check("朗德的prompt同樣不會出現濾呼吸專屬的圖片數量規定",
 check("DEFAULT_GENERATE_PROMPT本身對image block只說「不是每篇都需要」，沒有強制任何品牌一定要生圖",
       "不是每篇都需要配圖" in SA.DEFAULT_GENERATE_PROMPT or "沒有特別要求配圖就不要放" in SA.DEFAULT_GENERATE_PROMPT,
       None)
+
+# 20d) 正式站實測發現的真實bug：即使seo_brand_rules裡真的有一筆（filterbreath,製冰機濾網）規則
+# （key_products是舊的、已查證不相關的Panasonic/Hitachi型號清單），_run_generate_job存進
+# extra.related_products的值也必須被清空——不能只有送給AI的Prompt清空了，後台「對應商品」欄位
+# 卻還留著舊資料（這是2026-10-03正式站實測「冰塊有異味」這篇時真的發現的落差，不是假設情境）。
+_orig_ai_call_json_full_20d = SA._ai_call_json_full
+
+def fake_ai_call_json_full_knowledge_only(prompt, model=None, max_tokens=None):
+    return ({
+        "title": "冰塊有異味怎麼排查？", "slug": "/blog/ice-smell-check",
+        "meta_title": "mt", "meta_description": "md", "ai_summary": "ai_summary",
+        "needs_confirmation": False, "confirmation_notes": "", "suggested_first_hand_data": "",
+        "blocks": [
+            {"type": "heading", "level": 2, "text": "冰塊有異味怎麼排查"},
+            {"type": "paragraph", "text": "先檢查製冰盒跟供水管路。"},
+            {"type": "faq", "items": [{"q": "多久換濾芯？", "a": "請以原廠說明書為準。"}]},
+        ],
+        "internal_links": "", "long_tail_keywords": "", "knowledge_citations": [],
+    }, None, "end_turn")
+
+SA._ai_call_json_full = fake_ai_call_json_full_knowledge_only
+JOBS[910] = {"id": 910, "status": "pending", "article_id": None, "error_msg": ""}
+try:
+    SA._run_generate_job(910, "filterbreath", "製冰機濾網", "冰塊有異味怎麼排查？", "（分析內容略）",
+                          opp_id=None, fields={"main_keyword": "冰塊有異味原因"})
+finally:
+    SA._ai_call_json_full = _orig_ai_call_json_full_20d
+
+check("即使seo_brand_rules有舊資料，_run_generate_job產生的job狀態要是done", JOBS[910]["status"] == "done", JOBS[910])
+new_aid_910 = JOBS[910]["article_id"]
+extra_910 = SA._parse_extra(ARTICLES[new_aid_910]["extra"]) if new_aid_910 in ARTICLES else {}
+check("存進文章extra的related_products必須是空字串，不能是seo_brand_rules裡那筆舊的Panasonic/Hitachi清單",
+      extra_910.get("related_products", "（找不到欄位）") == "", extra_910.get("related_products"))
+
+# 20e) Preview debug同樣要反映清空後的結果與原因，不能只有生成流程清空、debug畫面還是顯示舊資料
+resp_preview_know = client.post(f"/admin/seo-generator/preview?key={KEY}", json={
+    "brand": "filterbreath", "category": "製冰機濾網", "topic": "冰塊有異味怎麼排查？",
+    "analysis": "", "main_keyword": "冰塊有異味原因",
+})
+preview_know_debug = resp_preview_know.get_json()["debug"]["fields"]
+check("Preview debug的RELATED_PRODUCTS也要顯示空值，且來源要說明是「品類已確認無商品」，不是舊的seo_brand_rules",
+      preview_know_debug["RELATED_PRODUCTS"]["value"] == "" and
+      "品類已確認無商品" in preview_know_debug["RELATED_PRODUCTS"]["src"], preview_know_debug)
 
 print("=" * 70)
 print("21. 圖片管理後台UI：編輯頁顯示用途/Prompt/ALT/建議位置、暫存連結擋下、auto_qc自動觸發品質檢查")
