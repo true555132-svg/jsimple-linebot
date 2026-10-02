@@ -33,6 +33,13 @@ TAIPEI_TZ = timezone(timedelta(hours=8))
 # 明確回錯誤（不會把截斷的分析當成功結果），到時候再依實際情況調高這個數字。
 SEO_ANALYZE_MAX_TOKENS = 4096
 
+# AI品質檢查（_quality_check_run）的輸出token上限。2026-10-03正式站實測「冰塊有異味」這篇時發現：
+# 文章被標了多項品牌一致性問題（15(i)型號相容宣稱缺佐證），brand_consistency_issues寫得很長、
+# 逐條引用文章原句說明，舊的2000 tokens在JSON結尾的}之前就被截斷，整個品質檢查直接報錯。
+# 3000是依那次實測結果（2000 tokens不夠裝下完整的多點issues說明）往上抓的合理值；
+# 跟分析那邊一樣有stop_reason截斷偵測，不夠用時會明確回錯誤，不會把截斷結果當成功。
+SEO_QUALITY_CHECK_MAX_TOKENS = 3000
+
 seo_bp = Blueprint("seo", __name__)
 _db_lock = threading.Lock()
 
@@ -2056,19 +2063,35 @@ def _merge_quality_check_results(results):
         merged["next_status"] = "draft_review"
     return merged
 
+def _quality_check_call(prompt):
+    """跟_ai_call_json一樣回傳(result, err)，但用_ai_call_json_full多拿stop_reason來偵測截斷。
+    2026-10-03正式站實測發現：文章被標了多項品牌一致性問題、brand_consistency_issues寫得很長時，
+    舊的max_tokens=2000會在JSON結尾的}之前就被截斷，導致json.loads()直接失敗、整個品質檢查報錯，
+    而且錯誤訊息只顯示「AI回傳格式錯誤」，看不出是被截斷——跟分析那邊踩過的截斷問題同一類。
+    拉高到SEO_QUALITY_CHECK_MAX_TOKENS，並且明確判斷stop_reason，截斷時給清楚的錯誤訊息。"""
+    result, err, stop_reason = _ai_call_json_full(prompt, model="claude-sonnet-4-6",
+                                                   max_tokens=SEO_QUALITY_CHECK_MAX_TOKENS)
+    if err:
+        return None, err
+    if stop_reason == "max_tokens":
+        return None, (f"AI品質檢查回應被截斷（超過{SEO_QUALITY_CHECK_MAX_TOKENS} tokens上限），"
+                       "檢查結果不完整、不能採用。可能是這篇文章被標了很多問題導致說明文字變長，"
+                       "請重新檢查一次，若持續發生需要再提高程式裡的token上限。")
+    return result, err
+
 def _quality_check_run(article, brand, category, brand_rule, extra):
     """依內容長度決定單次或分段檢查（分段時每段各打一次API再合併），回傳(result, err)。"""
     content = article.get('content', '') or ''
     if len(content) <= QUALITY_CHECK_CHUNK_THRESHOLD:
         prompt = _quality_check_prompt(article, brand, category, brand_rule, extra)
-        return _ai_call_json(prompt, model="claude-sonnet-4-6", max_tokens=2000)
+        return _quality_check_call(prompt)
     chunks = _split_content_for_chunk_check(content, n=2)
     results = []
     for i, chunk in enumerate(chunks):
         note = f"\n【注意：這是全文分段檢查的第{i+1}/{len(chunks)}段，只針對這段內容評估，不要因為看不到其他段落就扣分】\n"
         prompt = _quality_check_prompt(article, brand, category, brand_rule, extra,
                                         content_override=chunk, chunk_note=note)
-        result, err = _ai_call_json(prompt, model="claude-sonnet-4-6", max_tokens=2000)
+        result, err = _quality_check_call(prompt)
         if err:
             return None, err
         results.append(result)

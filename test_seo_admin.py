@@ -912,16 +912,18 @@ add_article(200, title="00820跟108850差在哪？高矮款怎麼選", slug="/bl
             blocks=json.dumps(sample_blocks(bad_url="/pages/contact-lu"), ensure_ascii=False),
             extra=json.dumps({"related_products": "濾網"}, ensure_ascii=False))
 
-_orig_ai_call_json = SA._ai_call_json
+_orig_ai_call_json_full_qc = SA._ai_call_json_full
 
 def _run_qc(article_id, fake_result):
+    # _quality_check_run現在走_quality_check_call -> _ai_call_json_full（拿stop_reason偵測截斷），
+    # 不是直接呼叫_ai_call_json了，mock要掛在_ai_call_json_full才會真的生效。
     job_id = f"qc_{article_id}_{len(QC_JOBS)}"
     QC_JOBS[job_id] = {"id": job_id, "status": "pending", "result": None, "error_msg": ""}
-    SA._ai_call_json = lambda prompt, model=None, max_tokens=None: (dict(fake_result), None)
+    SA._ai_call_json_full = lambda prompt, model=None, max_tokens=None: (dict(fake_result), "", "end_turn")
     try:
         SA._run_quality_check_job(job_id, article_id)
     finally:
-        SA._ai_call_json = _orig_ai_call_json
+        SA._ai_call_json_full = _orig_ai_call_json_full_qc
     return QC_JOBS[job_id]
 
 # 16a) AI自己覺得可以發布(recommend_publish=True)，但同時標了internal_jargon_leaked=True
@@ -967,6 +969,21 @@ extra_c = SA._parse_extra(ARTICLES[200]["extra"])
 check("兩項新規則都沒觸發時，正常案例應該維持recommend_publish=True，新檢查沒有誤傷正常流程",
       extra_c["quality_check"]["recommend_publish"] is True, extra_c["quality_check"])
 check("正常案例狀態應該是ready_to_publish", ARTICLES[200]["status"] == "ready_to_publish", ARTICLES[200]["status"])
+
+# 16d) 2026-10-03正式站實測發現：品質檢查被標了很多問題、brand_consistency_issues寫很長時，
+# 舊的max_tokens=2000會在JSON結尾的}之前被截斷，整個品質檢查直接報錯且訊息看不出是截斷。
+# 驗證：stop_reason="max_tokens"時要回清楚的截斷錯誤，不能讓job狀態變成一個難懂的JSON解析錯誤。
+job_id_trunc = f"qc_200_{len(QC_JOBS)}"
+QC_JOBS[job_id_trunc] = {"id": job_id_trunc, "status": "pending", "result": None, "error_msg": ""}
+SA._ai_call_json_full = lambda prompt, model=None, max_tokens=None: (
+    None, "", "max_tokens")  # 模擬_ai_call_json_full在截斷時，regex抓不到完整JSON而回傳的情境
+try:
+    SA._run_quality_check_job(job_id_trunc, 200)
+finally:
+    SA._ai_call_json_full = _orig_ai_call_json_full_qc
+check("品質檢查被截斷時，job要落在error狀態，錯誤訊息要明確講「被截斷」，不是一句看不懂的JSON錯誤",
+      QC_JOBS[job_id_trunc]["status"] == "error" and "截斷" in QC_JOBS[job_id_trunc]["error_msg"],
+      QC_JOBS[job_id_trunc])
 
 # 16d) _quality_check_prompt本身要真的問到這兩項新規則，不能只是程式端硬加欄位、Prompt卻沒要求AI檢查
 qc_prompt_text = SA._quality_check_prompt(
