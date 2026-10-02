@@ -1219,6 +1219,49 @@ check("Preview debug的RELATED_PRODUCTS也要顯示空值，且來源要說明�
       preview_know_debug["RELATED_PRODUCTS"]["value"] == "" and
       "品類已確認無商品" in preview_know_debug["RELATED_PRODUCTS"]["src"], preview_know_debug)
 
+# 20f) 2026-10-03正式站實測「冰塊有異味」這篇時發現：送進Prompt的知識庫條目裡，混入了
+# 00820/108850/RD-30/MR-BX52這些跟主題無關的具體型號舊資料，導致AI在正文寫出未經佐證的
+# 型號相容宣稱、被品質檢查擋下。還原正式站那5筆真實知識庫內容，驗證過濾邏輯。
+FILTERBREATH_ICE_KNOWLEDGE = [
+    {"type": "spec", "title": "00820對應機型",
+     "content": "Panasonic 台灣官方 NR-E507XT 使用說明書的另售部件欄列有 ARMH00B00820，"
+                "可確認該手冊機型與此料號的對應關係；文件未列濾芯高度尺寸。（本條為 Panasonic "
+                "原廠使用說明書參考記錄，不代表濾呼吸販售此商品或已確認副廠相容性。）"},
+    {"type": "spec", "title": "108850對應機型",
+     "content": "Panasonic 台灣官方 NR-E417XT 使用說明書的另售部件欄列有 CNRMJ-108850，"
+                "可確認該手冊機型與此料號的對應關係；文件未列濾芯高度尺寸。"},
+    {"type": "faq", "title": "Panasonic濾芯怎麼核對",
+     "content": "Panasonic 官方提供依冰箱本體型號查詢自動製冰機淨水濾芯品番的功能；"
+                "請以冰箱機身標籤、保證書或說明書上的完整型號查詢。官方建議約每3年更換。"},
+    {"type": "spec", "title": "日立RJK-30更換週期",
+     "content": "日立官方資料列出自動製冰用浄水フィルター RJK-30，使用期間參考約3至4年。"
+                "這無法證明賣場標示的 RD-30 與原廠 RJK-30 是相同料號。"},
+    {"type": "faq", "title": "三菱濾芯如何核對",
+     "content": "三菱官方提供依冷藏庫型號查詢自動製冰用零件的功能。MR-BX52 是冰箱型號系列標示，"
+                "不是濾芯料號；目前資料不足以確認它對應哪一款濾芯。"},
+]
+filtered_generic_topic = SA._filter_knowledge_for_filterbreath(
+    FILTERBREATH_ICE_KNOWLEDGE, SA._get_brand("filterbreath"), "製冰機濾網", "冰塊有異味怎麼排查？製冰盒、供水與濾芯檢查順序")
+filtered_titles_generic = {it["title"] for it in filtered_generic_topic}
+check("通用主題（冰塊有異味）不應該帶入00820/108850/RD-30/MR-BX52這些型號專屬條目",
+      filtered_titles_generic == {"Panasonic濾芯怎麼核對"}, filtered_titles_generic)
+
+filtered_specific_topic = SA._filter_knowledge_for_filterbreath(
+    FILTERBREATH_ICE_KNOWLEDGE, SA._get_brand("filterbreath"), "製冰機濾網",
+    "國際牌製冰室濾網00820與108850怎麼選")
+filtered_titles_specific = {it["title"] for it in filtered_specific_topic}
+check("主題明確問到00820/108850時，這兩筆對應型號的條目要能正確帶入（不是整個品類一律清空）",
+      "00820對應機型" in filtered_titles_specific and "108850對應機型" in filtered_titles_specific,
+      filtered_titles_specific)
+check("主題明確問00820/108850時，沒提到的RD-30/MR-BX52條目仍然不該帶入",
+      "日立RJK-30更換週期" not in filtered_titles_specific and "三菱濾芯如何核對" not in filtered_titles_specific,
+      filtered_titles_specific)
+
+filtered_other_brand = SA._filter_knowledge_for_filterbreath(
+    FILTERBREATH_ICE_KNOWLEDGE, SA._get_brand("jsimple"), "製冰機濾網", "冰塊有異味怎麼排查？")
+check("這個過濾只對filterbreath生效，其他品牌（就算brand不對category不符）原樣回傳不過濾",
+      len(filtered_other_brand) == len(FILTERBREATH_ICE_KNOWLEDGE), filtered_other_brand)
+
 print("=" * 70)
 print("21. 圖片管理後台UI：編輯頁顯示用途/Prompt/ALT/建議位置、暫存連結擋下、auto_qc自動觸發品質檢查")
 print("=" * 70)

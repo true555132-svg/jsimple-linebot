@@ -2625,6 +2625,31 @@ def _apply_filterbreath_knowledge_only_override(brand, category, resolved, sourc
             has_category_product = not no_real_data
     return resolved, sources, has_category_product
 
+_MODEL_CODE_PATTERN = re.compile(r'[A-Za-z]{0,4}-?\d{2,}[A-Za-z0-9-]*')
+
+def _filter_knowledge_for_filterbreath(knowledge_items, brand, category, topic):
+    """濾呼吸專屬、暫時解法（跟_apply_filterbreath_knowledge_only_override同一組，
+    等「官網商品/舊文章索引」下一階段功能做好就可以拿掉）：
+    category確認跟品牌無關時，只保留「跟這篇主題直接相關」的知識庫條目——具體做法是找出
+    條目標題+內容裡看起來像具體型號/料號的字串（例如00820、108850、RD-30、MR-BX52），
+    如果這些字串都沒出現在topic裡，就不把這筆條目送進Prompt；完全沒有具體型號字樣的
+    通用條目（例如單純講「怎麼核對型號」的步驟說明，不綁定特定型號）一律保留。
+    這是簡單字串比對，不是語意理解，只在品類已確認無關的情境下套用，範圍有限——
+    目的是避免像「冰塊有異味怎麼排查」這種通用知識主題，被不相干的特定型號舊資料污染，
+    讓AI誤以為這篇要討論那些具體型號、進而寫出未經確認的相容宣稱（2026-10-03正式站
+    實測「冰塊有異味」這篇時真的發生過，品質檢查因此抓到未佐證的型號宣稱而報錯）。
+    _run_generate_job跟seo_generator_preview都要在拿到knowledge_items後立刻呼叫這支，
+    確保「送進Prompt的」跟「Preview debug顯示的」是同一份清單。"""
+    if brand.get("key") != "filterbreath" or category not in FILTERBREATH_CONFIRMED_UNAVAILABLE_CATEGORIES:
+        return knowledge_items
+    filtered = []
+    for item in knowledge_items:
+        text = f"{item.get('title','')} {item.get('content','')}"
+        models = set(_MODEL_CODE_PATTERN.findall(text))
+        if not models or any(m in topic for m in models):
+            filtered.append(item)
+    return filtered
+
 def _filterbreath_article_template_note(has_category_product=True):
     """濾呼吸專屬版型指引——只在_generate_article_prompt裡對brand key=="filterbreath"時附加，
     用程式碼判斷brand，不走_get_prompt_template/seo_prompt_templates，所以不會跟著全站共用的
@@ -6640,6 +6665,7 @@ def _run_generate_job(job_id, brand_key, category, topic, analysis, opp_id=None,
         _q("UPDATE seo_generate_jobs SET status='running', updated_at=%s WHERE id=%s", (time.time(), job_id))
         brand = _get_brand(brand_key)
         knowledge_items = _get_knowledge_for_prompt(brand_key, category, limit=10)
+        knowledge_items = _filter_knowledge_for_filterbreath(knowledge_items, brand, category, topic)
         brand_rule_mode, brand_rule = _resolve_brand_rule(brand_key, category, fields)
         resolved_fields, _rf_sources = _resolve_generate_fields(fields, brand_rule, brand, category)
         resolved_fields, _rf_sources, _ = _apply_filterbreath_knowledge_only_override(
@@ -6749,6 +6775,7 @@ def seo_generator_preview():
         return jsonify({"error": "請輸入主題"}), 400
     brand = _get_brand(brand_key)
     knowledge_items = _get_knowledge_for_prompt(brand_key, category, limit=10)
+    knowledge_items = _filter_knowledge_for_filterbreath(knowledge_items, brand, category, topic)
     brand_rule_mode, brand_rule = _resolve_brand_rule(brand_key, category, fields)
     resolved_fields, field_sources = _resolve_generate_fields(fields, brand_rule, brand, category)
     resolved_fields, field_sources, _ = _apply_filterbreath_knowledge_only_override(
