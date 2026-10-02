@@ -468,6 +468,15 @@ BLOCKS_SCHEMA_VERSION = 1
 BLOCK_TYPES = ["heading", "paragraph", "summary", "table", "takeaway", "note", "list", "faq", "related_links", "cta", "image"]
 IMAGE_SLOTS = ["cover", "inline_1", "inline_2"]
 
+# 暫時解法，等「官網商品/舊文章索引」那個下一階段功能做好就可以拿掉：
+# 品牌預設allowed_products是給「沒有品類專屬規則、但這個品類本身跟品牌業務相關」的情況當合理預設
+# （例如濾呼吸的「空氣清淨機濾網」——核心業務，只是沒登記品類規則，用品牌預設清單合理）。
+# 但這個fallback沒辦法分辨「品類本身跟品牌完全無關」（例如濾呼吸實際上沒有在賣冰箱製冰濾芯，
+# 2026-10-02直接查過官網全商品清單證實），這種情況套用品牌預設清單只會把不相關商品硬塞進來。
+# 目前用這份清單手動標記「已確認品牌沒有在賣」的品類，之後有正式的商品/品類資料索引後，
+# 應該改成查真實資料，不要繼續維護這份清單。
+FILTERBREATH_CONFIRMED_UNAVAILABLE_CATEGORIES = {"製冰機濾網"}
+
 def _esc(s):
     return html_mod.escape(str(s if s is not None else ""), quote=True)
 
@@ -672,6 +681,24 @@ def _is_safe_url(url):
     except Exception:
         return False
     return scheme in ("http", "https")
+
+# 常見的聊天工具／AI工具暫存附件網域——這類連結通常有簽章或存活期限，過一段時間就會404，
+# 不適合放進要長期上線的文章正文。這不是嚴謹的黑名單（抓不到的還是要靠人工判斷），
+# 只先擋掉最常見的幾種，避免使用者直接把GPT/聊天室丟出來的暫存圖網址貼進正式文章。
+EPHEMERAL_IMAGE_HOST_PATTERNS = [
+    "oaiusercontent.com", "oaidalleapiprodscus.blob.core.windows.net", "blob.core.windows.net",
+    "cdn.discordapp.com", "media.discordapp.net", "files.slack.com", "slack-files.com",
+    "t.me", "telegram.org", "ngrok.io", "ngrok-free.app", "localhost", "127.0.0.1",
+]
+
+def _is_ephemeral_image_host(url):
+    """判斷網址是不是常見聊天/AI工具的暫存附件連結，見上方EPHEMERAL_IMAGE_HOST_PATTERNS說明。"""
+    try:
+        from urllib.parse import urlparse
+        host = urlparse(url).netloc.lower()
+    except Exception:
+        return False
+    return any(p in host for p in EPHEMERAL_IMAGE_HOST_PATTERNS)
 
 def _resolve_block_links(blocks, brand_key):
     """連結只能來自目前品牌已確認的資料：CTA用brand_profiles.cta_url，related_links的url要嘛是cta_url、
@@ -2604,6 +2631,26 @@ def _generate_article_prompt(brand, category, topic, intent_analysis, knowledge_
       用戶有填 → 優先；沒填 → 自動從 seo_brand_rules 補，確保 AI 不會因欄位空白而亂猜。"""
     fields = fields or {}
     resolved, sources = _resolve_generate_fields(fields, brand_rule, brand, category)
+    is_filterbreath = brand.get("key") == "filterbreath"
+    has_category_product = True
+    guardrail_brand = brand
+    if is_filterbreath:
+        # RELATED_PRODUCTS即使非空也可能只是品牌預設清單的通用fallback（例如這個品類根本沒登記
+        # 專屬商品，卻被其他品類的商品填進來——製冰機濾網案例就是這樣）。KNOWLEDGE_ONLY要看的是
+        # 「這個品類有沒有專屬商品資料」，不是「RELATED_PRODUCTS這個字串是不是空的」，
+        # 所以用來源標籤判斷，不是看值本身。
+        rp_source = sources.get("RELATED_PRODUCTS", {}).get("src", "")
+        no_real_data = rp_source in ("空（無資料）", "")
+        category_confirmed_unavailable = category in FILTERBREATH_CONFIRMED_UNAVAILABLE_CATEGORIES
+        has_category_product = not no_real_data and not category_confirmed_unavailable
+        if not has_category_product:
+            # 確認是不相關品類後，直接在資料組裝階段清空，不要只在文字指示裡要求AI「忽略它」——
+            # 不管AI忽略得好不好，Preview Prompt跟最終送進Sonnet的內容都不該出現HEPA/空氣清淨機
+            # 這些跟這篇主題無關的商品名稱。guardrail的「允許提到的商品」同理也要清空，
+            # 用一份暫時拿掉allowed_products/allowed_services的brand副本去組guardrail，
+            # 不動原本brand dict（避免影響呼叫端其他用途）。
+            resolved = dict(resolved, related_products="")
+            guardrail_brand = dict(brand, allowed_products="", allowed_services="")
     tmpl = _get_prompt_template("generate", DEFAULT_GENERATE_PROMPT)
     body = _fill_tokens(tmpl,
         BRAND_NAME=brand.get('name', ''), BRAND_CATEGORY=category or brand.get('category', ''),
@@ -2619,15 +2666,10 @@ def _generate_article_prompt(brand, category, topic, intent_analysis, knowledge_
         ARTICLE_TYPE=fields.get('article_type', ''),
         ARTICLE_TYPE_GUIDE=_article_type_guide(fields.get('article_type', '')),
         BRAND_RULE=_brand_rule_block(brand_rule))
-    if brand.get("key") == "filterbreath":
-        # RELATED_PRODUCTS即使非空也可能只是品牌預設清單的通用fallback（例如這個品類根本沒登記
-        # 專屬商品，卻被其他品類的商品填進來——製冰機濾網案例就是這樣）。KNOWLEDGE_ONLY要看的是
-        # 「這個品類有沒有專屬商品資料」，不是「RELATED_PRODUCTS這個字串是不是空的」，
-        # 所以用來源標籤判斷，不是看值本身。
-        rp_source = sources.get("RELATED_PRODUCTS", {}).get("src", "")
-        has_category_product = rp_source not in ("品牌預設 allowed_products", "空（無資料）", "")
+    if is_filterbreath:
         body += "\n\n" + _filterbreath_article_template_note(has_category_product)
-    return _brand_guardrail_header(brand, category) + "\n\n" + body + "\n\n" + _brand_guardrail_footer(brand)
+    return (_brand_guardrail_header(guardrail_brand, category) + "\n\n" + body
+            + "\n\n" + _brand_guardrail_footer(guardrail_brand))
 
 # ── Auth（複製自 app.py，避免 circular import，與既有後台共用同一支密碼）──
 
@@ -3215,6 +3257,34 @@ textarea{resize:vertical;line-height:1.7}
   <div id="es-result" style="display:none;margin-top:8px;font-size:13px;color:#2e7d32"></div>
 </div>
 
+{% if image_blocks %}
+<div class="section">
+  <label style="font-size:13px;color:#555;font-weight:800">🖼️ 圖片（{{ image_blocks|length }}張）</label>
+  {% for img in image_blocks %}
+  <div id="img-box-{{ img.slot }}" style="border:1px solid #eee;border-radius:8px;padding:12px;margin-bottom:10px">
+    <div style="font-weight:700;margin-bottom:4px">
+      {{ img.label }}
+      {% if img.url %}<span class="img-status" style="color:#2e7d32;font-size:12px">✓ 已回填</span>
+      {% else %}<span class="img-status" style="color:#c62828;font-size:12px">⚠ 圖片待完成</span>{% endif %}
+    </div>
+    <div style="font-size:12px;color:#888;margin-bottom:4px">建議插入位置：{{ img.position_hint }}</div>
+    <div style="font-size:12px;color:#888;margin-bottom:4px">ALT：{{ img.alt }}</div>
+    {% if img.url %}
+    <div class="img-preview" style="margin-bottom:6px"><img src="{{ img.url }}" alt="{{ img.alt }}" style="max-width:220px;border-radius:6px;display:block"></div>
+    {% endif %}
+    <textarea readonly rows="3" style="width:100%;font-size:12px;background:#f7f7f7;font-family:monospace" id="img-prompt-{{ img.slot }}">{{ img.prompt }}</textarea>
+    <div style="margin-top:6px;display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+      <button class="btn btn-outline" type="button" onclick="copyImgPrompt('{{ img.slot }}', this)">📋 複製 Prompt</button>
+      <input type="text" id="img-url-{{ img.slot }}" placeholder="貼上正式圖片網址（不接受聊天工具暫存連結）" style="flex:1;min-width:220px" value="{{ img.url }}">
+      <button class="btn" type="button" onclick="fillImage({{ a[0] }}, '{{ img.slot }}')">{{ "更換圖片" if img.url else "貼上正式圖片網址並預覽" }}</button>
+    </div>
+    <div class="err" id="img-err-{{ img.slot }}"></div>
+  </div>
+  {% endfor %}
+  <div style="font-size:12px;color:#888">回填網址後會自動重新執行一次 AI 品質檢查（內容算是變了，舊的檢查結果不能再用）。</div>
+</div>
+{% endif %}
+
 <div class="section">
   <label>AI 品質檢查</label>
   <button class="btn btn-outline" id="btn-qc" onclick="doQualityCheck({{ a[0] }})" type="button">🔍 AI 品質檢查</button>
@@ -3314,6 +3384,33 @@ async function publishToEasyStore(articleId){
   }
 }
 let _qcNextStatus = '';
+function copyImgPrompt(slot, btn){
+  const ta = document.getElementById('img-prompt-' + slot);
+  navigator.clipboard.writeText(ta.value).then(() => {
+    const old = btn.textContent;
+    btn.textContent = '已複製 ✓';
+    setTimeout(() => { btn.textContent = old; }, 1500);
+  }).catch(() => { ta.select(); document.execCommand('copy'); });
+}
+async function fillImage(articleId, slot){
+  const urlInput = document.getElementById('img-url-' + slot);
+  const errEl = document.getElementById('img-err-' + slot);
+  errEl.textContent = '';
+  const url = urlInput.value.trim();
+  try {
+    const res = await fetch('/admin/seo/article/' + articleId + '/image/fill?key=' + encodeURIComponent(KEY), {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({slot, url})
+    });
+    const data = await safeJson(res);
+    if (data.error) { errEl.textContent = data.error; return; }
+    // 直接整頁重新整理，確保圖片預覽、待完成狀態、發布前檢查結果都用伺服器重算過的最新結果顯示，
+    // 不要自己在前端兜資料；用auto_qc=1讓新的一頁自動跑一次品質檢查，不用使用者自己再點一次。
+    window.location.href = '/admin/seo/article/' + articleId + '?key=' + encodeURIComponent(KEY) + '&auto_qc=1';
+  } catch(e) {
+    errEl.textContent = String(e.message || e);
+  }
+}
 async function doQualityCheck(articleId){
   document.getElementById('btn-qc').disabled = true;
   document.getElementById('qc-loading').style.display = 'block';
@@ -3460,6 +3557,10 @@ async function copyRenderedHtml(articleId, inline){
     document.getElementById('preview-copy-err').textContent = String(e.message || e);
   }
 }
+{% if auto_qc %}
+// 剛回填完圖片網址重整回來的，內容算變了，直接幫使用者自動跑一次品質檢查
+doQualityCheck({{ a[0] }});
+{% endif %}
 </script>
 """ + SHELL_CLOSE + """
 </body></html>"""
@@ -5349,11 +5450,34 @@ def seo_article_edit(aid):
         publish_ok, publish_errors = _validate_article_for_publish(aid)
     except Exception as e:
         publish_ok, publish_errors = False, [f"檢查時發生錯誤：{e}"]
+    # 圖片管理區塊用：把blocks裡的image區塊整理成好顯示的清單，附上「建議插入位置」
+    # （用前一個heading的文字當提示，cover固定顯示為文章最前面，不需要額外欄位）。
+    image_blocks = []
+    try:
+        blocks_for_images = json.loads(a[11]) if a[11] else []
+    except Exception:
+        blocks_for_images = []
+    last_heading = "文章開頭"
+    slot_labels = {"cover": "封面圖", "inline_1": "內文圖 1", "inline_2": "內文圖 2"}
+    for b in blocks_for_images:
+        if b.get("type") == "heading":
+            last_heading = b.get("text") or last_heading
+        elif b.get("type") == "image":
+            image_blocks.append({
+                "slot": b.get("slot", ""),
+                "label": slot_labels.get(b.get("slot"), b.get("slot", "")),
+                "prompt": b.get("prompt", ""),
+                "alt": b.get("alt", ""),
+                "url": b.get("url", ""),
+                "position_hint": "文章最前面（封面）" if b.get("slot") == "cover" else f"「{last_heading}」這段附近",
+            })
+    auto_qc = request.args.get("auto_qc") == "1"
     shell = _shell_open(key, "seo", [("文章管理", "/admin/seo"), ("編輯文章", None)])
     return render_template_string(ARTICLE_HTML, key=key, shell=shell, a=a, extra=extra, default_title="",
         article_status=ARTICLE_STATUS, article_status_labels=ARTICLE_STATUS_LABELS,
         next_action_options=NEXT_ACTION_OPTIONS, pillar_articles=pillar_articles,
-        publish_ok=publish_ok, publish_errors=publish_errors)
+        publish_ok=publish_ok, publish_errors=publish_errors,
+        image_blocks=image_blocks, auto_qc=auto_qc)
 
 def _render_article_output_html(aid, inline):
     row = _q("SELECT blocks, brand_key, content FROM seo_articles WHERE id=%s", (aid,), fetch="one")
@@ -5467,6 +5591,10 @@ def seo_article_image_fill(aid):
         return jsonify({"error": "請提供圖片網址"}), 400
     if not _is_safe_url(url):
         return jsonify({"error": "網址格式不安全或不合法（只允許http/https完整網址，或/開頭的站內路徑）"}), 400
+    if _is_ephemeral_image_host(url):
+        return jsonify({"error": "這個網址看起來是聊天工具或AI工具的暫存附件連結，通常有效期限很短，"
+                                  "之後會失效變成破圖，不能直接用在正式文章裡。請先把圖片下載下來，"
+                                  "上傳到正式的圖床或SHOPLINE媒體庫，再把那個永久網址貼過來。"}), 400
     row = _q("SELECT blocks, extra FROM seo_articles WHERE id=%s", (aid,), fetch="one")
     if not row:
         return jsonify({"error": "找不到文章"}), 404

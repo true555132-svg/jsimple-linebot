@@ -1124,6 +1124,66 @@ check("KNOWLEDGE_ONLY指引要明確禁止商品CTA/商品頁連結/相容性宣
 check("KNOWLEDGE_ONLY指引要求圖片只能是概念/流程示意圖，不是真實商品照",
       "概念示意圖" in lu_know_prompt and "不要生成看起來像濾呼吸在賣的實體商品照片" in lu_know_prompt, None)
 
+# 20a) 真正的重點：不是只靠文字指示叫AI「忽略」，是資料組裝階段就把不相關商品清空，
+#      Preview Prompt跟最終送進Sonnet的內容都不該出現HEPA、活性碳濾芯這些跟製冰機濾網無關的商品字樣
+check("製冰機濾網這個已確認不相關的品類，最終prompt的「對應商品」欄位要是空的，不能出現HEPA/活性碳濾芯",
+      "HEPA濾網" not in lu_know_prompt and "活性碳濾芯" not in lu_know_prompt, lu_know_prompt)
+check("guardrail的「允許提到的商品」同樣要清空，不能讓AI以為可以提這些不相關商品",
+      "允許提到的商品：濾網,活性碳濾芯,HEPA濾網" not in lu_know_prompt, lu_know_prompt)
+
+# 20b) 對照組：空氣清淨機濾網是濾呼吸真正在賣的品類，沒有品類專屬規則時，品牌預設商品
+#      仍然要正常帶入（這是最早那次blocks=[]修正的行為，不能被這次新規則誤傷）
+lu_real_prompt = SA._generate_article_prompt(SA._get_brand("filterbreath"), "空氣清淨機濾網",
+    "空氣清淨機濾網多久該換一次？", "（分析內容略）", [], {"main_keyword": "測試"}, {})
+check("真正在賣的品類（空氣清淨機濾網）不該被這次KNOWLEDGE_ONLY規則誤判，對應商品要正常帶入",
+      "HEPA濾網" in lu_real_prompt and "純知識文模式" not in lu_real_prompt, lu_real_prompt)
+
+# 20c) JSIMPLE、朗德不受這次filterbreath專屬邏輯影響，也不會被強制要求一定要有3張圖
+js_know_prompt = SA._generate_article_prompt(SA._get_brand("jsimple"), "", "高架床怎麼保養",
+    "（分析內容略）", [], {"main_keyword": "測試"}, {})
+ld_know_prompt = SA._generate_article_prompt(SA._get_brand("lander"), "", "燈具怎麼保養",
+    "（分析內容略）", [], {"main_keyword": "測試"}, {})
+check("JSIMPLE的prompt不會出現「這篇最多放3個image block」這種濾呼吸專屬的圖片數量規定",
+      "這篇最多放3個image block" not in js_know_prompt, None)
+check("朗德的prompt同樣不會出現濾呼吸專屬的圖片數量規定",
+      "這篇最多放3個image block" not in ld_know_prompt, None)
+check("DEFAULT_GENERATE_PROMPT本身對image block只說「不是每篇都需要」，沒有強制任何品牌一定要生圖",
+      "不是每篇都需要配圖" in SA.DEFAULT_GENERATE_PROMPT or "沒有特別要求配圖就不要放" in SA.DEFAULT_GENERATE_PROMPT,
+      None)
+
+print("=" * 70)
+print("21. 圖片管理後台UI：編輯頁顯示用途/Prompt/ALT/建議位置、暫存連結擋下、auto_qc自動觸發品質檢查")
+print("=" * 70)
+
+resp_edit_201 = client.get(f"/admin/seo/article/201?key={KEY}")
+edit_201_html = resp_edit_201.get_data(as_text=True)
+check("編輯頁GET不crash", resp_edit_201.status_code == 200, resp_edit_201.status_code)
+check("編輯頁要顯示封面圖、內文圖1的用途標籤", "封面圖" in edit_201_html and "內文圖 1" in edit_201_html, None)
+check("編輯頁要顯示image block的ALT文字", "測試封面圖ALT" in edit_201_html, None)
+check("編輯頁要顯示image block的生圖Prompt內容（放在textarea裡可複製）",
+      "wide landscape banner test prompt" in edit_201_html, None)
+check("編輯頁要顯示「建議插入位置」，cover要標示為文章最前面", "文章最前面（封面）" in edit_201_html, None)
+check("還沒回填的image要顯示「圖片待完成」警示", "圖片待完成" in edit_201_html, None)
+check("有複製Prompt的按鈕", "複製 Prompt" in edit_201_html, None)
+
+resp_fill_ephemeral = client.post(f"/admin/seo/article/201/image/fill?key={KEY}",
+                                   json={"slot": "inline_1", "url": "https://files.oaiusercontent.com/tmp/abc123.png"})
+check("回填API：常見的聊天工具/AI暫存附件網域要被擋下，不能真的存進去",
+      resp_fill_ephemeral.status_code == 400 and "暫存" in resp_fill_ephemeral.get_json().get("error", ""),
+      resp_fill_ephemeral.get_data(as_text=True))
+a201_blocks_after_ephemeral = json.loads(ARTICLES[201]["blocks"])
+check("被擋下的暫存網址真的沒有被寫進blocks裡",
+      next(b for b in a201_blocks_after_ephemeral if b.get("slot") == "inline_1")["url"] == "",
+      a201_blocks_after_ephemeral)
+
+resp_edit_auto_qc = client.get(f"/admin/seo/article/201?key={KEY}&auto_qc=1")
+check("帶auto_qc=1重新整理時，頁面要自動呼叫doQualityCheck（回填網址後不用使用者自己再點一次）",
+      "doQualityCheck(201)" in resp_edit_auto_qc.get_data(as_text=True), None)
+resp_edit_no_auto_qc = client.get(f"/admin/seo/article/201?key={KEY}")
+check("沒帶auto_qc時，不應該有自動呼叫doQualityCheck(201)這行（只有按鈕onclick那個，不是自動執行）",
+      resp_edit_no_auto_qc.get_data(as_text=True).count("doQualityCheck(201)") <
+      resp_edit_auto_qc.get_data(as_text=True).count("doQualityCheck(201)"), None)
+
 print("=" * 70)
 print("結果")
 print("=" * 70)
