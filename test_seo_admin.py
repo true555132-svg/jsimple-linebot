@@ -1,4 +1,4 @@
-import os, sys, json, time, re
+import os, sys, json, time, re, threading
 
 os.environ["ADMIN_PASSWORD"] = "testkey"
 os.environ["DATABASE_URL"] = ""  # 保持空，我們會monkeypatch _q，程式不會真的連DB
@@ -79,6 +79,7 @@ ARTICLES = {}  # id -> dict
 JOBS = {}      # id -> dict，模擬 seo_generate_jobs 資料表，供_run_generate_job測試用
 PROMPT_TEMPLATES = {}  # key -> content，模擬 seo_prompt_templates 資料表
 QC_JOBS = {}   # id -> dict，模擬 seo_quality_check_jobs 資料表，供_run_quality_check_job測試用
+ANALYZE_JOBS = {}  # id -> dict，模擬 seo_analyze_jobs 資料表，供_run_analyze_job／背景任務路由測試用
 
 def _stamp_fingerprint(aid, fp_override=None):
     """模擬「這篇文章的quality_check是針對目前這個版本跑的」：算出正確指紋寫回extra。
@@ -353,6 +354,32 @@ def fake_q(sql, params=None, fetch=None):
     if s.startswith("UPDATE seo_quality_check_jobs SET status='done', result=%s, updated_at=%s WHERE id=%s"):
         result, _, job_id = params
         QC_JOBS[job_id].update(status="done", result=result)
+        return None
+
+    # _run_analyze_job / seo_generator_analyze / seo_generator_analyze_status：seo_analyze_jobs
+    if s.startswith("INSERT INTO seo_analyze_jobs (status,created_at,updated_at) VALUES ('pending',%s,%s) RETURNING id"):
+        new_id = (max(ANALYZE_JOBS.keys()) + 1) if ANALYZE_JOBS else 1
+        created_at, updated_at = params
+        ANALYZE_JOBS[new_id] = {"status": "pending", "result": "", "error_msg": "",
+                                 "created_at": created_at, "updated_at": updated_at}
+        return new_id
+    if s.startswith("SELECT status,result,error_msg,created_at FROM seo_analyze_jobs WHERE id=%s"):
+        job_id = params[0]
+        j = ANALYZE_JOBS.get(job_id)
+        if not j:
+            return None
+        return (j["status"], j["result"], j["error_msg"], j["created_at"])
+    if s.startswith("UPDATE seo_analyze_jobs SET status='running', updated_at=%s WHERE id=%s"):
+        _, job_id = params
+        ANALYZE_JOBS[job_id]["status"] = "running"
+        return None
+    if s.startswith("UPDATE seo_analyze_jobs SET status='error', error_msg=%s, updated_at=%s WHERE id=%s"):
+        error_msg, _, job_id = params
+        ANALYZE_JOBS[job_id].update(status="error", error_msg=error_msg)
+        return None
+    if s.startswith("UPDATE seo_analyze_jobs SET status='done', result=%s, updated_at=%s WHERE id=%s"):
+        result, _, job_id = params
+        ANALYZE_JOBS[job_id].update(status="done", result=result)
         return None
 
     # seo_prompt_templates：_get_prompt_template / _save_prompt_template
@@ -856,33 +883,42 @@ check("還原後seo_prompt_templates裡的generate確實變回系統預設值",
       PROMPT_TEMPLATES.get("generate") == SA.DEFAULT_GENERATE_PROMPT)
 
 print("=" * 70)
-print("15. seo_generator_analyze()：AI回應被截斷時要明確回錯誤，不能把不完整分析當成功結果")
+print("15. /admin/seo-generator/analyze 背景任務＋job輪詢：截斷/正常/非同步提交/逾時四種情境")
 print("=" * 70)
 
 _orig_ai_call_full = SA._ai_call_full
 
-# 15a) 情境還原：自訂分析Prompt被加長後，Haiku在max_tokens內寫不完，stop_reason="max_tokens"
+# 15a) 情境還原：自訂分析Prompt被加長後，Haiku在max_tokens內寫不完，stop_reason="max_tokens"。
+# 2026-10-04改成背景任務後，直接呼叫_run_analyze_job測試核心邏輯（不經過真的thread），
+# 跟15c專門測「真的並行、提交先回傳」的情境分開，避免重複又讓這個測試跑得比較慢。
+job_id_15a = SA._q("INSERT INTO seo_analyze_jobs (status,created_at,updated_at) VALUES ('pending',%s,%s) RETURNING id",
+                    (time.time(), time.time()), fetch="id")
+
 def fake_ai_call_full_truncated(prompt, model=None, max_tokens=None):
     return ("建議文章類型：教學型\n建議主關鍵字：HEPA濾網更換\n（後面還沒寫完就被截斷了...",
             "", "max_tokens")
 
 SA._ai_call_full = fake_ai_call_full_truncated
 try:
-    resp_trunc = client.post(f"/admin/seo-generator/analyze?key={KEY}", json={
-        "brand": "filterbreath", "category": "", "topic": "HEPA濾網多久該換一次？",
-    })
+    SA._run_analyze_job(job_id_15a, "filterbreath", "", "HEPA濾網多久該換一次？", "")
 finally:
     SA._ai_call_full = _orig_ai_call_full
 
-trunc_data = resp_trunc.get_json()
-check("stop_reason=max_tokens時，回應要有error欄位，不能是正常成功結果",
-      bool(trunc_data.get("error")), trunc_data)
+trunc_job = ANALYZE_JOBS[job_id_15a]
+check("stop_reason=max_tokens時，job要標成error，不能是done（不能把不完整分析當成功結果）",
+      trunc_job["status"] == "error", trunc_job)
 check("截斷的錯誤訊息要講清楚是被截斷，不是其他原因",
-      "截斷" in (trunc_data.get("error") or ""), trunc_data)
-check("截斷時不能回傳suggested_main_keyword等建議欄位（避免前端誤以為分析成功並自動填入不完整的值）",
-      "suggested_main_keyword" not in trunc_data, trunc_data)
+      "截斷" in trunc_job["error_msg"], trunc_job)
+check("截斷時job沒有存result（避免前端誤以為分析成功並自動填入不完整的值）",
+      trunc_job["result"] == "", trunc_job)
 
-# 15b) 正常案例：沒有被截斷，7個建議欄位都要能正確解析出來（對照組，確保新檢查沒有誤傷正常情況）
+resp_trunc_status = client.get(f"/admin/seo-generator/analyze/status/{job_id_15a}?key={KEY}")
+trunc_status_data = resp_trunc_status.get_json()
+check("輪詢狀態端點對截斷任務要回status=error且帶error訊息，前端能停止等待",
+      trunc_status_data.get("status") == "error" and "截斷" in (trunc_status_data.get("error") or ""),
+      trunc_status_data)
+
+# 15b) 正常案例：沒有被截斷，7個建議欄位都要能正確解析出來（對照組，確保背景化沒有誤傷正常情況）
 FAKE_COMPLETE_ANALYSIS = """在開始詳細分析之前，請先依序輸出以下7行建議：
 建議文章類型：教學型
 建議主關鍵字：HEPA濾網更換週期
@@ -899,25 +935,114 @@ FAKE_COMPLETE_ANALYSIS = """在開始詳細分析之前，請先依序輸出以�
 def fake_ai_call_full_ok(prompt, model=None, max_tokens=None):
     return (FAKE_COMPLETE_ANALYSIS, "", "end_turn")
 
+job_id_15b = SA._q("INSERT INTO seo_analyze_jobs (status,created_at,updated_at) VALUES ('pending',%s,%s) RETURNING id",
+                    (time.time(), time.time()), fetch="id")
 SA._ai_call_full = fake_ai_call_full_ok
 try:
-    resp_ok = client.post(f"/admin/seo-generator/analyze?key={KEY}", json={
-        "brand": "filterbreath", "category": "", "topic": "HEPA濾網多久該換一次？",
-    })
+    SA._run_analyze_job(job_id_15b, "filterbreath", "", "HEPA濾網多久該換一次？", "")
 finally:
     SA._ai_call_full = _orig_ai_call_full
 
-ok_data = resp_ok.get_json()
-check("沒有截斷時不能誤報error", not ok_data.get("error"), ok_data)
+ok_job = ANALYZE_JOBS[job_id_15b]
+check("沒有截斷時job要標成done，不能誤報error", ok_job["status"] == "done", ok_job)
+ok_result = SA._parse_extra(ok_job["result"])
 check("7行建議（移到最前面後）依然能被正確解析出來，跟原本放在結尾時抓法一致",
-      ok_data.get("suggested_article_type") == "教學型" and
-      ok_data.get("suggested_main_keyword") == "HEPA濾網更換週期" and
-      ok_data.get("suggested_search_intent") == "想知道HEPA濾網多久該換一次" and
-      ok_data.get("suggested_target_audience") == "使用空氣清淨機、擔心濾網效能下降的使用者" and
-      ok_data.get("suggested_related_products") == "HEPA濾網,活性碳濾網" and
-      ok_data.get("suggested_avoid_directions") == "不要提到其他品牌的濾網" and
-      ok_data.get("suggested_cta_direction") == "引導確認機型後選購對應濾網",
-      ok_data)
+      ok_result.get("suggested_article_type") == "教學型" and
+      ok_result.get("suggested_main_keyword") == "HEPA濾網更換週期" and
+      ok_result.get("suggested_search_intent") == "想知道HEPA濾網多久該換一次" and
+      ok_result.get("suggested_target_audience") == "使用空氣清淨機、擔心濾網效能下降的使用者" and
+      ok_result.get("suggested_related_products") == "HEPA濾網,活性碳濾網" and
+      ok_result.get("suggested_avoid_directions") == "不要提到其他品牌的濾網" and
+      ok_result.get("suggested_cta_direction") == "引導確認機型後選購對應濾網",
+      ok_result)
+
+# 15c) 真正的重點：用可控制、會暫停的mock AI呼叫，確認①提交路由立刻回job_id（不等AI）、
+# ②AI還卡著時輪詢顯示pending/running、③放行後完成並回done、④完成後可以被新的請求重複讀到
+# 同樣的結果（不依賴單一worker記憶體——這裡的fake_q本身就是獨立於任何request處理的模組層級
+# 字典，等同模擬「寫進Postgres、誰來查都看得到」這件事，跟真正worker記憶體層級的狀態不同）。
+_analyze_release_15c = threading.Event()
+_analyze_started_15c = threading.Event()
+
+def fake_ai_call_full_paused(prompt, model=None, max_tokens=None):
+    _analyze_started_15c.set()
+    _analyze_release_15c.wait(timeout=5)  # 等測試主動放行；5秒只是避免真的卡死整個測試
+    return (FAKE_COMPLETE_ANALYSIS, "", "end_turn")
+
+SA._ai_call_full = fake_ai_call_full_paused
+try:
+    resp_submit = client.post(f"/admin/seo-generator/analyze?key={KEY}", json={
+        "brand": "filterbreath", "category": "", "topic": "HEPA濾網多久該換一次？",
+    })
+    submit_data = resp_submit.get_json()
+    check("①提交分析後立即回傳job_id，不在HTTP請求內等AI完成（回應不該有analysis或error欄位）",
+          "job_id" in submit_data and "analysis" not in submit_data and "error" not in submit_data, submit_data)
+    job_id_15c = submit_data.get("job_id")
+
+    started_in_time = _analyze_started_15c.wait(timeout=5)
+    check("背景thread確實有被啟動、跑到AI呼叫那一步（不是提交後什麼都沒發生）", started_in_time, None)
+
+    resp_running = client.get(f"/admin/seo-generator/analyze/status/{job_id_15c}?key={KEY}")
+    running_data = resp_running.get_json()
+    check("②AI還卡在暫停點時，輪詢要顯示pending或running，不能是done（不能假報成功）",
+          running_data.get("status") in ("pending", "running"), running_data)
+
+    _analyze_release_15c.set()  # 放行，讓背景thread完成
+    done_data = None
+    for _ in range(100):  # 最多等5秒（每次0.05秒），避免卡死測試；正常情況下幾毫秒內就會完成
+        time.sleep(0.05)
+        d = client.get(f"/admin/seo-generator/analyze/status/{job_id_15c}?key={KEY}").get_json()
+        if d.get("status") == "done":
+            done_data = d
+            break
+    check("③放行後背景thread完成，輪詢要能看到done", done_data is not None, done_data)
+    if done_data:
+        result15c = done_data.get("result") or {}
+        check("done狀態的result要包含正確解析出的建議欄位，且完成後正確填回前端會用到的欄位",
+              result15c.get("suggested_main_keyword") == "HEPA濾網更換週期" and
+              result15c.get("suggested_cta_direction") == "引導確認機型後選購對應濾網",
+              result15c)
+        d2 = client.get(f"/admin/seo-generator/analyze/status/{job_id_15c}?key={KEY}").get_json()
+        check("④done狀態可以被後續新的請求重複讀到同樣的結果（不依賴單次worker記憶體）",
+              d2.get("status") == "done" and
+              d2.get("result", {}).get("suggested_main_keyword") == "HEPA濾網更換週期",
+              d2)
+finally:
+    SA._ai_call_full = _orig_ai_call_full
+
+# 15d) AI呼叫直接丟例外（不是回傳err字串，是真的raise）時，job要能走到except分支標成error，
+# 不能讓整個背景thread默默死掉、job永遠卡在running（這是「AI例外後回傳失敗」的情境，
+# 跟15a的err字串情境不同，涵蓋_run_analyze_job自己except Exception那段）
+job_id_15d = SA._q("INSERT INTO seo_analyze_jobs (status,created_at,updated_at) VALUES ('pending',%s,%s) RETURNING id",
+                    (time.time(), time.time()), fetch="id")
+
+def fake_ai_call_full_raises(prompt, model=None, max_tokens=None):
+    raise RuntimeError("模擬網路層級的未預期例外（不是_ai_call_full自己包好的err字串）")
+
+SA._ai_call_full = fake_ai_call_full_raises
+try:
+    SA._run_analyze_job(job_id_15d, "filterbreath", "", "HEPA濾網多久該換一次？", "")
+finally:
+    SA._ai_call_full = _orig_ai_call_full
+
+raise_job = ANALYZE_JOBS[job_id_15d]
+check("AI呼叫直接raise例外時，job要被except Exception接住標成error，不能卡在running/pending",
+      raise_job["status"] == "error", raise_job)
+check("例外訊息要用_safe_job_error_msg包過，不能把原始例外內容整個洩漏出去",
+      raise_job["error_msg"] == "發生未預期的錯誤，請稍後再試一次。", raise_job)
+
+# 15e) 過期任務不會永遠running：模擬worker被砍掉、背景thread根本沒機會寫回結果的情況——
+# job留在pending太久，輪詢端要自己判定逾時並回error，不自動重送AI任務
+job_id_15e = SA._q("INSERT INTO seo_analyze_jobs (status,created_at,updated_at) VALUES ('pending',%s,%s) RETURNING id",
+                    (time.time() - SA.SEO_ANALYZE_JOB_STALE_SECONDS - 10, time.time() - SA.SEO_ANALYZE_JOB_STALE_SECONDS - 10),
+                    fetch="id")
+resp_stale = client.get(f"/admin/seo-generator/analyze/status/{job_id_15e}?key={KEY}")
+stale_data = resp_stale.get_json()
+check("超過SEO_ANALYZE_JOB_STALE_SECONDS還卡在pending時，輪詢要回明確的error狀態，不能永遠pending",
+      stale_data.get("status") == "error" and bool(stale_data.get("error")), stale_data)
+check("逾時判定要寫回DB（ANALYZE_JOBS本身），不是只有這次response臨時講講，確保之後任何請求查到的都一致",
+      ANALYZE_JOBS[job_id_15e]["status"] == "error", ANALYZE_JOBS[job_id_15e])
+check("逾時錯誤訊息不能暗示「正在重試」或自動重送，只能請使用者自己重新提交",
+      "重新送出" in stale_data.get("error", "") and "自動重試" in stale_data.get("error", ""), stale_data)
 
 print("=" * 70)
 print("16. 品質檢查新增的硬性規則：內部用語外露 / 標題承諾比較但正文沒回答，都要強制擋下不能發布")

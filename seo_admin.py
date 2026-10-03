@@ -40,6 +40,14 @@ SEO_ANALYZE_MAX_TOKENS = 4096
 # 跟分析那邊一樣有stop_reason截斷偵測，不夠用時會明確回錯誤，不會把截斷結果當成功。
 SEO_QUALITY_CHECK_MAX_TOKENS = 3000
 
+# /admin/seo-generator/analyze改成背景任務＋job輪詢（2026-10-04）後，分析任務如果超過這個秒數
+# 還卡在pending/running，輪詢端直接回傳明確的失敗狀態，不會讓前端的while(true)輪詢永遠等下去。
+# 這不是「整個任務的總時間上限」的宣告——正常情況下背景thread會自己把狀態寫成done/error；
+# 這個門檻只用來兜底處理「worker整個被重啟/砍掉，背景thread連寫回結果的機會都沒有」這種
+# thread跟著process一起消失、job永遠卡在pending/running的情況。180秒是比_ai_call_full內層
+# urlopen逾時（100秒）加一些處理餘裕的保守值，不會跟它綁死成同一個數字。
+SEO_ANALYZE_JOB_STALE_SECONDS = 180
+
 seo_bp = Blueprint("seo", __name__)
 _db_lock = threading.Lock()
 
@@ -159,6 +167,21 @@ def init_seo_db():
                     id           SERIAL PRIMARY KEY,
                     status       TEXT DEFAULT 'pending',
                     article_id   INTEGER DEFAULT NULL,
+                    error_msg    TEXT DEFAULT '',
+                    created_at   FLOAT DEFAULT 0,
+                    updated_at   FLOAT DEFAULT 0
+                )
+            """)
+            # 2026-10-04：/admin/seo-generator/analyze從同步呼叫AI改成背景任務＋job輪詢
+            # （正式站實測過，Gunicorn sync worker的--timeout是arbiter層級的獨立計時器，
+            # 跟程式碼內部呼叫AI時設的socket timeout互不保證誰先到，縮短socket timeout的數字
+            # 並不可靠；真正可靠的做法是讓這支呼叫不要佔住處理HTTP請求的同步worker），
+            # 狀態／結果存這張表，結構比照已經在用的seo_quality_check_jobs
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS seo_analyze_jobs (
+                    id           SERIAL PRIMARY KEY,
+                    status       TEXT DEFAULT 'pending',
+                    result       TEXT DEFAULT '',
                     error_msg    TEXT DEFAULT '',
                     created_at   FLOAT DEFAULT 0,
                     updated_at   FLOAT DEFAULT 0
@@ -2344,14 +2367,15 @@ def _ai_call_full(prompt, model="claude-haiku-4-5", max_tokens=2000):
                 "content-type": "application/json",
             }
         )
-        # timeout必須明顯小於Procfile裡gunicorn的--timeout 120（兩者原本都是120，兩個計時器
-        # 幾乎同時到期，實務上永遠是gunicorn的WORKER TIMEOUT先把整個worker process砍掉，
-        # 這段try/except連跑的機會都沒有，前端收到的是連線中斷/非JSON回應，不是下面這段
-        # 原本就寫好的「AI分析失敗：{err}」這種乾淨錯誤訊息（2026-10-03正式站實測
-        # /admin/seo-generator/analyze逾時時就是這樣炸的，WORKER TIMEOUT發生在urlopen內部，
-        # 下面的except完全沒機會執行）。100留20秒margin，讓urlopen自己先逾時、
-        # 讓這支函式正常回傳(None, err, "")，呼叫端才能把它當一般錯誤處理成200+JSON，
-        # 而不是被gunicorn硬殺掉整個worker。
+        # 這個timeout只是「單次HTTP呼叫不要無限掛住」的內層防護，不是某個呼叫端（例如
+        # Gunicorn worker、或背景job）總時間上限的保證。2026-10-03正式站實測發現：把這個值
+        # 單純調低（原本跟Procfile的gunicorn --timeout 120相同，曾改成100）並不可靠——
+        # Gunicorn sync worker的--timeout是arbiter（主進程）用自己獨立的計時器監控「這個worker
+        # 多久沒回報存活」，跟這裡的socket timeout是兩個互不同步的計時器，調低這個數字不保證
+        # 一定會比arbiter的監控先到期（2026-10-04實測仍被arbiter的WORKER TIMEOUT先殺掉，
+        # 證實調數字這個做法本身不可靠）。真正解法是讓同步HTTP請求不要等在AI呼叫上
+        # （見/admin/seo-generator/analyze改成背景任務＋job輪詢，_run_analyze_job）；
+        # 100秒維持原樣只是避免真的網路卡住時背景thread永遠不回應。
         with urllib.request.urlopen(req, timeout=100) as r:
             resp = json.loads(r.read().decode())
         text = resp["content"][0]["text"].strip()
@@ -5334,71 +5358,95 @@ async function doAnalyze(){
       body: JSON.stringify({brand, category, topic})
     });
     const data = await safeJson(res);
-    if (data.error) { document.getElementById('err-analyze').textContent = data.error; }
-    else {
-      document.getElementById('analysis-text').textContent = data.analysis;
-      document.getElementById('step-analysis').classList.add('active');
-      window._lastBrand = brand; window._lastCategory = category; window._lastTopic = topic;
-      window._lastAnalysis = data.analysis;
-      // #2 自動填入主關鍵字
-      const mkEl = document.getElementById('main_keyword');
-      if (!mkEl.value.trim() && data.suggested_main_keyword) {
-        mkEl.value = data.suggested_main_keyword;
-      }
-      // #3 自動填入搜尋意圖（優先用AI建議，fallback取分析結果前2句）
-      const siEl = document.getElementById('search_intent');
-      if (!siEl.value.trim()) {
-        if (data.suggested_search_intent) {
-          siEl.value = data.suggested_search_intent;
-        } else if (data.analysis) {
-          const sents = data.analysis.replace(/\\r\\n/g,'\\n')
-            .replace(/([。！？])/g,'$1 ').split(' ')
-            .map(s=>s.trim()).filter(s=>s.length>4);
-          const summary = sents.slice(0,2).join('').replace(/^\\s*\\d+[.、．]\\s*/,'').trim();
-          if (summary.length > 10) siEl.value = summary.substring(0, 100);
-        }
-      }
-      // #4 自動填入目標客群
-      const taEl = document.getElementById('target_audience');
-      if (!taEl.value.trim() && data.suggested_target_audience) {
-        taEl.value = data.suggested_target_audience;
-      }
-      // #5 自動填入對應商品（避免蓋掉用戶已填的內容）
-      const rpEl = document.getElementById('related_products');
-      if (!rpEl.value.trim() && data.suggested_related_products && data.suggested_related_products !== '待補充') {
-        rpEl.value = data.suggested_related_products;
-      }
-      // #6 自動填入禁止方向
-      const adEl = document.getElementById('avoid_directions');
-      if (!adEl.value.trim() && data.suggested_avoid_directions && data.suggested_avoid_directions !== '無') {
-        adEl.value = data.suggested_avoid_directions;
-      }
-      // #7 自動填入CTA方向
-      const ctaEl = document.getElementById('cta_direction');
-      if (!ctaEl.value.trim() && data.suggested_cta_direction) {
-        ctaEl.value = data.suggested_cta_direction;
-      }
-      // 顯示分析階段的 brand_rule debug 資訊
-      if (data.debug) {
-        const d = data.debug;
-        const ruleColor = d.rule_hit ? '#2e7d32' : '#c62828';
-        const ruleIcon  = d.rule_hit ? '✓' : '✗';
-        const dbg = document.getElementById('analyze-rule-debug');
-        dbg.style.display = 'block';
-        dbg.innerHTML =
-          `<b>套用的品牌SEO規則</b>：<span style="color:${ruleColor};font-weight:700">${ruleIcon} ${data.brand_rule_label || d.rule_label}</span><br>` +
-          `<b>key_products</b>：<span style="color:#1565c0">${d.key_products}</span><br>` +
-          `<b>avoid_directions</b>：<span style="color:#c62828">${d.avoid_directions}</span>`;
-      }
-      const typeSelect = document.getElementById('article_type');
-      if (data.suggested_article_type && [...typeSelect.options].some(o => o.value === data.suggested_article_type)) {
-        typeSelect.value = data.suggested_article_type;
-        applyBrandRule();
-      }
+    if (data.error) {
+      document.getElementById('err-analyze').textContent = data.error;
+      document.getElementById('btn-analyze').disabled = false;
+      document.getElementById('loading-analyze').style.display = 'none';
+      return;
     }
-  } catch(e) { document.getElementById('err-analyze').textContent = String(e); }
+    window._lastBrand = brand; window._lastCategory = category; window._lastTopic = topic;
+    await pollAnalyze(data.job_id);
+  } catch(e) {
+    document.getElementById('err-analyze').textContent = String(e.message || e);
+    document.getElementById('btn-analyze').disabled = false;
+    document.getElementById('loading-analyze').style.display = 'none';
+  }
+}
+async function pollAnalyze(jobId){
+  try {
+    while (true) {
+      await new Promise(r => setTimeout(r, 3000));
+      const res = await fetch('/admin/seo-generator/analyze/status/' + jobId + '?key=' + encodeURIComponent(KEY));
+      const data = await safeJson(res);
+      if (data.status === 'pending' || data.status === 'running') continue;
+      if (data.status === 'error') { document.getElementById('err-analyze').textContent = data.error || '分析失敗'; break; }
+      if (data.status === 'done') { applyAnalyzeResult(data.result); break; }
+    }
+  } catch(e) {
+    document.getElementById('err-analyze').textContent = String(e.message || e);
+  }
   document.getElementById('btn-analyze').disabled = false;
   document.getElementById('loading-analyze').style.display = 'none';
+}
+function applyAnalyzeResult(data){
+  window._lastAnalysis = data.analysis;
+  document.getElementById('analysis-text').textContent = data.analysis;
+  document.getElementById('step-analysis').classList.add('active');
+  // #2 自動填入主關鍵字
+  const mkEl = document.getElementById('main_keyword');
+  if (!mkEl.value.trim() && data.suggested_main_keyword) {
+    mkEl.value = data.suggested_main_keyword;
+  }
+  // #3 自動填入搜尋意圖（優先用AI建議，fallback取分析結果前2句）
+  const siEl = document.getElementById('search_intent');
+  if (!siEl.value.trim()) {
+    if (data.suggested_search_intent) {
+      siEl.value = data.suggested_search_intent;
+    } else if (data.analysis) {
+      const sents = data.analysis.replace(/\\r\\n/g,'\\n')
+        .replace(/([。！？])/g,'$1 ').split(' ')
+        .map(s=>s.trim()).filter(s=>s.length>4);
+      const summary = sents.slice(0,2).join('').replace(/^\\s*\\d+[.、．]\\s*/,'').trim();
+      if (summary.length > 10) siEl.value = summary.substring(0, 100);
+    }
+  }
+  // #4 自動填入目標客群
+  const taEl = document.getElementById('target_audience');
+  if (!taEl.value.trim() && data.suggested_target_audience) {
+    taEl.value = data.suggested_target_audience;
+  }
+  // #5 自動填入對應商品（避免蓋掉用戶已填的內容）
+  const rpEl = document.getElementById('related_products');
+  if (!rpEl.value.trim() && data.suggested_related_products && data.suggested_related_products !== '待補充') {
+    rpEl.value = data.suggested_related_products;
+  }
+  // #6 自動填入禁止方向
+  const adEl = document.getElementById('avoid_directions');
+  if (!adEl.value.trim() && data.suggested_avoid_directions && data.suggested_avoid_directions !== '無') {
+    adEl.value = data.suggested_avoid_directions;
+  }
+  // #7 自動填入CTA方向
+  const ctaEl = document.getElementById('cta_direction');
+  if (!ctaEl.value.trim() && data.suggested_cta_direction) {
+    ctaEl.value = data.suggested_cta_direction;
+  }
+  // 顯示分析階段的 brand_rule debug 資訊
+  if (data.debug) {
+    const d = data.debug;
+    const ruleColor = d.rule_hit ? '#2e7d32' : '#c62828';
+    const ruleIcon  = d.rule_hit ? '✓' : '✗';
+    const dbg = document.getElementById('analyze-rule-debug');
+    dbg.style.display = 'block';
+    dbg.innerHTML =
+      `<b>套用的品牌SEO規則</b>：<span style="color:${ruleColor};font-weight:700">${ruleIcon} ${data.brand_rule_label || d.rule_label}</span><br>` +
+      `<b>key_products</b>：<span style="color:#1565c0">${d.key_products}</span><br>` +
+      `<b>avoid_directions</b>：<span style="color:#c62828">${d.avoid_directions}</span>`;
+  }
+  const typeSelect = document.getElementById('article_type');
+  if (data.suggested_article_type && [...typeSelect.options].some(o => o.value === data.suggested_article_type)) {
+    typeSelect.value = data.suggested_article_type;
+    applyBrandRule();
+  }
 }
 
 async function safeJson(res){
@@ -6713,8 +6761,71 @@ def seo_generator_page():
         prefill_target_audience=request.args.get("target_audience", ""),
         prefill_related_products=request.args.get("related_products", ""))
 
+def _run_analyze_job(job_id, brand_key, category, topic, article_type):
+    """背景跑搜尋意圖分析，狀態/結果寫進seo_analyze_jobs，跟_run_quality_check_job同一個模式。
+    2026-10-04從同步路由改過來——不是調timeout數字能解決的問題，見_ai_call_full上方那段說明。
+    這支函式的內容跟原本同步版本的route body完全一樣，只是把『算完直接return jsonify』
+    改成『算完寫進DB』，分析邏輯本身一個字都沒改。"""
+    try:
+        _q("UPDATE seo_analyze_jobs SET status='running', updated_at=%s WHERE id=%s", (time.time(), job_id))
+        brand      = _get_brand(brand_key)
+        brand_rule = _match_brand_rule(brand_key, category, article_type)
+        prompt     = _analyze_intent_prompt(brand, category, topic, brand_rule)
+        # 用_ai_call_full（不是_ai_call）是為了拿到stop_reason：自訂分析Prompt可能被改得很長
+        # （例如客製化SOP多加了客群矩陣、AI Overview、People Also Ask等段落），舊版1500 tokens
+        # 的上限不夠用時，AI回應會在寫到一半被硬切斷——這種情況絕對不能當成功結果處理，
+        # 否則後面拆「建議XXX」那幾行時什麼都抓不到，卻讓使用者以為分析正常完成了。
+        text, err, stop_reason = _ai_call_full(prompt, model="claude-haiku-4-5", max_tokens=SEO_ANALYZE_MAX_TOKENS)
+        if err:
+            _q("UPDATE seo_analyze_jobs SET status='error', error_msg=%s, updated_at=%s WHERE id=%s",
+               (f"AI分析失敗：{err}", time.time(), job_id))
+            return
+        if stop_reason == "max_tokens":
+            _q("UPDATE seo_analyze_jobs SET status='error', error_msg=%s, updated_at=%s WHERE id=%s",
+               (f"AI分析回應被截斷（超過{SEO_ANALYZE_MAX_TOKENS} tokens上限），這份分析不完整、"
+                "建議欄位可能沒有正確產生，不能當成功結果使用。請簡化分析Prompt的要求量"
+                "（例如減少要求列出的項目數），或提高程式裡的token上限後再試一次。", time.time(), job_id))
+            return
+        analysis, suggested_article_type  = _extract_suggested_article_type(text)
+        analysis, suggested_main_keyword  = _extract_suggested_main_keyword(analysis)
+        analysis, suggested_search_intent = _extract_suggested_field(analysis, "建議搜尋意圖")
+        analysis, suggested_target_audience = _extract_suggested_field(analysis, "建議目標客群")
+        analysis, suggested_related_products = _extract_suggested_field(analysis, "建議對應商品")
+        analysis, suggested_avoid_directions = _extract_suggested_field(analysis, "建議禁止方向")
+        analysis, suggested_cta_direction    = _extract_suggested_field(analysis, "建議CTA方向")
+        rule = brand_rule or {}
+        result = {
+            "analysis": analysis,
+            "suggested_article_type":    suggested_article_type,
+            "suggested_main_keyword":    suggested_main_keyword,
+            "suggested_search_intent":   suggested_search_intent,
+            "suggested_target_audience": suggested_target_audience,
+            "suggested_related_products": suggested_related_products,
+            "suggested_avoid_directions": suggested_avoid_directions,
+            "suggested_cta_direction":   suggested_cta_direction,
+            "brand_rule_label": _brand_rule_label(brand_rule),
+            "debug": {
+                "rule_hit":    bool(rule),
+                "rule_label":  f"{rule.get('brand','')} + {rule.get('category','')} + {rule.get('article_type','') or '全部類型'}" if rule else "（未命中任何規則）",
+                "key_products":     (rule.get("key_products") or "（空）").strip() or "（空）",
+                "avoid_directions": (rule.get("avoid_directions") or "（空）").strip() or "（空）",
+            },
+        }
+        _q("UPDATE seo_analyze_jobs SET status='done', result=%s, updated_at=%s WHERE id=%s",
+           (_dump_extra(result), time.time(), job_id))
+    except Exception as e:
+        import sys; print(f"[SEO Analyze Job Error] {e}", file=sys.stderr)
+        try:
+            _q("UPDATE seo_analyze_jobs SET status='error', error_msg=%s, updated_at=%s WHERE id=%s",
+               (_safe_job_error_msg(e), time.time(), job_id))
+        except Exception:
+            pass
+
 @seo_bp.route("/admin/seo-generator/analyze", methods=["POST"])
 def seo_generator_analyze():
+    """2026-10-04起改成背景任務＋job輪詢：提交後立刻回job_id，不在這個HTTP請求裡等AI完成。
+    原因見_ai_call_full跟_run_analyze_job的說明——調AI呼叫的timeout數字沒辦法可靠避開
+    Gunicorn sync worker自己的--timeout監控，真正解法是不要讓這支呼叫佔住同步worker。"""
     ok, _ = auth_required()
     if not ok:
         return jsonify({"error": "unauthorized"}), 403
@@ -6727,45 +6838,39 @@ def seo_generator_analyze():
         return jsonify({"error": "請輸入主題"}), 400
     if not ANTHROPIC_API_KEY:
         return jsonify({"error": "尚未設定 ANTHROPIC_API_KEY，請在 Render → Environment 加上這個環境變數才能使用AI功能"}), 200
-    brand      = _get_brand(brand_key)
-    brand_rule = _match_brand_rule(brand_key, category, article_type)
-    prompt     = _analyze_intent_prompt(brand, category, topic, brand_rule)
-    # 用_ai_call_full（不是_ai_call）是為了拿到stop_reason：自訂分析Prompt可能被改得很長
-    # （例如客製化SOP多加了客群矩陣、AI Overview、People Also Ask等段落），舊版1500 tokens
-    # 的上限不夠用時，AI回應會在寫到一半被硬切斷——這種情況絕對不能當成功結果處理，
-    # 否則後面拆「建議XXX」那幾行時什麼都抓不到，卻讓使用者以為分析正常完成了。
-    text, err, stop_reason = _ai_call_full(prompt, model="claude-haiku-4-5", max_tokens=SEO_ANALYZE_MAX_TOKENS)
-    if err:
-        return jsonify({"error": f"AI分析失敗：{err}"}), 200
-    if stop_reason == "max_tokens":
-        return jsonify({"error": f"AI分析回應被截斷（超過{SEO_ANALYZE_MAX_TOKENS} tokens上限），這份分析不完整、"
-                                  "建議欄位可能沒有正確產生，不能當成功結果使用。請簡化分析Prompt的要求量"
-                                  "（例如減少要求列出的項目數），或提高程式裡的token上限後再試一次。"}), 200
-    analysis, suggested_article_type  = _extract_suggested_article_type(text)
-    analysis, suggested_main_keyword  = _extract_suggested_main_keyword(analysis)
-    analysis, suggested_search_intent = _extract_suggested_field(analysis, "建議搜尋意圖")
-    analysis, suggested_target_audience = _extract_suggested_field(analysis, "建議目標客群")
-    analysis, suggested_related_products = _extract_suggested_field(analysis, "建議對應商品")
-    analysis, suggested_avoid_directions = _extract_suggested_field(analysis, "建議禁止方向")
-    analysis, suggested_cta_direction    = _extract_suggested_field(analysis, "建議CTA方向")
-    rule = brand_rule or {}
-    return jsonify({
-        "analysis": analysis,
-        "suggested_article_type":    suggested_article_type,
-        "suggested_main_keyword":    suggested_main_keyword,
-        "suggested_search_intent":   suggested_search_intent,
-        "suggested_target_audience": suggested_target_audience,
-        "suggested_related_products": suggested_related_products,
-        "suggested_avoid_directions": suggested_avoid_directions,
-        "suggested_cta_direction":   suggested_cta_direction,
-        "brand_rule_label": _brand_rule_label(brand_rule),
-        "debug": {
-            "rule_hit":    bool(rule),
-            "rule_label":  f"{rule.get('brand','')} + {rule.get('category','')} + {rule.get('article_type','') or '全部類型'}" if rule else "（未命中任何規則）",
-            "key_products":     (rule.get("key_products") or "（空）").strip() or "（空）",
-            "avoid_directions": (rule.get("avoid_directions") or "（空）").strip() or "（空）",
-        },
-    })
+    now = time.time()
+    job_id = _q("INSERT INTO seo_analyze_jobs (status,created_at,updated_at) VALUES ('pending',%s,%s) RETURNING id",
+                (now, now), fetch="id")
+    threading.Thread(target=_run_analyze_job, args=(job_id, brand_key, category, topic, article_type), daemon=True).start()
+    return jsonify({"job_id": job_id})
+
+@seo_bp.route("/admin/seo-generator/analyze/status/<int:job_id>")
+def seo_generator_analyze_status(job_id):
+    ok, _ = auth_required()
+    if not ok:
+        return jsonify({"error": "unauthorized"}), 403
+    row = _q("SELECT status,result,error_msg,created_at FROM seo_analyze_jobs WHERE id=%s", (job_id,), fetch="one")
+    if not row:
+        return jsonify({"status": "error", "error": "找不到這個分析任務"})
+    status, result, error_msg, created_at = row
+    if status in ("pending", "running") and (time.time() - (created_at or 0)) > SEO_ANALYZE_JOB_STALE_SECONDS:
+        # 背景thread可能因為worker被重啟/砍掉而從沒機會寫回結果——不讓前端的輪詢迴圈永遠卡在
+        # pending/running；這裡直接把狀態也寫回DB（不是只有這次response臨時講講），確保之後
+        # 不管哪個worker接到同一個job_id的查詢，看到的都是一致的失敗狀態，不會有的worker還在
+        # 回pending、有的已經判定逾時這種不一致。明確不自動重送AI任務，需要使用者自己重新提交。
+        timeout_msg = f"分析任務超過{SEO_ANALYZE_JOB_STALE_SECONDS}秒未完成，可能已中斷，請重新送出分析（不會自動重試）。"
+        try:
+            _q("UPDATE seo_analyze_jobs SET status='error', error_msg=%s, updated_at=%s WHERE id=%s",
+               (timeout_msg, time.time(), job_id))
+        except Exception:
+            pass
+        return jsonify({"status": "error", "error": timeout_msg})
+    out = {"status": status}
+    if status == "error":
+        out["error"] = error_msg
+    elif status == "done":
+        out["result"] = _parse_extra(result)
+    return jsonify(out)
 
 def _run_generate_job(job_id, brand_key, category, topic, analysis, opp_id=None, fields=None):
     fields = fields or {}
