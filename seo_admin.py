@@ -1953,13 +1953,49 @@ def _content_has_placeholder(content):
 
 QUALITY_CHECK_CHUNK_THRESHOLD = 16000  # 超過此字數才啟用分段檢查，避免大部分文章都要多打一次API
 
+def _quality_check_content_mode(extra):
+    """跟生成階段判斷KNOWLEDGE_ONLY/PRODUCT_GUIDE用同一個信號：extra.related_products有沒有值——
+    不要在品質檢查這邊另外用brand/category重新判斷一次。之前就是因為生成階段跟品質檢查各自獨立
+    算一次「有沒有商品」，兩邊對不起來，才會發生Prompt清空了、品質檢查卻還建議加商品的情況
+    （2026-10-03正式站實測發現）。直接沿用生成時已經算好、存進extra的值，兩階段看到的事實
+    背景保證一致。"""
+    return "PRODUCT_GUIDE" if (extra.get("related_products") or "").strip() else "KNOWLEDGE_ONLY"
+
+def _quality_check_knowledge_citations_block(brand_key, category, extra):
+    """把生成階段AI自己回報的knowledge_citations（引用的知識庫條目標題）對回實際內容，
+    讓品質檢查看得到這些條目的「資料性質」說明（例如標註「本條為原廠文件參考記錄，
+    不代表濾呼吸販售此商品」），才不會把單純供讀者核對用的參考資料，誤判成濾呼吸自己的
+    商品或相容性宣稱（2026-10-03正式站實測「冰塊有異味」這篇時，品質檢查就誤把Panasonic
+    原廠文件參考內容當成需要佐證的濾呼吸商品宣稱）。"""
+    citations = extra.get("knowledge_citations") or []
+    if not citations:
+        return "（本篇生成時沒有引用任何知識庫條目）"
+    try:
+        items = _get_knowledge_for_prompt(brand_key, category, limit=20)
+    except Exception:
+        items = []
+    by_title = {it["title"]: it for it in items}
+    lines = []
+    for title in citations:
+        it = by_title.get(title)
+        if it:
+            lines.append(f"- {title}：{it['content']}")
+        else:
+            lines.append(f"- {title}：（找不到這筆條目的完整內容，可能已被刪除或改名，無法核對）")
+    return "\n".join(lines)
+
 def _quality_check_prompt(article, brand, category, brand_rule, extra, content_override=None, chunk_note=""):
     """content_override：分段檢查時傳入該段內容；不傳則用article['content']全文（不再截斷前8000字）。"""
     content = article.get('content', '') if content_override is None else content_override
     compat = _brand_compatible_list(brand.get("key", ""))
     compat_line = (f"（已排除白名單相容品牌「{'、'.join(compat)}」的合理相容性說明，這些不算違規）" if compat else "")
+    content_mode = _quality_check_content_mode(extra)
+    related_products = (extra.get("related_products") or "").strip()
     body = f"""你是台灣SEO/GEO/AEO內容策略專家，請幫以下文章做發布前品質檢查。
 {chunk_note}
+本篇內容模式：{content_mode}
+{"（沒有對應商品，是純知識／教學內容——缺商品、商品連結、品牌CTA本身不是問題，不要因此扣分）" if content_mode == "KNOWLEDGE_ONLY" else f"（本篇對應商品：{related_products}）"}
+
 品牌SEO規則（文章必須符合，不可偏離）：
 {_brand_rule_block(brand_rule)}
 
@@ -1968,7 +2004,13 @@ def _quality_check_prompt(article, brand, category, brand_rule, extra, content_o
 
 文章主關鍵字：{extra.get('main_keyword','')}
 文章目標客群：{extra.get('target_audience','')}
-文章對應商品：{extra.get('related_products','')}
+文章對應商品（本篇實際可用的真實商品；任何商品相關建議都只能從這份清單挑，清單是空的
+就不能建議新增商品型號、商品頁或購買CTA）：{related_products or '（無——本篇是KNOWLEDGE_ONLY，這是正常狀態）'}
+
+本篇生成時實際引用的知識庫條目（內容若標註「原廠文件參考記錄」「不代表濾呼吸販售或相容」，
+那些型號/料號資訊只是提供讀者核對用的參考資料，不是濾呼吸自己的商品宣稱，不能據此判定
+品牌一致性未通過）：
+{_quality_check_knowledge_citations_block(brand.get("key",""), category, extra)}
 
 標題：{article.get('title','')}
 Meta Title：{article.get('meta_title','')}
@@ -1983,8 +2025,8 @@ Meta Description：{article.get('meta_description','')}
 4. 開頭是否直接回答搜尋意圖
 5. 內容是否符合品牌定位
 6. 是否偏離目標客群
-7. 是否有商品導購段落
-8. 是否有對應商品
+7. 是否有商品導購段落（本篇內容模式是KNOWLEDGE_ONLY時，沒有商品導購段落是正常的，不算缺失）
+8. 是否有對應商品（本篇內容模式是KNOWLEDGE_ONLY時，沒有對應商品是正常狀態，不算缺失）
 9. 是否有FAQ
 10. 是否有CTA
 11. 是否有內部連結建議
@@ -1995,6 +2037,19 @@ Meta Description：{article.get('meta_description','')}
 16. 正文是否還殘留「待補充」「待確認」「TODO」等佔位文字尚未填寫（若有，視為未完成，必須在issues指出，且not recommend_publish）
 17. 正文是否直接外露內部／後台用語（例如「知識庫未列出」「品牌SEO規則」「knowledge_citations」「confirmation_notes」這類明顯是系統內部溝通用的詞彙或制式套話，而不是說給讀者聽的自然語言）——資料真的不足時應該用消費者語言解釋，不是照抄系統內部欄位名稱或反覆貼同一句套話
 18. 如果標題或Meta Title語意上承諾了「比較」「差異」「怎麼選」（例如「A跟B差在哪」「哪個好」「怎麼挑」），檢查正文是否真的給出具體的比較結論或選購依據——只是把各項目分別介紹一遍、卻沒有講出實際差異或建議，視為標題與內容不符
+19. 正文如果提到某個特定機型/原廠文件記載的更換週期、保養方式，檢查有沒有被寫成「適用於所有
+    冰箱/所有型號」的通用結論——正文已經講清楚是「該機型原廠建議」「因品牌機型而異，請依說明書
+    確認」的，不算泛化問題；沒有這些限定、讓人誤以為是全品類通則的，才算問題
+
+━━━ 商品相關建議的限制（重要，避免建議新增不存在的商品） ━━━
+- 不管是issues、suggestions、suggested_sections、suggested_related_products哪個欄位，
+  任何「建議補充OO商品」「建議加上OO型號的導購」這類商品相關建議，都只能從上面
+  「文章對應商品」實際列出的商品挑，不能自己想像、補充或建議清單外的商品/型號
+- 「文章對應商品」是空的時候（本篇內容模式是KNOWLEDGE_ONLY），不要建議新增任何商品型號、
+  商品頁連結或購買CTA——這種建議在没有真實商品資料的情況下，只會讓人把不存在的商品寫進文章
+- 「官方建議」「原廠建議」這類措辭，要看正文有沒有清楚標註資料來源與適用範圍（例如「根據OO
+  原廠說明書」「適用於OO型號」）。有清楚標註來源跟適用範圍的，不算暗示濾呼吸自己是原廠或取得
+  官方授權；只有完全沒標來源、卻讓讀者誤以為是濾呼吸自己官方認證時，第15項(f)才算違規
 
 輸出格式（只輸出JSON，不要其他文字，不要markdown code block）：
 {{

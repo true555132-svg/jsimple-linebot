@@ -58,6 +58,17 @@ SEO_BRAND_RULES = [
      "", "", "", "", ""),
 ]
 
+KNOWLEDGE_ITEMS = {
+    # 還原正式站真實內容：這筆是2026-10-03修過的通用條目，已含免責聲明，
+    # 用來測試_quality_check_knowledge_citations_block能不能把這段文字帶進品質檢查Prompt
+    ("filterbreath", "製冰機濾網"): [
+        ("faq", "Panasonic濾芯怎麼核對",
+         "Panasonic 官方提供依冰箱本體型號查詢自動製冰機淨水濾芯品番的功能；請以冰箱機身標籤、"
+         "保證書或說明書上的完整型號查詢。官方建議約每3年更換。（本條為 Panasonic 官方資訊參考記錄，"
+         "僅供讀者自行核對型號使用，不代表濾呼吸販售此商品或已確認相容性。）"),
+    ],
+}
+
 THEMES = {
     "filterbreath": {"brand_key": "filterbreath", "primary_color": "#1B3F6E", "accent_color": "#2F80ED",
                       "bg_color": "#F5F8FC", "confirmed": True},
@@ -222,6 +233,12 @@ def fake_q(sql, params=None, fetch=None):
     # seo_brand_rules（_match_brand_rule全撈後在Python端比對）
     if "FROM seo_brand_rules ORDER BY id" in s:
         return SEO_BRAND_RULES
+
+    # _get_knowledge_for_prompt：只處理brand+category都有帶的情況（目前所有呼叫端都這樣用）
+    if "FROM seo_knowledge WHERE" in s and len(params) >= 2:
+        brand, category = params[0], params[1]
+        rows = KNOWLEDGE_ITEMS.get((brand, category), [])
+        return rows
 
     # seo_brand_themes
     if "FROM seo_brand_themes WHERE brand_key=%s" in s:
@@ -1294,6 +1311,67 @@ resp_edit_no_auto_qc = client.get(f"/admin/seo/article/201?key={KEY}")
 check("沒帶auto_qc時，不應該有自動呼叫doQualityCheck(201)這行（只有按鈕onclick那個，不是自動執行）",
       resp_edit_no_auto_qc.get_data(as_text=True).count("doQualityCheck(201)") <
       resp_edit_auto_qc.get_data(as_text=True).count("doQualityCheck(201)"), None)
+
+print("=" * 70)
+print("22. 品質檢查取得與生成階段一致的事實背景：content_mode、知識庫引用、不建議新增不存在的商品")
+print("=" * 70)
+
+# 22a) 還原正式站文章113的真實情境：filterbreath/製冰機濾網，related_products是空的（KNOWLEDGE_ONLY），
+# 生成時引用了「Panasonic濾芯怎麼核對」這筆通用條目（內容已含「不代表濾呼吸販售此商品」的免責說明）
+know_only_article = {"title": "冰塊有異味怎麼排查？", "meta_title": "mt", "meta_description": "md",
+                      "content": "正文略，提到Panasonic官方建議約3年更換濾芯。"}
+know_only_extra = {
+    "main_keyword": "冰塊有異味原因", "target_audience": "家用冰箱使用者",
+    "related_products": "",  # KNOWLEDGE_ONLY：確認是空的
+    "knowledge_citations": ["Panasonic濾芯怎麼核對"],
+}
+check("_quality_check_content_mode：related_products是空的要判定為KNOWLEDGE_ONLY",
+      SA._quality_check_content_mode(know_only_extra) == "KNOWLEDGE_ONLY", None)
+
+qc_prompt_know_only = SA._quality_check_prompt(know_only_article, SA._get_brand("filterbreath"),
+                                                "製冰機濾網", {}, know_only_extra)
+check("品質檢查Prompt要明確標示本篇是KNOWLEDGE_ONLY，且講清楚沒有商品不是問題",
+      "本篇內容模式：KNOWLEDGE_ONLY" in qc_prompt_know_only and
+      "缺商品、商品連結、品牌CTA本身不是問題" in qc_prompt_know_only, None)
+check("品質檢查Prompt要把引用的知識庫條目實際內容帶進去，包含免責聲明文字",
+      "Panasonic濾芯怎麼核對" in qc_prompt_know_only and "不代表濾呼吸販售此商品" in qc_prompt_know_only,
+      None)
+check("品質檢查Prompt要明確禁止建議新增清單外的商品/型號/購買CTA",
+      "不能自己想像、補充或建議清單外的商品" in qc_prompt_know_only and
+      "不要建議新增任何商品型號" in qc_prompt_know_only, None)
+check("品質檢查Prompt對「官方建議」的判定要看有沒有標來源/適用範圍，不是看到字眼就算違規",
+      "只有完全沒標來源、卻讓讀者誤以為是濾呼吸自己官方認證時" in qc_prompt_know_only, None)
+check("品質檢查Prompt要有「特定機型週期不可泛化成全品類通則」的檢查項目",
+      "適用於所有" in qc_prompt_know_only and "泛化" in qc_prompt_know_only, None)
+check("第7、8項要標明KNOWLEDGE_ONLY時沒有商品導購/對應商品不算缺失",
+      "本篇內容模式是KNOWLEDGE_ONLY時，沒有商品導購段落是正常的" in qc_prompt_know_only and
+      "本篇內容模式是KNOWLEDGE_ONLY時，沒有對應商品是正常狀態" in qc_prompt_know_only, None)
+
+# 22b) 對照組：有真實商品資料的PRODUCT_GUIDE案例（JSIMPLE穀倉門）要正常判定、商品清單正確帶入，
+# 確認這次修正沒有把「真的有商品」的案例也誤判成KNOWLEDGE_ONLY
+product_guide_article = {"title": "穀倉門五金怎麼挑", "meta_title": "mt", "meta_description": "md",
+                          "content": "正文略。"}
+product_guide_extra = {
+    "main_keyword": "穀倉門五金怎麼挑", "target_audience": "想裝穀倉門的屋主",
+    "related_products": "穀倉門滑軌組,穀倉門五金", "knowledge_citations": [],
+}
+check("_quality_check_content_mode：related_products有值要判定為PRODUCT_GUIDE",
+      SA._quality_check_content_mode(product_guide_extra) == "PRODUCT_GUIDE", None)
+qc_prompt_product = SA._quality_check_prompt(product_guide_article, SA._get_brand("jsimple"),
+                                              "穀倉門", {}, product_guide_extra)
+check("PRODUCT_GUIDE案例的品質檢查Prompt要標示正確模式，且列出真實對應商品清單",
+      "本篇內容模式：PRODUCT_GUIDE" in qc_prompt_product and
+      "本篇對應商品：穀倉門滑軌組,穀倉門五金" in qc_prompt_product, None)
+check("PRODUCT_GUIDE案例「文章對應商品」欄位要顯示真實商品，不是「無」",
+      "穀倉門滑軌組,穀倉門五金" in qc_prompt_product and
+      "本篇是KNOWLEDGE_ONLY，這是正常狀態" not in qc_prompt_product.split("文章對應商品")[-1][:100], None)
+
+# 22c) 找不到引用條目時（例如條目被刪掉或改名）要有合理訊息，不能crash
+missing_citation_extra = dict(know_only_extra, knowledge_citations=["已經被刪除的條目"])
+qc_prompt_missing = SA._quality_check_prompt(know_only_article, SA._get_brand("filterbreath"),
+                                              "製冰機濾網", {}, missing_citation_extra)
+check("引用的知識庫條目找不到時，要顯示合理說明，不能crash或留空白",
+      "找不到這筆條目的完整內容" in qc_prompt_missing, None)
 
 print("=" * 70)
 print("結果")
