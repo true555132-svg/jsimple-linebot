@@ -1168,7 +1168,7 @@ check("KNOWLEDGE_ONLY指引要求圖片只能是概念/流程示意圖，不是�
 
 # 20a) 真正的重點：不是只靠文字指示叫AI「忽略」，是資料組裝階段就把不相關商品清空，
 #      Preview Prompt跟最終送進Sonnet的內容都不該出現HEPA、活性碳濾芯這些跟製冰機濾網無關的商品字樣
-check("製冰機濾網這個已確認不相關的品類，最終prompt的「對應商品」欄位要是空的，不能出現HEPA/活性碳濾芯",
+check("製冰機濾網這個目前查無已確認商品頁的品類，最終prompt的「對應商品」欄位要是空的，不能出現HEPA/活性碳濾芯",
       "HEPA濾網" not in lu_know_prompt and "活性碳濾芯" not in lu_know_prompt, lu_know_prompt)
 check("guardrail的「允許提到的商品」同樣要清空，不能讓AI以為可以提這些不相關商品",
       "允許提到的商品：濾網,活性碳濾芯,HEPA濾網" not in lu_know_prompt, lu_know_prompt)
@@ -1232,9 +1232,9 @@ resp_preview_know = client.post(f"/admin/seo-generator/preview?key={KEY}", json=
     "analysis": "", "main_keyword": "冰塊有異味原因",
 })
 preview_know_debug = resp_preview_know.get_json()["debug"]["fields"]
-check("Preview debug的RELATED_PRODUCTS也要顯示空值，且來源要說明是「品類已確認無商品」，不是舊的seo_brand_rules",
+check("Preview debug的RELATED_PRODUCTS也要顯示空值，且來源要說明是「品類尚無已確認的官網商品頁」，不是舊的seo_brand_rules",
       preview_know_debug["RELATED_PRODUCTS"]["value"] == "" and
-      "品類已確認無商品" in preview_know_debug["RELATED_PRODUCTS"]["src"], preview_know_debug)
+      "尚無已確認的官網商品頁" in preview_know_debug["RELATED_PRODUCTS"]["src"], preview_know_debug)
 
 # 20f) 2026-10-03正式站實測「冰塊有異味」這篇時發現：送進Prompt的知識庫條目裡，混入了
 # 00820/108850/RD-30/MR-BX52這些跟主題無關的具體型號舊資料，導致AI在正文寫出未經佐證的
@@ -1429,8 +1429,8 @@ check("JSIMPLE穀倉門案例，品質檢查prompt的主打商品/允許商品�
       "穀倉門滑軌組,穀倉門五金" in js_qc_prompt, js_qc_prompt)
 
 # 23e) 其他品牌（非filterbreath）即使遇到同名品類字串，也完全不受這套機制影響
-check("_filterbreath_category_confirmed_unavailable對非filterbreath品牌一律回傳False",
-      SA._filterbreath_category_confirmed_unavailable(js_brand, "製冰機濾網") is False, None)
+check("_filterbreath_category_has_no_confirmed_product對非filterbreath品牌一律回傳False",
+      SA._filterbreath_category_has_no_confirmed_product(js_brand, "製冰機濾網") is False, None)
 
 print("=" * 70)
 print("結果")

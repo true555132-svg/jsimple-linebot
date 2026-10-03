@@ -478,11 +478,15 @@ IMAGE_SLOTS = ["cover", "inline_1", "inline_2"]
 # 暫時解法，等「官網商品/舊文章索引」那個下一階段功能做好就可以拿掉：
 # 品牌預設allowed_products是給「沒有品類專屬規則、但這個品類本身跟品牌業務相關」的情況當合理預設
 # （例如濾呼吸的「空氣清淨機濾網」——核心業務，只是沒登記品類規則，用品牌預設清單合理）。
-# 但這個fallback沒辦法分辨「品類本身跟品牌完全無關」（例如濾呼吸實際上沒有在賣冰箱製冰濾芯，
-# 2026-10-02直接查過官網全商品清單證實），這種情況套用品牌預設清單只會把不相關商品硬塞進來。
-# 目前用這份清單手動標記「已確認品牌沒有在賣」的品類，之後有正式的商品/品類資料索引後，
-# 應該改成查真實資料，不要繼續維護這份清單。
-FILTERBREATH_CONFIRMED_UNAVAILABLE_CATEGORIES = {"製冰機濾網"}
+# 但這個fallback沒辦法分辨「這個品類目前沒有已確認的官網商品頁」（例如濾呼吸的冰箱製冰濾芯，
+# 2026-10-02查過官網全商品清單，目前還沒上架），這種情況套用品牌預設清單只會把不相關商品硬塞進來。
+# 2026-10-03更正：這份清單原本命名／註解寫成「已確認品牌沒有在賣」，把「尚未上架」跟「永久不賣」
+# 兩件事混在一起了——這裡只代表「目前查無已確認的官網商品頁」，是會隨商品上架狀態變動的暫時狀態，
+# 不是對這個品類的永久判決。商品之後上架、資料確認了，就把該品類從這份清單移除即可解除限制，
+# 不需要另外做「永久封鎖」的設計。通用排查/知識類文章在清單內的品類一律走KNOWLEDGE_ONLY，
+# 不導向不存在的商品頁；未提供資料的料號／型號，不論清單內外都不能當成濾呼吸商品宣稱。
+# 之後有正式的商品/品類資料索引後，應該改成即時查真實上架狀態，不要繼續手動維護這份清單。
+FILTERBREATH_NO_CONFIRMED_PRODUCT_CATEGORIES = {"製冰機濾網"}
 
 def _esc(s):
     return html_mod.escape(str(s if s is not None else ""), quote=True)
@@ -2340,7 +2344,15 @@ def _ai_call_full(prompt, model="claude-haiku-4-5", max_tokens=2000):
                 "content-type": "application/json",
             }
         )
-        with urllib.request.urlopen(req, timeout=120) as r:
+        # timeout必須明顯小於Procfile裡gunicorn的--timeout 120（兩者原本都是120，兩個計時器
+        # 幾乎同時到期，實務上永遠是gunicorn的WORKER TIMEOUT先把整個worker process砍掉，
+        # 這段try/except連跑的機會都沒有，前端收到的是連線中斷/非JSON回應，不是下面這段
+        # 原本就寫好的「AI分析失敗：{err}」這種乾淨錯誤訊息（2026-10-03正式站實測
+        # /admin/seo-generator/analyze逾時時就是這樣炸的，WORKER TIMEOUT發生在urlopen內部，
+        # 下面的except完全沒機會執行）。100留20秒margin，讓urlopen自己先逾時、
+        # 讓這支函式正常回傳(None, err, "")，呼叫端才能把它當一般錯誤處理成200+JSON，
+        # 而不是被gunicorn硬殺掉整個worker。
+        with urllib.request.urlopen(req, timeout=100) as r:
             resp = json.loads(r.read().decode())
         text = resp["content"][0]["text"].strip()
         return text, "", resp.get("stop_reason", "")
@@ -2663,11 +2675,13 @@ def _resolve_generate_fields(fields, brand_rule, brand=None, category=None):
 
 def _apply_filterbreath_knowledge_only_override(brand, category, resolved, sources):
     """濾呼吸專屬、暫時解法（等「官網商品/舊文章索引」下一階段功能做好就可以拿掉）：
-    category在FILTERBREATH_CONFIRMED_UNAVAILABLE_CATEGORIES裡時，強制清空related_products——
-    不管原本是從seo_brand_rules（例如之前查證後發現其實查無根據的舊型號清單）、品牌預設
-    allowed_products、還是完全沒資料解出來的，都一視同仁清空，避免已確認不相關品類的資料
-    繼續被當成這篇文章的對應商品。使用者這次手動輸入的值（"手動輸入"來源）予以保留，
-    尊重當下明確的輸入，不強制蓋掉。
+    category在FILTERBREATH_NO_CONFIRMED_PRODUCT_CATEGORIES裡時（目前查無已確認的官網商品頁，
+    不是「永久確認不會賣」，見該常數上方註解），強制清空related_products跟cta_direction——
+    不管related_products原本是從seo_brand_rules（例如之前查證後發現其實查無根據的舊型號清單）、
+    品牌預設allowed_products、還是完全沒資料解出來的，都一視同仁清空；cta_direction如果預設
+    其實假設有商品頁可核對（例如「引導讀者到對應商品頁核對型號」這種寫法），同樣清空改用中性導引，
+    避免這篇文章被導向一個目前還不存在的商品頁。使用者這次手動輸入的值（"手動輸入"來源）兩個
+    欄位都予以保留，尊重當下明確的輸入，不強制蓋掉。
     _generate_article_prompt、_run_generate_job、seo_generator_preview三處都要呼叫這支，
     確保「送給AI的Prompt」「存進文章extra的對應商品」「Preview debug顯示的來源」三者一致，
     不會有Prompt清空了、但後台欄位/debug還是顯示舊資料的落差。
@@ -2676,30 +2690,38 @@ def _apply_filterbreath_knowledge_only_override(brand, category, resolved, sourc
     if brand.get("key") == "filterbreath":
         rp_source = sources.get("RELATED_PRODUCTS", {}).get("src", "")
         no_real_data = rp_source in ("空（無資料）", "")
-        category_confirmed_unavailable = category in FILTERBREATH_CONFIRMED_UNAVAILABLE_CATEGORIES
-        if category_confirmed_unavailable and rp_source != "手動輸入":
+        category_no_confirmed_product = category in FILTERBREATH_NO_CONFIRMED_PRODUCT_CATEGORIES
+        if category_no_confirmed_product and rp_source != "手動輸入":
             resolved = dict(resolved, related_products="")
-            sources = dict(sources, RELATED_PRODUCTS={"value": "", "src": "品類已確認無商品，強制清空"})
+            sources = dict(sources, RELATED_PRODUCTS={"value": "", "src": "品類尚無已確認的官網商品頁，強制清空"})
             has_category_product = False
+            cta_source = sources.get("CTA_DIRECTION", {}).get("src", "")
+            if cta_source != "手動輸入":
+                neutral_cta = ("目前查無已確認的官網商品頁，不導向任何商品頁或型號對應；"
+                                "可引導讀者如何核對自己的機型/完整型號，需要協助時提供中性的客服／找型號入口，不用導購用語。")
+                resolved = dict(resolved, cta_direction=neutral_cta)
+                sources = dict(sources, CTA_DIRECTION={"value": neutral_cta, "src": "品類尚無已確認的官網商品頁，改用中性核對導引"})
         else:
             has_category_product = not no_real_data
     return resolved, sources, has_category_product
 
-def _filterbreath_category_confirmed_unavailable(brand, category):
-    """單一判斷點：這個brand+category是不是已確認品類跟品牌無關（暫時用
-    FILTERBREATH_CONFIRMED_UNAVAILABLE_CATEGORIES這份清單，等「官網商品/舊文章索引」
-    下一階段功能做好就可以拿掉）。生成、品質檢查所有要顯示「可用商品」「品牌規則主打商品」
-    的地方都要呼叫這支同一個判斷，不要自己重新用category查一次——2026-10-03發現
-    _allowed_products_block、_brand_rule_block各自獨立重新查了舊的seo_brand_rules資料，
-    跟已經清空的related_products互相矛盾，AI選擇相信看起來更權威的「必須遵守」那份舊資料。
-    只對「已確認無關」的品類生效，不是任何RELATED_PRODUCTS為空的情況都套用——品牌在其他
+def _filterbreath_category_has_no_confirmed_product(brand, category):
+    """單一判斷點：這個brand+category目前是不是查無已確認的官網商品頁（暫時用
+    FILTERBREATH_NO_CONFIRMED_PRODUCT_CATEGORIES這份清單，等「官網商品/舊文章索引」
+    下一階段功能做好就可以拿掉）。這是會隨商品上架狀態變動的暫時狀態，不是對該品類的
+    永久判決——商品上架、資料確認後，把該品類從清單移除即可解除限制。
+    生成、品質檢查所有要顯示「可用商品」「品牌規則主打商品」的地方都要呼叫這支同一個判斷，
+    不要自己重新用category查一次——2026-10-03發現_allowed_products_block、_brand_rule_block
+    各自獨立重新查了舊的seo_brand_rules資料，跟已經清空的related_products互相矛盾，AI選擇
+    相信看起來更權威的「必須遵守」那份舊資料。
+    只對「目前查無商品頁」的品類生效，不是任何RELATED_PRODUCTS為空的情況都套用——品牌在其他
     品類本來就可能有真實商品，只是這篇剛好沒填，那種情況不該被這支判斷誤傷。"""
-    return brand.get("key") == "filterbreath" and category in FILTERBREATH_CONFIRMED_UNAVAILABLE_CATEGORIES
+    return brand.get("key") == "filterbreath" and category in FILTERBREATH_NO_CONFIRMED_PRODUCT_CATEGORIES
 
 def _filterbreath_clean_product_context(brand, category, brand_rule):
     """回傳(display_brand, display_category, display_brand_rule)，給_allowed_products_block、
     _brand_rule_block這類「會自己重新查商品資料」的函式用，確保生成跟品質檢查看到同一份
-    已經清乾淨的事實，不要各自重新解析。已確認品類無商品時：
+    已經清乾淨的事實，不要各自重新解析。品類目前查無已確認官網商品頁時：
     - display_category改傳空字串：不這樣做的話，就算把brand.allowed_products清空，
       _resolve_allowed_products第一層還是會直接用category查到舊的seo_brand_rules.key_products，
       繞過清空
@@ -2707,7 +2729,7 @@ def _filterbreath_clean_product_context(brand, category, brand_rule):
     - display_brand_rule只清空key_products（主打商品）這一欄，品牌定位/目標客群/禁止方向/
       語氣/CTA方向/常用關鍵字/禁用關鍵字這些其他有效規則原樣保留，不受影響
     不是這個情境就原封不動傳回去，不影響其他品牌、其他品類的行為。"""
-    if not _filterbreath_category_confirmed_unavailable(brand, category):
+    if not _filterbreath_category_has_no_confirmed_product(brand, category):
         return brand, category, brand_rule
     display_brand = dict(brand, allowed_products="", allowed_services="")
     display_brand_rule = dict(brand_rule, key_products="") if brand_rule else brand_rule
@@ -2718,17 +2740,17 @@ _MODEL_CODE_PATTERN = re.compile(r'[A-Za-z]{0,4}-?\d{2,}[A-Za-z0-9-]*')
 def _filter_knowledge_for_filterbreath(knowledge_items, brand, category, topic):
     """濾呼吸專屬、暫時解法（跟_apply_filterbreath_knowledge_only_override同一組，
     等「官網商品/舊文章索引」下一階段功能做好就可以拿掉）：
-    category確認跟品牌無關時，只保留「跟這篇主題直接相關」的知識庫條目——具體做法是找出
-    條目標題+內容裡看起來像具體型號/料號的字串（例如00820、108850、RD-30、MR-BX52），
+    category目前查無已確認官網商品頁時，只保留「跟這篇主題直接相關」的知識庫條目——具體做法是
+    找出條目標題+內容裡看起來像具體型號/料號的字串（例如00820、108850、RD-30、MR-BX52），
     如果這些字串都沒出現在topic裡，就不把這筆條目送進Prompt；完全沒有具體型號字樣的
     通用條目（例如單純講「怎麼核對型號」的步驟說明，不綁定特定型號）一律保留。
-    這是簡單字串比對，不是語意理解，只在品類已確認無關的情境下套用，範圍有限——
+    這是簡單字串比對，不是語意理解，只在品類目前查無商品頁的情境下套用，範圍有限——
     目的是避免像「冰塊有異味怎麼排查」這種通用知識主題，被不相干的特定型號舊資料污染，
     讓AI誤以為這篇要討論那些具體型號、進而寫出未經確認的相容宣稱（2026-10-03正式站
     實測「冰塊有異味」這篇時真的發生過，品質檢查因此抓到未佐證的型號宣稱而報錯）。
     _run_generate_job跟seo_generator_preview都要在拿到knowledge_items後立刻呼叫這支，
     確保「送進Prompt的」跟「Preview debug顯示的」是同一份清單。"""
-    if brand.get("key") != "filterbreath" or category not in FILTERBREATH_CONFIRMED_UNAVAILABLE_CATEGORIES:
+    if brand.get("key") != "filterbreath" or category not in FILTERBREATH_NO_CONFIRMED_PRODUCT_CATEGORIES:
         return knowledge_items
     filtered = []
     for item in knowledge_items:
