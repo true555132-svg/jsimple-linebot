@@ -1991,16 +1991,20 @@ def _quality_check_prompt(article, brand, category, brand_rule, extra, content_o
     compat_line = (f"（已排除白名單相容品牌「{'、'.join(compat)}」的合理相容性說明，這些不算違規）" if compat else "")
     content_mode = _quality_check_content_mode(extra)
     related_products = (extra.get("related_products") or "").strip()
+    # 「可用商品資料」「品牌規則主打商品」跟生成階段共用同一套清乾淨的事實，不要各自獨立重新查
+    # category一次——2026-10-03發現各自重查會對不起來，AI選擇相信看起來更權威的「必須遵守」舊資料。
+    display_brand, display_category, display_brand_rule = _filterbreath_clean_product_context(
+        brand, category, brand_rule)
     body = f"""你是台灣SEO/GEO/AEO內容策略專家，請幫以下文章做發布前品質檢查。
 {chunk_note}
 本篇內容模式：{content_mode}
 {"（沒有對應商品，是純知識／教學內容——缺商品、商品連結、品牌CTA本身不是問題，不要因此扣分）" if content_mode == "KNOWLEDGE_ONLY" else f"（本篇對應商品：{related_products}）"}
 
 品牌SEO規則（文章必須符合，不可偏離）：
-{_brand_rule_block(brand_rule)}
+{_brand_rule_block(display_brand_rule)}
 
 可用商品資料（{brand.get('name','')}實際販售的商品/服務，第15項品牌一致性檢查要用這份清單比對）：
-{_allowed_products_block(brand, [], category)}
+{_allowed_products_block(display_brand, [], display_category)}
 
 文章主關鍵字：{extra.get('main_keyword','')}
 文章目標客群：{extra.get('target_audience','')}
@@ -2067,7 +2071,8 @@ Meta Description：{article.get('meta_description','')}
   "suggested_internal_links": "建議內部連結，逗號分隔",
   "suggested_related_products": "建議對應商品，逗號分隔"
 }}"""
-    return _brand_guardrail_header(brand, category) + "\n\n" + body + "\n\n" + _brand_guardrail_footer(brand)
+    return (_brand_guardrail_header(display_brand, display_category) + "\n\n" + body
+            + "\n\n" + _brand_guardrail_footer(display_brand))
 
 def _split_content_for_chunk_check(content, n=2):
     """把長文章依段落邊界切成約n等分，避免品質檢查漏看後半段內容。"""
@@ -2680,6 +2685,34 @@ def _apply_filterbreath_knowledge_only_override(brand, category, resolved, sourc
             has_category_product = not no_real_data
     return resolved, sources, has_category_product
 
+def _filterbreath_category_confirmed_unavailable(brand, category):
+    """單一判斷點：這個brand+category是不是已確認品類跟品牌無關（暫時用
+    FILTERBREATH_CONFIRMED_UNAVAILABLE_CATEGORIES這份清單，等「官網商品/舊文章索引」
+    下一階段功能做好就可以拿掉）。生成、品質檢查所有要顯示「可用商品」「品牌規則主打商品」
+    的地方都要呼叫這支同一個判斷，不要自己重新用category查一次——2026-10-03發現
+    _allowed_products_block、_brand_rule_block各自獨立重新查了舊的seo_brand_rules資料，
+    跟已經清空的related_products互相矛盾，AI選擇相信看起來更權威的「必須遵守」那份舊資料。
+    只對「已確認無關」的品類生效，不是任何RELATED_PRODUCTS為空的情況都套用——品牌在其他
+    品類本來就可能有真實商品，只是這篇剛好沒填，那種情況不該被這支判斷誤傷。"""
+    return brand.get("key") == "filterbreath" and category in FILTERBREATH_CONFIRMED_UNAVAILABLE_CATEGORIES
+
+def _filterbreath_clean_product_context(brand, category, brand_rule):
+    """回傳(display_brand, display_category, display_brand_rule)，給_allowed_products_block、
+    _brand_rule_block這類「會自己重新查商品資料」的函式用，確保生成跟品質檢查看到同一份
+    已經清乾淨的事實，不要各自重新解析。已確認品類無商品時：
+    - display_category改傳空字串：不這樣做的話，就算把brand.allowed_products清空，
+      _resolve_allowed_products第一層還是會直接用category查到舊的seo_brand_rules.key_products，
+      繞過清空
+    - display_brand把allowed_products/allowed_services都清空，避免落到品牌預設清單
+    - display_brand_rule只清空key_products（主打商品）這一欄，品牌定位/目標客群/禁止方向/
+      語氣/CTA方向/常用關鍵字/禁用關鍵字這些其他有效規則原樣保留，不受影響
+    不是這個情境就原封不動傳回去，不影響其他品牌、其他品類的行為。"""
+    if not _filterbreath_category_confirmed_unavailable(brand, category):
+        return brand, category, brand_rule
+    display_brand = dict(brand, allowed_products="", allowed_services="")
+    display_brand_rule = dict(brand_rule, key_products="") if brand_rule else brand_rule
+    return display_brand, "", display_brand_rule
+
 _MODEL_CODE_PATTERN = re.compile(r'[A-Za-z]{0,4}-?\d{2,}[A-Za-z0-9-]*')
 
 def _filter_knowledge_for_filterbreath(knowledge_items, brand, category, topic):
@@ -2761,12 +2794,10 @@ def _generate_article_prompt(brand, category, topic, intent_analysis, knowledge_
     resolved, sources, has_category_product = _apply_filterbreath_knowledge_only_override(
         brand, category, resolved, sources)
     is_filterbreath = brand.get("key") == "filterbreath"
-    guardrail_brand = brand
-    if is_filterbreath and not has_category_product:
-        # guardrail的「允許提到的商品」同理也要清空，不要讓AI以為可以提這些不相關商品；
-        # 用一份暫時拿掉allowed_products/allowed_services的brand副本去組guardrail，
-        # 不動原本brand dict（避免影響呼叫端其他用途）。
-        guardrail_brand = dict(brand, allowed_products="", allowed_services="")
+    # guardrail的「允許提到的商品」、品牌規則的「主打商品」都要用同一套清乾淨的事實，
+    # 不要各自獨立重新查一次——這是這次bug的根因，見_filterbreath_clean_product_context說明。
+    guardrail_brand, _display_category, display_brand_rule = _filterbreath_clean_product_context(
+        brand, category, brand_rule)
     tmpl = _get_prompt_template("generate", DEFAULT_GENERATE_PROMPT)
     body = _fill_tokens(tmpl,
         BRAND_NAME=brand.get('name', ''), BRAND_CATEGORY=category or brand.get('category', ''),
@@ -2781,10 +2812,10 @@ def _generate_article_prompt(brand, category, topic, intent_analysis, knowledge_
         CTA_DIRECTION=resolved['cta_direction'],
         ARTICLE_TYPE=fields.get('article_type', ''),
         ARTICLE_TYPE_GUIDE=_article_type_guide(fields.get('article_type', '')),
-        BRAND_RULE=_brand_rule_block(brand_rule))
+        BRAND_RULE=_brand_rule_block(display_brand_rule))
     if is_filterbreath:
         body += "\n\n" + _filterbreath_article_template_note(has_category_product)
-    return (_brand_guardrail_header(guardrail_brand, category) + "\n\n" + body
+    return (_brand_guardrail_header(guardrail_brand, _display_category) + "\n\n" + body
             + "\n\n" + _brand_guardrail_footer(guardrail_brand))
 
 # ── Auth（複製自 app.py，避免 circular import，與既有後台共用同一支密碼）──

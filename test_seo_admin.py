@@ -1374,6 +1374,65 @@ check("引用的知識庫條目找不到時，要顯示合理說明，不能cras
       "找不到這筆條目的完整內容" in qc_prompt_missing, None)
 
 print("=" * 70)
+print("23. 修漏掉的兩個資料入口：_allowed_products_block、_brand_rule_block不能各自重查舊商品資料")
+print("=" * 70)
+
+STALE_MODEL_NAMES = ["00820", "108850", "Hitachi", "Mitsubishi", "RD-30", "MR-BX52"]
+
+# 23a) 還原正式站真實bug：filterbreath/製冰機濾網有一筆seo_brand_rules（SEO_BRAND_RULES[1]），
+# key_products是已查證不相關的舊型號清單。實際組出完整的generate prompt，逐一確認這些型號
+# 名稱完全沒有出現在任何地方（包含「允許提到的商品」「品牌SEO規則／主打商品」兩個之前漏掉的入口）。
+lu_brand = SA._get_brand("filterbreath")
+lu_rule = SA._match_brand_rule("filterbreath", "製冰機濾網")
+check("測試前提：真的有命中那筆帶舊型號清單的規則", "00820" in (lu_rule.get("key_products") or ""), lu_rule)
+
+full_generate_prompt = SA._generate_article_prompt(
+    lu_brand, "製冰機濾網", "冰塊有異味怎麼排查？", "（分析內容略）", [],
+    {"main_keyword": "冰塊有異味原因"}, lu_rule)
+for name in STALE_MODEL_NAMES:
+    check(f"完整generate prompt不該出現「{name}」（含guardrail的允許商品、品牌規則的主打商品兩處）",
+          name not in full_generate_prompt, None)
+check("generate prompt的品牌SEO規則段落，主打商品要是空的，不是完全拿掉整份規則",
+      "主打商品：\n" in full_generate_prompt or "主打商品：" in full_generate_prompt, None)
+
+# 23b) 品質檢查同一情境：還原文章113真實extra（related_products空、有引用Panasonic通用條目）
+full_qc_prompt = SA._quality_check_prompt(
+    {"title": "冰塊有異味怎麼排查？", "meta_title": "mt", "meta_description": "md", "content": "正文略"},
+    lu_brand, "製冰機濾網", lu_rule,
+    {"main_keyword": "冰塊有異味原因", "related_products": "", "knowledge_citations": ["Panasonic濾芯怎麼核對"]})
+for name in STALE_MODEL_NAMES:
+    check(f"完整品質檢查prompt不該出現「{name}」（這就是文章113正式站實測真正漏掉的兩個入口）",
+          name not in full_qc_prompt, None)
+check("品質檢查prompt的「可用商品資料」要顯示沒有商品，不是舊型號清單",
+      "目前品牌尚未建立商品資料，不列出商品" in full_qc_prompt, full_qc_prompt)
+
+# 23c) 保留品牌語氣、受眾及其他有效SEO規則——只清掉key_products，不是整份brand_rule都丟掉
+check("_filterbreath_clean_product_context只清空key_products，positioning/tone等其他欄位原樣保留",
+      SA._filterbreath_clean_product_context(lu_brand, "製冰機濾網", lu_rule)[2].get("tone") == lu_rule.get("tone")
+      and SA._filterbreath_clean_product_context(lu_brand, "製冰機濾網", lu_rule)[2].get("positioning") == lu_rule.get("positioning"),
+      None)
+display_brand_rule_tone = SA._filterbreath_clean_product_context(lu_brand, "製冰機濾網", lu_rule)[2].get("tone", "")
+if display_brand_rule_tone:
+    check("清乾淨後的品牌規則，語氣欄位真的有被保留並出現在完整Prompt裡",
+          display_brand_rule_tone in full_generate_prompt, None)
+
+# 23d) 對照組：真實有商品的PRODUCT_GUIDE案例（JSIMPLE穀倉門）完全不受影響，商品資料正常帶入
+js_brand = SA._get_brand("jsimple")
+js_rule = SA._match_brand_rule("jsimple", "穀倉門")
+check("_filterbreath_clean_product_context對非filterbreath品牌原樣傳回，不做任何清空",
+      SA._filterbreath_clean_product_context(js_brand, "穀倉門", js_rule) == (js_brand, "穀倉門", js_rule), None)
+js_qc_prompt = SA._quality_check_prompt(
+    {"title": "穀倉門五金怎麼挑", "meta_title": "mt", "meta_description": "md", "content": "正文略"},
+    js_brand, "穀倉門", js_rule,
+    {"main_keyword": "穀倉門五金怎麼挑", "related_products": "穀倉門滑軌組,穀倉門五金", "knowledge_citations": []})
+check("JSIMPLE穀倉門案例，品質檢查prompt的主打商品/允許商品要正常顯示真實資料，沒被誤清空",
+      "穀倉門滑軌組,穀倉門五金" in js_qc_prompt, js_qc_prompt)
+
+# 23e) 其他品牌（非filterbreath）即使遇到同名品類字串，也完全不受這套機制影響
+check("_filterbreath_category_confirmed_unavailable對非filterbreath品牌一律回傳False",
+      SA._filterbreath_category_confirmed_unavailable(js_brand, "製冰機濾網") is False, None)
+
+print("=" * 70)
 print("結果")
 print("=" * 70)
 print(f"PASS: {len(PASS)}  FAIL: {len(FAIL)}")
