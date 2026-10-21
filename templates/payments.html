@@ -1,0 +1,188 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>匯款追蹤 — JSIMPLE CRM</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#f0f2f5;color:#1a1a1a;min-height:100vh}
+.topnav{display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px;background:#fff;padding:10px 20px;border-bottom:1px solid #e8eaed;position:sticky;top:0;z-index:10}
+.topnav a{font-size:13px;color:#0d6efd;text-decoration:none;padding:5px 10px;border-radius:6px}
+.topnav a:hover{background:#e8f4fd}
+.title{font-size:15px;font-weight:700}
+.tabs{display:flex;gap:4px;background:#f0f2f5;padding:4px;border-radius:8px}
+.tab{padding:5px 14px;border-radius:6px;font-size:12px;font-weight:600;border:none;cursor:pointer;color:#666;background:transparent}
+.tab.active{background:#fff;color:#0d6efd;box-shadow:0 1px 3px rgba(0,0,0,.12)}
+.page{max-width:1200px;margin:0 auto;padding:16px}
+.cards{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin-bottom:14px}
+.card{background:#fff;border-radius:12px;padding:16px 18px;box-shadow:0 1px 4px rgba(0,0,0,.07)}
+.card .l{font-size:11px;font-weight:600;color:#888;margin-bottom:6px}
+.card .v{font-size:26px;font-weight:800}
+.card.warn{border-top:3px solid #f28e2b}.card.warn .v{color:#e65100}
+.card.ok{border-top:3px solid #59a14f}.card.ok .v{color:#2e7d32}
+.bar{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:10px;font-size:13px;color:#666}
+.bar select,.bar button{font-size:12px;padding:5px 10px;border-radius:6px;border:1px solid #d0d5dd;background:#fff;cursor:pointer}
+.row{background:#fff;border-radius:12px;padding:14px 16px;margin-bottom:10px;box-shadow:0 1px 4px rgba(0,0,0,.07);display:grid;grid-template-columns:1.1fr 1.6fr 1.3fr auto;gap:14px;align-items:start}
+.name{font-weight:700;font-size:14px}
+.sub{font-size:12px;color:#888;margin-top:3px;line-height:1.5}
+.amt{font-size:18px;font-weight:800}
+.amt.unk{color:#bbb;font-weight:600;font-size:14px}
+.tag{display:inline-block;font-size:11px;font-weight:700;padding:2px 8px;border-radius:10px;margin-left:6px;background:#eef2ff;color:#3b5bdb}
+.tag.img{background:#fff3e0;color:#e65100}
+.ev{font-size:12px;color:#555;background:#f7f8fa;border-radius:6px;padding:6px 8px;margin-top:6px;word-break:break-all}
+.ok-line{font-size:12px;color:#2e7d32;margin-top:4px}
+.btns{display:flex;flex-direction:column;gap:6px}
+.btns button{font-size:12px;font-weight:600;padding:6px 12px;border-radius:6px;border:none;cursor:pointer}
+.b-ok{background:#2e7d32;color:#fff}.b-no{background:#fff;color:#c62828;border:1px solid #e0b4b4!important}.b-ed{background:#eef2ff;color:#3b5bdb}.b-un{background:#f0f2f5;color:#555}
+.empty{text-align:center;color:#999;padding:40px 0;font-size:14px}
+.prod{display:flex;gap:6px;flex-wrap:wrap;margin-top:6px}
+.prod span{font-size:11px;background:#f0f2f5;border-radius:10px;padding:2px 8px;color:#555}
+dialog{border:none;border-radius:12px;padding:20px;width:min(420px,92vw);box-shadow:0 8px 40px rgba(0,0,0,.25)}
+dialog::backdrop{background:rgba(0,0,0,.35)}
+dialog label{display:block;font-size:12px;color:#666;margin:10px 0 4px}
+dialog input,dialog select{width:100%;padding:8px;border:1px solid #d0d5dd;border-radius:6px;font-size:14px}
+dialog .act{display:flex;justify-content:flex-end;gap:8px;margin-top:16px}
+@media(max-width:760px){.row{grid-template-columns:1fr}.btns{flex-direction:row}.cards{grid-template-columns:1fr}}
+</style>
+</head>
+<body>
+<div class="topnav">
+  <div style="display:flex;align-items:center;gap:10px">
+    <a href="/admin?key={{ key }}">← 返回</a>
+    <span class="title">匯款追蹤</span>
+  </div>
+  <div class="tabs" id="tabs">
+    <button class="tab active" data-s="pending">待確認</button>
+    <button class="tab" data-s="confirmed">已確認</button>
+    <button class="tab" data-s="rejected">已駁回</button>
+    <button class="tab" data-s="all">全部</button>
+  </div>
+  <div>
+    <a href="#" id="exportBtn">匯出 CSV</a>
+    <a href="/admin/inbox?key={{ key }}" target="_blank">開啟收件匣</a>
+  </div>
+</div>
+<div class="page">
+  <div class="cards">
+    <div class="card warn"><div class="l">待確認</div><div class="v" id="cPending">–</div></div>
+    <div class="card ok"><div class="l">已確認入帳筆數</div><div class="v" id="cCount">–</div></div>
+    <div class="card ok"><div class="l">已確認入帳金額</div><div class="v" id="cTotal">–</div></div>
+  </div>
+  <div class="bar">
+    期間
+    <select id="days"><option value="7">近 7 天</option><option value="30" selected>近 30 天</option><option value="90">近 90 天</option><option value="365">近 1 年</option></select>
+    <button id="scanBtn">立即重新掃描</button>
+    <span id="msg"></span>
+  </div>
+  <div id="byProduct" class="prod" style="margin-bottom:12px"></div>
+  <div id="list"></div>
+</div>
+
+<dialog id="dlg">
+  <b>編輯匯款紀錄</b>
+  <label>金額（NT$）</label><input id="fAmount" inputmode="numeric">
+  <label>類型</label>
+  <select id="fKind"><option>訂金</option><option>尾款</option><option>全額</option><option>未知</option></select>
+  <label>商品</label><input id="fProduct">
+  <label>備註</label><input id="fNote">
+  <div class="act"><button class="b-un" id="fCancel" style="padding:7px 14px;border:none;border-radius:6px;cursor:pointer">取消</button>
+  <button class="b-ok" id="fSave" style="padding:7px 14px;border:none;border-radius:6px;cursor:pointer">儲存</button></div>
+</dialog>
+
+<script>
+const KEY = {{ key|tojson }};
+let status = 'pending', items = [], editId = null;
+const $ = id => document.getElementById(id);
+const money = n => (n || n === 0) ? 'NT$ ' + Number(n).toLocaleString() : '';
+const esc = s => String(s == null ? '' : s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+
+async function api(path, opts) {
+  const sep = path.includes('?') ? '&' : '?';
+  const r = await fetch(path + sep + 'key=' + encodeURIComponent(KEY), opts);
+  if (!r.ok) throw new Error(r.status);
+  return r.json();
+}
+
+async function load() {
+  $('list').innerHTML = '<div class="empty">載入中…</div>';
+  try {
+    const d = await api('/api/payments?status=' + status + '&days=' + $('days').value);
+    items = d.items || [];
+    const s = d.summary || {};
+    $('cPending').textContent = s.pending_count ?? '–';
+    $('cCount').textContent = s.confirmed_count ?? '–';
+    $('cTotal').textContent = money(s.confirmed_total || 0) || 'NT$ 0';
+    $('byProduct').innerHTML = (s.by_product || []).map(p => `<span>${esc(p[0])} ${money(p[1])}</span>`).join('');
+    render();
+  } catch (e) {
+    $('list').innerHTML = '<div class="empty">載入失敗，請重新整理</div>';
+  }
+}
+
+function render() {
+  if (!items.length) { $('list').innerHTML = '<div class="empty">沒有資料</div>'; return; }
+  $('list').innerHTML = items.map(i => {
+    const quote = [i.quote_total && '報價 ' + money(i.quote_total), i.deposit && '訂金 ' + money(i.deposit), i.balance && '尾款 ' + money(i.balance)].filter(Boolean).join(' ／ ');
+    const st = i.status === 'confirmed' ? '已確認' : i.status === 'rejected' ? '已駁回' : '待確認';
+    return `<div class="row">
+      <div>
+        <div class="name">${esc(i.name)}</div>
+        <div class="sub">${esc(i.conv_key.split(':')[0])} · ${esc(i.claim_time)}</div>
+        <div class="sub">${st}${i.manual ? '（手動）' : ''}</div>
+      </div>
+      <div>
+        <div>${i.amount ? `<span class="amt">${money(i.amount)}</span>` : '<span class="amt unk">金額未填</span>'}<span class="tag">${esc(i.kind)}</span>${i.source === 'image' ? '<span class="tag img">截圖</span>' : ''}</div>
+        <div class="sub">${esc(i.product) || '商品未識別'}${i.last5 ? ' · 末五碼 ' + esc(i.last5) : ''}</div>
+        ${quote ? `<div class="sub">${esc(quote)}</div>` : ''}
+        ${i.note ? `<div class="sub">備註：${esc(i.note)}</div>` : ''}
+      </div>
+      <div>
+        <div class="ev">${esc(i.evidence)}</div>
+        ${i.status === 'confirmed' ? `<div class="ok-line">✓ ${esc(i.confirm_time)} ${esc(i.confirm_text)}</div>` : ''}
+      </div>
+      <div class="btns">
+        ${i.status !== 'confirmed' ? `<button class="b-ok" onclick="setStatus(${i.id},'confirmed')">確認入帳</button>` : `<button class="b-un" onclick="setStatus(${i.id},'pending')">改回待確認</button>`}
+        <button class="b-ed" onclick="edit(${i.id})">編輯</button>
+        ${i.status !== 'rejected' ? `<button class="b-no" onclick="setStatus(${i.id},'rejected')">駁回</button>` : ''}
+      </div>
+    </div>`;
+  }).join('');
+}
+
+async function setStatus(id, s) {
+  await api('/api/payments/' + id, {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({status: s})});
+  load();
+}
+
+function edit(id) {
+  const i = items.find(x => x.id === id); if (!i) return;
+  editId = id;
+  $('fAmount').value = i.amount || '';
+  $('fKind').value = i.kind || '未知';
+  $('fProduct').value = i.product || '';
+  $('fNote').value = i.note || '';
+  $('dlg').showModal();
+}
+$('fCancel').onclick = () => $('dlg').close();
+$('fSave').onclick = async () => {
+  await api('/api/payments/' + editId, {method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({amount: $('fAmount').value, kind: $('fKind').value, product: $('fProduct').value, note: $('fNote').value})});
+  $('dlg').close(); load();
+};
+
+document.querySelectorAll('.tab').forEach(b => b.onclick = () => {
+  document.querySelectorAll('.tab').forEach(x => x.classList.remove('active'));
+  b.classList.add('active'); status = b.dataset.s; load();
+});
+$('days').onchange = load;
+$('scanBtn').onclick = async () => {
+  $('msg').textContent = '掃描中…';
+  try { const r = await api('/api/payments/scan', {method: 'POST'}); $('msg').textContent = `完成：新增 ${r.inserted}、更新 ${r.updated}`; load(); }
+  catch (e) { $('msg').textContent = '掃描失敗'; }
+};
+$('exportBtn').onclick = e => { e.preventDefault(); location.href = '/api/payments/export.csv?status=' + (status === 'pending' ? 'all' : status) + '&days=' + $('days').value + '&key=' + encodeURIComponent(KEY); };
+load();
+</script>
+</body>
+</html>

@@ -2903,6 +2903,18 @@ body{font-family:-apple-system,sans-serif;background:#f5f5f5;color:#333}
       <span class="arrow">›</span>
     </div>
   </a>
+  <a class="card" href="/admin/payments?key={{ key }}">
+    <div class="card-left">
+      <div class="icon" style="background:#e8f5e9">💰</div>
+      <div>
+        <div class="card-title">匯款追蹤</div>
+        <div class="card-sub">客人稱已匯款 → 確認入帳</div>
+      </div>
+    </div>
+    <div style="display:flex;align-items:center;gap:10px">
+      <span class="arrow">›</span>
+    </div>
+  </a>
   <a class="card" href="/admin/line?key={{ key }}">
     <div class="card-left">
       <div class="icon icon-line">💬</div>
@@ -4407,6 +4419,11 @@ app.register_blueprint(ai_image_chat_bp)
 # ═══ CRM 對話分析 Blueprint ════════════════════════════════════════════
 from crm_analytics import crm_analytics_bp
 app.register_blueprint(crm_analytics_bp)
+
+# ═══ 匯款追蹤 Blueprint ═══════════════════════════════════════════════
+from payments import payments_bp, start_background_scan as _payments_scan
+app.register_blueprint(payments_bp)
+_payments_scan()
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
