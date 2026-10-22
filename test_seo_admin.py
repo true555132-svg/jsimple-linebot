@@ -582,6 +582,16 @@ ok18, err18 = SA._validate_article_for_publish(18)
 check("品類規則key_products、品牌預設清單都沒有的商品（濾網），在穀倉門品類文章裡仍應被擋（文章18）",
       ok18 is False and any("不在本品牌允許商品清單內" in e for e in err18), err18)
 
+# 2026-10-23正式站實測發現：AI把「逗號分隔」寫成中文頓號「、」時，舊版split(",")完全沒拆開，
+# 整串被當成單一商品名稱，誤判成「不在允許清單內」而擋下發布（即使每個子項目其實都合法）
+js_brand_for_comma = SA._get_brand("jsimple")  # allowed_products = "辦公桌,辦公椅,收納櫃,高架床"
+check("related_products用中文頓號「、」分隔時，應該被拆成多個項目分別比對，不是整串當成一個",
+      SA._check_products_brand_ownership(js_brand_for_comma, "", "辦公桌、辦公椅") == [], None)
+check("related_products用全形逗號「，」分隔時，同樣應該正確拆開",
+      SA._check_products_brand_ownership(js_brand_for_comma, "", "辦公桌，辦公椅") == [], None)
+check("混用「、」分隔、其中一項真的不在允許清單內時，應該只擋那一項，不是整串都被誤判",
+      len(SA._check_products_brand_ownership(js_brand_for_comma, "", "辦公桌、濾網")) == 1, None)
+
 print("=" * 70)
 print("4. AI檢查失敗 / 缺欄位 / 截斷時不能發布；乾淨案例應該要過")
 print("=" * 70)
@@ -1202,6 +1212,10 @@ for bk, cat, topic, mk in [
     other_brand_names = [BRANDS[b]["name"] for b in BRANDS if b != bk]
     check(f"[{bk}] prompt裡不該出現其他品牌的名稱（確認新增內容不是寫死給特定品牌）",
           all(name not in prompt_text.replace(BRANDS[bk]["name"], "") for name in other_brand_names), None)
+    # 2026-10-23：多個並列子論點（N大迷思/N種情境）要逐點給「標題→結論→細節→視情況表格/補充」，
+    # 這條通用原則放在DEFAULT_GENERATE_PROMPT，三品牌都該拿到，不是只有filterbreath專屬版型指引才有
+    check(f"[{bk}] prompt要包含「多個並列子論點」的文章結構指引，三品牌都該有、不是filterbreath專屬",
+          "多個並列子論點" in prompt_text and "視這個子論點的內容決定要不要加" in prompt_text, None)
 
 print("=" * 70)
 print("18. 濾呼吸專屬文章版型：只對filterbreath生效、不寫進全站共用的generate Prompt")

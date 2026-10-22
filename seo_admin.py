@@ -436,11 +436,23 @@ def _get_brand(brand_key):
     except Exception:
         return {}
 
+_COMMA_SPLIT_RE = re.compile(r'[,，、]')
+
+def _split_comma_list(raw):
+    """把逗號分隔的清單字串拆成list——AI常把「逗號分隔」寫成中文頓號「、」或全形逗號「，」，
+    不是只有半形英文逗號「,」，這裡統一容忍三種分隔符號，避免像「A、B、C」這種AI常見寫法
+    在split(",")底下完全沒被拆開、整串當成一個項目，進而在品牌商品歸屬檢查時被誤判成
+    「不在允許清單內」而錯誤攔下發布（2026-10-23正式站實測發現：「空氣清淨機副廠替換濾網、
+    HEPA濾網、適用機型與濾網料號確認」這整串被當成單一商品名稱擋下，根因只是AI用了「、」
+    不是「,」，不是真的混入了跨品牌商品）。只用在「比對用途」（白名單核對），不改動
+    欄位本身儲存/顯示的原始文字，不影響使用者在表單/debug畫面看到的內容。"""
+    return [x.strip() for x in _COMMA_SPLIT_RE.split(raw or "") if x.strip()]
+
 def _brand_compatible_list(brand_key):
     """回傳該品牌已確認的相容品牌/型號清單（逗號分隔字串解析成list），用於放寬guardrail的白名單。"""
     b = _get_brand(brand_key)
     raw = b.get("compatible_brands", "") or ""
-    return [x.strip() for x in raw.split(",") if x.strip()]
+    return _split_comma_list(raw)
 
 DEFAULT_NEUTRAL_THEME = {
     "primary_color": "#333333", "accent_color": "#666666", "bg_color": "#F7F7F7",
@@ -1528,9 +1540,9 @@ def _check_products_brand_ownership(brand, category, related_products):
     allowed = allowed.strip()
     if not allowed or not (related_products or "").strip():
         return []
-    allowed_set = {x.strip().lower() for x in allowed.split(",") if x.strip()}
+    allowed_set = {x.lower() for x in _split_comma_list(allowed)}
     errors = []
-    for p in [x.strip() for x in related_products.split(",") if x.strip()]:
+    for p in _split_comma_list(related_products):
         if not any(p.lower() in a or a in p.lower() for a in allowed_set):
             errors.append(f"對應商品「{p}」不在本品牌允許商品清單內，可能是誤植或跨品牌混入")
     return errors
@@ -2621,6 +2633,19 @@ CTA方向：[[CTA_DIRECTION]]
 
 不需要每種type都用到，也沒有固定順序或固定數量，依這篇文章實際需要的內容安排。不要自創清單以外的type，
 不要寫「品牌定位」這種獨立自我介紹段落，品牌調性自然融入內容語氣就好。
+
+━━━ 多個並列子論點的文章結構（重要，不限定特定文章類型，內容形狀符合就套用） ━━━
+如果這篇主題本身包含多個並列的子論點（例如「N個迷思」「N種情境」「N個挑選準則」「N個常見錯誤」
+這類文章），每個子論點都要有自己完整的小結構，不要把全部子論點壓縮成一段文字或一份條列：
+1. heading（level 3）：這個子論點本身，用讀者看得懂的話描述
+2. 緊接著一個takeaway：這個子論點的結論，一句話先講清楚答案是什麼（不是留到全文結尾才給結論）
+3. 接著1~3個paragraph：說明原因、細節、實際情況
+4. 視這個子論點的內容決定要不要加：table（有具體數據或情境適合對照時）、note（補充注意事項，
+   或本品牌實際做法——只能用品牌知識庫裡真的有的資料，不能虛構）
+這組「標題→結論→細節→（視情況）表格/補充」的結構，每個子論點都各自重複一次，不是整篇文章只在
+開頭或結尾放一次takeaway、其餘子論點全部寫成連續段落。子論點數量較多時（例如5個以上），也可以
+在這些小節前面加一個總覽table（例如「編號｜論點｜結論」三欄），讓讀者先掃過全貌再往下看細節——
+但這屬於「視情況」，子論點本來就不多、沒有總覽必要時不用硬加。
 
 ━━━ 語言與品質規範 ━━━
 - 台灣用語：「軟體」非「軟件」、「影片」非「視頻」、「品質」非「質量」
