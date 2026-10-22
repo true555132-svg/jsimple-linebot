@@ -1224,7 +1224,12 @@ for bk, cat, topic, mk in [
     # 2026-10-23：多個並列子論點（N大迷思/N種情境）要逐點給「標題→結論→細節→視情況表格/補充」，
     # 這條通用原則放在DEFAULT_GENERATE_PROMPT，三品牌都該拿到，不是只有filterbreath專屬版型指引才有
     check(f"[{bk}] prompt要包含「多個並列子論點」的文章結構指引，三品牌都該有、不是filterbreath專屬",
-          "多個並列子論點" in prompt_text and "視這個子論點的內容決定要不要加" in prompt_text, None)
+          "多個並列子論點" in prompt_text and "優先用table而不是整段文字條列" in prompt_text, None)
+    check(f"[{bk}] prompt要明確要求子論點標題用H3不是H2，且takeaway每個子論點都要有、不能選擇性省略",
+          "一律用level 3（H3）" in prompt_text and
+          "不能有的子論點給、有的子論點省略" in prompt_text, None)
+    check(f"[{bk}] prompt要有「全文零表格是警訊」的自我檢查機制",
+          "如果寫完整篇完全沒有出現任何一張table" in prompt_text, None)
 
 print("=" * 70)
 print("18. 濾呼吸專屬文章版型：只對filterbreath生效、不寫進全站共用的generate Prompt")
