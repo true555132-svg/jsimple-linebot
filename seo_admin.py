@@ -27,11 +27,15 @@ TAIPEI_TZ = timezone(timedelta(hours=8))
 
 # 搜尋意圖分析（Haiku）的輸出token上限。系統預設的DEFAULT_ANALYZE_PROMPT在1500 tokens內夠用，
 # 但admin可以在/admin/seo-settings自訂分析Prompt——2026-10-01發現有品牌把Prompt加長很多
-# （多要求客群矩陣、AI Overview、People Also Ask等段落），實測1500 tokens會在寫到一半就被截斷。
-# 4096是依那次截斷實測結果（1500 tokens時只寫完約40%內容）往上抓的合理值，不是憑感覺亂猜；
-# 如果之後自訂Prompt又加長導致還是被截斷，seo_generator_analyze()會偵測到stop_reason並
-# 明確回錯誤（不會把截斷的分析當成功結果），到時候再依實際情況調高這個數字。
-SEO_ANALYZE_MAX_TOKENS = 4096
+# （多要求客群矩陣、AI Overview、People Also Ask等段落），實測1500 tokens會在寫到一半就被截斷，
+# 當時依截斷實測結果（1500 tokens時只寫完約40%內容）調到4096。
+# 2026-10-10：濾呼吸「濾網／知識類」主題分析時，4096又被實測撞到截斷——不是臆測，是
+# seo_generator_analyze()的stop_reason截斷偵測正常攔下的真實案例（沒有把截斷結果當成功）。
+# 這次沒有拿到實際截斷內容去估算精確倍數，直接往上翻倍到8192（跟上次1500→4096同一個數量級
+# 的調整幅度），Haiku本身速度快、這種分析用途的輸出token成本低，不是省這個的地方。
+# 如果之後又在8192撞到，一樣會被明確攔下不會悶聲吞掉，到時候再依實際情況調整，
+# 也要回頭看是不是該精簡自訂Prompt本身的要求量，不是每次都只靠往上加數字。
+SEO_ANALYZE_MAX_TOKENS = 8192
 
 # AI品質檢查（_quality_check_run）的輸出token上限。2026-10-03正式站實測「冰塊有異味」這篇時發現：
 # 文章被標了多項品牌一致性問題（15(i)型號相容宣稱缺佐證），brand_consistency_issues寫得很長、
@@ -514,31 +518,71 @@ FILTERBREATH_NO_CONFIRMED_PRODUCT_CATEGORIES = {"製冰機濾網"}
 def _esc(s):
     return html_mod.escape(str(s if s is not None else ""), quote=True)
 
-def _block_style_rules(theme):
+def _block_style_rules(theme, inline=False):
     """回傳每個視覺角色對應的CSS屬性字串（不含選擇器），scoped版跟inline版共用同一份規則，
-    確保「預覽跟複製HTML輸出的樣式完全一致」。"""
+    確保「預覽跟複製HTML輸出的樣式完全一致」。
+
+    2026-10-08：依使用者實測SHOPLINE真實參考文章（luairtw.com的ilter-washable-guide等）
+    取得的原始碼核定的新字級表，只套用在theme.brand_key=="filterbreath"——JSIMPLE／朗德
+    完全不受影響，字級維持原樣。這組數字是使用者看過參考文章本身的字級（表格/提醵框只有
+    0.92~0.93rem≈14.7~14.9px）之後，認為太小、另外指定的放大版，不是照抄參考文章的字級，
+    只沿用它的配色/結構（標題底線、摘要框、CTA深色塊、表格深色表頭、提醒框左框線等）。
+
+    inline參數（新增）決定「桌機/手機怎麼切換」：
+    - inline=False（scoped，給後台預覽跟EasyStore等保留<style>的平台用）：用真正的
+      @media (max-width:600px)斷點切換，桌機/手機在600px寬度直接跳一階。
+    - inline=True（給SHOPLINE用——已實測確認SHOPLINE編輯器會把<style>標籤整段拿掉，
+      但保留每個標籤的inline style屬性，所以濾呼吸的正式匯出只能用這個模式）：
+      沒有@media可用，改用clamp(MINpx, A*vw + Bpx, MAXpx)做連續縮放，在390px
+      （admin手機預覽框寬度）精準等於手機目標值、640px左右精準等於桌機目標值，
+      兩者之間連續漸變。這不是真正的斷點切換，是誠實的替代方案：視覺結果在
+      常見手機/桌機寬度下會跟scoped版接近，但不是100%像素級一致，不能宣稱
+      兩者完全等價。非filterbreath的inline字級公式維持原本就有的那組數字不變。
+    """
     primary = (theme or {}).get("primary_color") or DEFAULT_NEUTRAL_THEME["primary_color"]
     accent  = (theme or {}).get("accent_color") or DEFAULT_NEUTRAL_THEME["accent_color"]
     bg      = (theme or {}).get("bg_color") or DEFAULT_NEUTRAL_THEME["bg_color"]
+    is_lu = (theme or {}).get("brand_key") == "filterbreath"
+
+    if is_lu:
+        wrap_fs = "clamp(16px,0.8vw + 12.88px,18px)" if inline else "18px"
+        h2_fs   = "clamp(22px,1.6vw + 15.76px,26px)" if inline else "26px"
+        h3_fs   = "clamp(19px,0.8vw + 15.88px,21px)" if inline else "21px"
+        note_fs = "clamp(15px,0.4vw + 13.44px,16px)" if inline else "16px"
+        table_fs, caption_fs = "16px", "16px"
+        line_h16 = "line-height:1.6;"
+        wrap_mobile_fs, h2_mobile_fs, h3_mobile_fs, note_mobile_fs = "16px", "22px", "19px", "15px"
+    else:
+        wrap_fs = "clamp(16px,1.1vw + 14px,18px)" if inline else "18px"
+        h2_fs, h3_fs, note_fs = "22px", "19px", "14px"
+        table_fs, caption_fs = "16px", "14px"
+        line_h16 = ""
+        wrap_mobile_fs, h2_mobile_fs, h3_mobile_fs, note_mobile_fs = "16px", "", "", ""
+
     return {
-        "wrap": "font-size:18px;line-height:1.8;color:#222222;word-break:break-word;",
-        "wrap_mobile": "font-size:16px;",
-        "h2": f"color:{primary};border-bottom:3px solid {bg};padding-bottom:8px;margin:32px 0 16px 0;font-size:22px;font-weight:700;",
-        "h3": "font-weight:700;margin:24px 0 12px 0;font-size:19px;color:#222222;",
+        "wrap": f"font-size:{wrap_fs};line-height:1.8;color:#222222;word-break:break-word;",
+        "wrap_mobile": f"font-size:{wrap_mobile_fs};",
+        "h2": f"color:{primary};border-bottom:3px solid {bg};padding-bottom:8px;margin:32px 0 16px 0;font-size:{h2_fs};font-weight:700;",
+        "h2_mobile": f"font-size:{h2_mobile_fs};" if h2_mobile_fs else "",
+        "h3": f"font-weight:700;margin:24px 0 12px 0;font-size:{h3_fs};color:#222222;",
+        "h3_mobile": f"font-size:{h3_mobile_fs};" if h3_mobile_fs else "",
         "p": "margin:0 0 16px 0;",
         "summary": f"background:{bg};border-radius:10px;padding:18px 22px;margin:20px 0;",
         "summary_title": f"font-weight:700;color:{primary};margin:0 0 8px 0;font-size:16px;",
         "summary_ul": "margin:0;padding-left:20px;",
         "table_wrap": "overflow-x:auto;margin:20px 0;-webkit-overflow-scrolling:touch;",
-        "table": "width:100%;border-collapse:collapse;font-size:16px;min-width:480px;",
+        "table": f"width:100%;border-collapse:collapse;font-size:{table_fs};min-width:480px;{line_h16}",
         "th": f"background:{primary};color:#ffffff;padding:10px 12px;text-align:left;white-space:nowrap;",
         "td": "padding:10px 12px;border-bottom:1px solid #e5e5e5;",
         "td_even_bg": f"background:{bg};",
-        "caption": "font-size:14px;color:#666666;margin:0 0 8px 0;",
-        "takeaway": f"background:{accent}22;border-left:4px solid {accent};border-radius:8px;padding:16px 20px;margin:20px 0;font-weight:600;color:#222222;",
-        "note": f"background:{bg};border-left:4px solid {accent};padding:12px 16px;margin:16px 0;font-size:14px;color:#444444;",
+        "caption": f"font-size:{caption_fs};color:#666666;margin:0 0 8px 0;{line_h16}",
+        "takeaway": f"background:{accent}22;border-left:4px solid {accent};border-radius:8px;padding:16px 20px;margin:20px 0;font-weight:600;color:#222222;font-size:{note_fs};{line_h16}",
+        "takeaway_mobile": f"font-size:{note_mobile_fs};" if note_mobile_fs else "",
+        "note": f"background:{bg};border-left:4px solid {accent};padding:12px 16px;margin:16px 0;font-size:{note_fs};color:#444444;{line_h16}",
+        "note_mobile": f"font-size:{note_mobile_fs};" if note_mobile_fs else "",
         "list": "margin:0 0 16px 0;padding-left:22px;",
-        "faq_q": f"font-weight:700;margin:16px 0 4px 0;color:{primary};font-size:17px;",
+        "faq_q": f"font-weight:700;margin:16px 0 4px 0;color:{primary};font-size:{h3_fs if is_lu else '17px'};",
+        "faq_q_mobile": f"font-size:{h3_mobile_fs};" if h3_mobile_fs else "",
         "faq_a": "margin:0 0 8px 0;",
         "related_title": "font-weight:700;margin:24px 0 8px 0;font-size:16px;",
         "related_link": f"color:{accent};text-decoration:underline;",
@@ -645,20 +689,27 @@ def _scoped_style_block(rules):
 .jxsa-img-placeholder{{{rules['img_placeholder']}}}
 @media (max-width:600px){{
 .jxsa-wrap{{{rules['wrap_mobile']}}}
+.jxsa-h2{{{rules['h2_mobile']}}}
+.jxsa-h3{{{rules['h3_mobile']}}}
+.jxsa-faq-q{{{rules['faq_q_mobile']}}}
+.jxsa-note{{{rules['note_mobile']}}}
+.jxsa-takeaway{{{rules['takeaway_mobile']}}}
 }}
 </style>"""
     return css
 
 def _render_blocks_html(blocks, theme, inline=False):
     """把blocks渲染成HTML。inline=False（預設，正式輸出/發布用）：<style>+class，樣式只作用在.jxsa-wrap容器內，
-    不影響官網其他區域。inline=True（供不支援<style>標籤的編輯器貼上用）：每個標籤帶行內style，
-    用clamp()做手機/桌機字級縮放，不依賴media query。"""
+    不影響官網其他區域。inline=True（供SHOPLINE這種會清掉<style>標籤的編輯器貼上用）：每個標籤帶行內style，
+    用clamp()做手機/桌機字級縮放，不依賴media query。
+    rules跟著inline參數一起算（見_block_style_rules），確保這裡拿到的字級本來就是「這個模式該用的值」，
+    不用再另外用字串replace硬改——舊版本只有wrap的字級有clamp()，h2/h3/table/note/takeaway沒有響應式
+    行為；2026-10-08起filterbreath這幾個也都比照辦理，其他品牌維持原本只有wrap有clamp()的行為不變。"""
     blocks = blocks or []
-    rules = _block_style_rules(theme)
+    rules = _block_style_rules(theme, inline=inline)
     body = _blocks_body_html(blocks, rules, inline)
     if inline:
-        wrap_style = rules["wrap"].replace("font-size:18px;", "font-size:clamp(16px,1.1vw + 14px,18px);")
-        return f'<div class="jxsa-wrap" style="{wrap_style}">{body}</div>'
+        return f'<div class="jxsa-wrap" style="{rules["wrap"]}">{body}</div>'
     return _scoped_style_block(rules) + f'<div class="jxsa-wrap">{body}</div>'
 
 def _blocks_to_plain_text(blocks):
@@ -2784,7 +2835,7 @@ def _filter_knowledge_for_filterbreath(knowledge_items, brand, category, topic):
             filtered.append(item)
     return filtered
 
-def _filterbreath_article_template_note(has_category_product=True):
+def _filterbreath_article_template_note(category, has_category_product=True):
     """濾呼吸專屬版型指引——只在_generate_article_prompt裡對brand key=="filterbreath"時附加，
     用程式碼判斷brand，不走_get_prompt_template/seo_prompt_templates，所以不會跟著全站共用的
     「AI生成文章Prompt」一起存檔，也不會影響JSIMPLE、朗德的生成流程。
@@ -2794,7 +2845,19 @@ def _filterbreath_article_template_note(has_category_product=True):
     has_category_product=False時加掛KNOWLEDGE_ONLY段落：這裡特意不是看RELATED_PRODUCTS的值
     是不是空字串，而是看呼叫端算出來的「這個品類有沒有專屬商品資料」這個信號——因為品牌預設
     allowed_products的三層fallback，就算這個品類根本沒商品，也常常會填進其他品類的商品名稱
-    （例如製冰機濾網這個案例，RELATED_PRODUCTS不會是空的，但那些商品跟這篇主題完全無關）。"""
+    （例如製冰機濾網這個案例，RELATED_PRODUCTS不會是空的，但那些商品跟這篇主題完全無關）。
+    2026-10-08：11~13點（排查表/避免絕對化/週期與相容性宣稱限定範圍）跟水源設計分流段落，
+    是補回之前在seo_demo字級那輪手滑revert掉、沒deploy過的規則——只改這支函式，不是只改
+    luair-filter-blog這個skill的文件，因為後台實際生成走的是這支函式，不會讀skill目錄下的md檔
+    （已確認過，seo_admin.py全文沒有任何地方讀取.claude/skills下的檔案）。"""
+    category_note = "" if category != "製冰機濾網" else """
+
+━━━ 冰箱製冰濾芯品類專屬提醒（水源設計差異，重要） ━━━
+家用冰箱的自動製冰系統至少有兩種水源設計，對「要不要濾芯、多久換」的答案完全不同：
+一種是內建儲水箱，使用者手動加水，完全不接自來水管線；另一種是冰箱後方接自來水管線供水。
+這篇如果會談到異味排查、濾芯更換、清潔保養，不能預設讀者的冰箱一定是有接水管型——資料或
+商品沒有明確指出機型供水方式時，要先引導讀者自行確認（例如「先看冰箱製冰系統是水箱手動
+加水，還是後方有接自來水管」），不得直接假設「所有冰箱都要定期換濾芯」。"""
     knowledge_only_section = "" if has_category_product else """
 
 ━━━ 濾呼吸的純知識文模式（KNOWLEDGE_ONLY，重要） ━━━
@@ -2828,7 +2891,17 @@ def _filterbreath_article_template_note(has_category_product=True):
    客服CTA，不要一開頭就導購
 9. 結尾放FAQ（跟這篇主題真的相關的問題）、一個cta、一個related_links（只列確實存在且相關的頁面）
 10. 這篇最多放3個image block（1個cover+2個inline_1/inline_2），cover放在blocks陣列最前面，
-    inline圖放在對應段落附近；不是每篇都要有圖，這篇主題如果不需要配圖就不要放""" + knowledge_only_section
+    inline圖放在對應段落附近；不是每篇都要有圖，這篇主題如果不需要配圖就不要放
+11. 診斷/排查類主題（例如「異味怎麼辦」「有雜音怎麼辦」這種疑難排解文）：快答之後用一個table
+    呈現「觀察到的情況｜可能原因｜建議先做的事｜仍沒改善的下一步」，每一列只寫有把握的因果關係，
+    不確定的原因寫「建議對照說明書或洽詢原廠」，不要把單一處理方式（例如換濾芯）當成唯一解法
+12. 用語留但書，不要絕對化——避免「只有OOO一種可能」「這樣做一定會解決」「唯一原因是」這類
+    講法，真實情況本來就有例外；沒有把握的因果關係就說「可能」「建議先」，不要講得比資料證實的
+    還篤定
+13. 更換週期、清潔方式、相容性這類宣稱，只能用「品牌知識庫」裡明確標註的資料，且要照資料本身
+    的限定範圍寫（例如資料寫的是「Panasonic某機型原廠建議約3年」，就只能寫成這個機型的原廠
+    建議，不能省略品牌/機型條件、寫成「製冰濾芯建議3年更換」這種聽起來像整個品類通則的講法）；
+    沒有可靠資料來源的週期，不要編一個數字，改寫「請依自己機型的原廠說明書為準」""" + category_note + knowledge_only_section
 
 def _generate_article_prompt(brand, category, topic, intent_analysis, knowledge_items=None, fields=None, brand_rule=None):
     """fields: 結構化表單欄位 dict（main_keyword/search_intent/target_audience/related_products/
@@ -2860,7 +2933,7 @@ def _generate_article_prompt(brand, category, topic, intent_analysis, knowledge_
         ARTICLE_TYPE_GUIDE=_article_type_guide(fields.get('article_type', '')),
         BRAND_RULE=_brand_rule_block(display_brand_rule))
     if is_filterbreath:
-        body += "\n\n" + _filterbreath_article_template_note(has_category_product)
+        body += "\n\n" + _filterbreath_article_template_note(category, has_category_product)
     return (_brand_guardrail_header(guardrail_brand, _display_category) + "\n\n" + body
             + "\n\n" + _brand_guardrail_footer(guardrail_brand))
 

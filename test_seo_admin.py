@@ -455,13 +455,47 @@ for bk, theme_expected_confirmed in [("jsimple", False), ("filterbreath", True),
     check(f"[{bk}] inline版用clamp()做字級縮放", "clamp(" in inline)
     check(f"[{bk}] scoped版桌機字級18px", "font-size:18px" in scoped)
     check(f"[{bk}] scoped版mobile media query把wrap字級降到16px(>=16px規範)", "@media (max-width:600px)" in scoped and "font-size:16px" in scoped.split("@media")[1])
-    check(f"[{bk}] scoped版表格桌機/手機都維持16px、不因mobile media query被壓到14px以下",
-          "font-size:16px" in scoped and "@media" in scoped and ".jxsa-table{font-size:14px}" not in scoped.split("@media")[1] if "@media" in scoped else False)
     check(f"[{bk}] 表格用overflow-x:auto水平捲動而不是縮小", "overflow-x:auto" in scoped)
-    check(f"[{bk}] caption/note字級>=14px", "font-size:14px" in SA._block_style_rules(theme)["caption"] and "font-size:14px" in SA._block_style_rules(theme)["note"])
     check(f"[{bk}] line-height約1.8", "line-height:1.8" in scoped)
     check(f"[{bk}] AI文字被正確escape，沒有原始<script>標籤流出", "<script>alert(1)</script>" not in scoped and "&lt;script&gt;alert(1)&lt;/script&gt;" in scoped)
     check(f"[{bk}] AI文字被正確escape(inline版)", "<script>alert(1)</script>" not in inline and "&lt;script&gt;alert(1)&lt;/script&gt;" in inline)
+
+    if bk == "filterbreath":
+        # 2026-10-08：使用者依SHOPLINE真實參考文章(ilter-washable-guide等)核定的新字級表，
+        # 只套用在filterbreath；jsimple/lander維持原字級，見下面else分支的既有斷言。
+        media_block = scoped.split("@media (max-width:600px)")[1]
+        check(f"[{bk}] H2桌機26px", "font-size:26px" in scoped, scoped)
+        check(f"[{bk}] H2手機22px（scoped media query內，真正斷點切換）", ".jxsa-h2{font-size:22px;}" in media_block, media_block)
+        check(f"[{bk}] H3/FAQ問題桌機21px", scoped.count("font-size:21px") >= 2, scoped)
+        check(f"[{bk}] H3/FAQ問題手機19px（scoped media query內）",
+              ".jxsa-h3{font-size:19px;}" in media_block and ".jxsa-faq-q{font-size:19px;}" in media_block, media_block)
+        check(f"[{bk}] 表格標題與儲存格桌機/手機都是16px，不因mobile media query變動",
+              "font-size:16px" in scoped and ".jxsa-table{" not in media_block, media_block)
+        check(f"[{bk}] 提醒框/補充說明桌機16px", "font-size:16px" in SA._block_style_rules(theme)["note"] and
+              "font-size:16px" in SA._block_style_rules(theme)["takeaway"], None)
+        check(f"[{bk}] 提醒框/補充說明手機15px（scoped media query內）",
+              ".jxsa-note{font-size:15px;}" in media_block and ".jxsa-takeaway{font-size:15px;}" in media_block, media_block)
+        check(f"[{bk}] 表格與提醒框line-height約1.6", "line-height:1.6" in scoped, scoped)
+        check(f"[{bk}] inline版H2用clamp(22px..26px)連續縮放", "clamp(22px,1.6vw + 15.76px,26px)" in inline, inline)
+        check(f"[{bk}] inline版H3/FAQ問題用clamp(19px..21px)", "clamp(19px,0.8vw + 15.88px,21px)" in inline, inline)
+        check(f"[{bk}] inline版正文/清單/FAQ回答/本文重點用clamp(16px..18px)", "clamp(16px,0.8vw + 12.88px,18px)" in inline, inline)
+        check(f"[{bk}] inline版提醒框/補充說明用clamp(15px..16px)", "clamp(15px,0.4vw + 13.44px,16px)" in inline, inline)
+        check(f"[{bk}] inline版表格維持固定16px（不用clamp，桌機手機本來就一樣）",
+              inline.count("font-size:16px") >= 2, inline)
+        # clamp()公式在390px（admin手機預覽框寬度）精準等於手機目標值、640px左右精準等於桌機目標值，
+        # 用這兩個關鍵數字反推驗證公式本身算對了，不是只檢查字串長得像clamp()就算過
+        def _clamp_eval(a, b, vw):
+            return a * (vw / 100) + b
+        check(f"[{bk}] H2的clamp公式在390px算出來精準等於22（手機目標值）",
+              abs(_clamp_eval(1.6, 15.76, 390) - 22) < 0.01, _clamp_eval(1.6, 15.76, 390))
+        check(f"[{bk}] H2的clamp公式在640px算出來精準等於26（桌機目標值）",
+              abs(_clamp_eval(1.6, 15.76, 640) - 26) < 0.01, _clamp_eval(1.6, 15.76, 640))
+    else:
+        check(f"[{bk}] scoped版表格桌機/手機都維持16px、不因mobile media query被壓到14px以下",
+              "font-size:16px" in scoped and "@media" in scoped and ".jxsa-table{font-size:14px}" not in scoped.split("@media")[1] if "@media" in scoped else False)
+        check(f"[{bk}] caption/note字級>=14px", "font-size:14px" in SA._block_style_rules(theme)["caption"] and "font-size:14px" in SA._block_style_rules(theme)["note"])
+        check(f"[{bk}] H2/H3/FAQ字級維持原樣未變動(22px/19px/17px)，不受這次濾呼吸調整影響",
+              "font-size:22px" in scoped and "font-size:19px" in scoped and "font-size:17px" in SA._block_style_rules(theme)["faq_q"], scoped)
 
 print("=" * 70)
 print("2. _is_safe_url 協定驗證（不是只靠escape）")
@@ -1290,6 +1324,27 @@ check("KNOWLEDGE_ONLY指引要明確禁止商品CTA/商品頁連結/相容性宣
       "不放cta block導購" in lu_know_prompt and "不做任何相容性宣稱" in lu_know_prompt, None)
 check("KNOWLEDGE_ONLY指引要求圖片只能是概念/流程示意圖，不是真實商品照",
       "概念示意圖" in lu_know_prompt and "不要生成看起來像濾呼吸在賣的實體商品照片" in lu_know_prompt, None)
+
+# 20a-補) 2026-10-08：之前在字級那輪手滑revert、沒deploy過的三條版型規則補回_filterbreath_article_template_note
+# （不是只改skill文件），這裡驗證實際送進AI的prompt真的拿得到，不是只存在本機skill md檔案裡
+check("診斷/排查類主題的prompt要包含排查table指引（情況/可能原因/先做什麼/下一步）",
+      "觀察到的情況" in lu_know_prompt and "建議先做的事" in lu_know_prompt and "仍沒改善的下一步" in lu_know_prompt,
+      lu_know_prompt)
+check("prompt要包含避免絕對化用語的指引",
+      "不要絕對化" in lu_know_prompt and "只有OOO一種可能" in lu_know_prompt, lu_know_prompt)
+check("prompt要包含週期/相容性宣稱要照資料限定範圍寫、不得泛化成品類通則的指引",
+      "不能省略品牌/機型條件" in lu_know_prompt and "請依自己機型的原廠說明書為準" in lu_know_prompt, lu_know_prompt)
+check("製冰機濾網品類的prompt要包含水源設計分流提醒（儲水箱型vs接水管型）",
+      "內建儲水箱" in lu_know_prompt and "接自來水管線" in lu_know_prompt and
+      "不得直接假設「所有冰箱都要定期換濾芯」" in lu_know_prompt, lu_know_prompt)
+
+# 20a-補2) 水源設計分流是製冰機濾網品類專屬，不該出現在不相關品類的prompt裡（例如空氣清淨機濾網）
+lu_air_prompt = SA._generate_article_prompt(SA._get_brand("filterbreath"), "空氣清淨機濾網",
+    "空氣清淨機濾網多久該換一次？", "（分析內容略）", [], {"main_keyword": "測試"}, {})
+check("水源設計分流提醒不該污染到不相關品類（空氣清淨機濾網不該看到冰箱儲水箱字樣）",
+      "內建儲水箱" not in lu_air_prompt, lu_air_prompt)
+check("但排查table/避免絕對化這類通用版型指引，不分品類都該有",
+      "不要絕對化" in lu_air_prompt and "建議先做的事" in lu_air_prompt, lu_air_prompt)
 
 # 20a) 真正的重點：不是只靠文字指示叫AI「忽略」，是資料組裝階段就把不相關商品清空，
 #      Preview Prompt跟最終送進Sonnet的內容都不該出現HEPA、活性碳濾芯這些跟製冰機濾網無關的商品字樣
