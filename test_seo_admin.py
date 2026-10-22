@@ -821,7 +821,7 @@ check("main_keyword沒填時，/generate要回400並擋下，不建立生成任�
 JOBS[901] = {"id": 901, "status": "pending", "article_id": None, "error_msg": ""}
 before_article_ids = set(ARTICLES.keys())
 
-def fake_ai_call_json_full_empty_blocks(prompt, model=None, max_tokens=None):
+def fake_ai_call_json_full_empty_blocks(prompt, model=None, max_tokens=None, timeout=None):
     return ({
         "title": "空氣清淨機濾網多久換？", "slug": "/blog/filter-change-cycle",
         "meta_title": "mt", "meta_description": "md", "ai_summary": "ai_summary",
@@ -847,7 +847,10 @@ check("錯誤訊息要講清楚是blocks為空、不是建立半成品，方便�
 JOBS[902] = {"id": 902, "status": "pending", "article_id": None, "error_msg": ""}
 before_article_ids_2 = set(ARTICLES.keys())
 
-def fake_ai_call_json_full_ok(prompt, model=None, max_tokens=None):
+_captured_generate_timeout = []
+
+def fake_ai_call_json_full_ok(prompt, model=None, max_tokens=None, timeout=None):
+    _captured_generate_timeout.append(timeout)
     return ({
         "title": "濾網多久換一次？完整週期指南", "slug": "/blog/filter-change-guide",
         "meta_title": "mt", "meta_description": "md", "ai_summary": "ai_summary",
@@ -862,6 +865,12 @@ try:
                           opp_id=None, fields={"main_keyword": "濾網更換週期"})
 finally:
     SA._ai_call_json_full = _orig_ai_call_json_full
+
+# 2026-10-23：正式站實測文章生成背景thread內的AI呼叫常在100秒內生不完（Sonnet+8000 max_tokens+
+# 這輪新加的「多個並列子論點」結構指引讓輸出變長），_run_generate_job要主動傳更長的timeout，
+# 不能沿用其他同步/短輸出呼叫端的預設100秒
+check("_run_generate_job呼叫_ai_call_json_full時要傳timeout=240（不是沿用預設100秒）",
+      _captured_generate_timeout == [240], _captured_generate_timeout)
 
 check("正常案例（有main_keyword、AI回傳正常blocks）要真的新增一篇文章，證明這次修正沒擋到正常路徑",
       JOBS[902]["status"] == "done" and JOBS[902]["article_id"] in ARTICLES, JOBS[902])
@@ -938,7 +947,7 @@ _orig_ai_call_full = SA._ai_call_full
 job_id_15a = SA._q("INSERT INTO seo_analyze_jobs (status,created_at,updated_at) VALUES ('pending',%s,%s) RETURNING id",
                     (time.time(), time.time()), fetch="id")
 
-def fake_ai_call_full_truncated(prompt, model=None, max_tokens=None):
+def fake_ai_call_full_truncated(prompt, model=None, max_tokens=None, timeout=None):
     return ("建議文章類型：教學型\n建議主關鍵字：HEPA濾網更換\n（後面還沒寫完就被截斷了...",
             "", "max_tokens")
 
@@ -976,7 +985,7 @@ FAKE_COMPLETE_ANALYSIS = """在開始詳細分析之前，請先依序輸出以�
 接下來才開始詳細分析：
 （這裡是完整分析內容，略）"""
 
-def fake_ai_call_full_ok(prompt, model=None, max_tokens=None):
+def fake_ai_call_full_ok(prompt, model=None, max_tokens=None, timeout=None):
     return (FAKE_COMPLETE_ANALYSIS, "", "end_turn")
 
 job_id_15b = SA._q("INSERT INTO seo_analyze_jobs (status,created_at,updated_at) VALUES ('pending',%s,%s) RETURNING id",
@@ -1007,7 +1016,7 @@ check("7行建議（移到最前面後）依然能被正確解析出來，跟原
 _analyze_release_15c = threading.Event()
 _analyze_started_15c = threading.Event()
 
-def fake_ai_call_full_paused(prompt, model=None, max_tokens=None):
+def fake_ai_call_full_paused(prompt, model=None, max_tokens=None, timeout=None):
     _analyze_started_15c.set()
     _analyze_release_15c.wait(timeout=5)  # 等測試主動放行；5秒只是避免真的卡死整個測試
     return (FAKE_COMPLETE_ANALYSIS, "", "end_turn")
@@ -1059,7 +1068,7 @@ finally:
 job_id_15d = SA._q("INSERT INTO seo_analyze_jobs (status,created_at,updated_at) VALUES ('pending',%s,%s) RETURNING id",
                     (time.time(), time.time()), fetch="id")
 
-def fake_ai_call_full_raises(prompt, model=None, max_tokens=None):
+def fake_ai_call_full_raises(prompt, model=None, max_tokens=None, timeout=None):
     raise RuntimeError("模擬網路層級的未預期例外（不是_ai_call_full自己包好的err字串）")
 
 SA._ai_call_full = fake_ai_call_full_raises
@@ -1105,7 +1114,7 @@ def _run_qc(article_id, fake_result):
     # 不是直接呼叫_ai_call_json了，mock要掛在_ai_call_json_full才會真的生效。
     job_id = f"qc_{article_id}_{len(QC_JOBS)}"
     QC_JOBS[job_id] = {"id": job_id, "status": "pending", "result": None, "error_msg": ""}
-    SA._ai_call_json_full = lambda prompt, model=None, max_tokens=None: (dict(fake_result), "", "end_turn")
+    SA._ai_call_json_full = lambda prompt, model=None, max_tokens=None, timeout=None: (dict(fake_result), "", "end_turn")
     try:
         SA._run_quality_check_job(job_id, article_id)
     finally:
@@ -1161,7 +1170,7 @@ check("正常案例狀態應該是ready_to_publish", ARTICLES[200]["status"] == 
 # 驗證：stop_reason="max_tokens"時要回清楚的截斷錯誤，不能讓job狀態變成一個難懂的JSON解析錯誤。
 job_id_trunc = f"qc_200_{len(QC_JOBS)}"
 QC_JOBS[job_id_trunc] = {"id": job_id_trunc, "status": "pending", "result": None, "error_msg": ""}
-SA._ai_call_json_full = lambda prompt, model=None, max_tokens=None: (
+SA._ai_call_json_full = lambda prompt, model=None, max_tokens=None, timeout=None: (
     None, "", "max_tokens")  # 模擬_ai_call_json_full在截斷時，regex抓不到完整JSON而回傳的情境
 try:
     SA._run_quality_check_job(job_id_trunc, 200)
@@ -1393,7 +1402,7 @@ check("DEFAULT_GENERATE_PROMPT本身對image block只說「不是每篇都需要
 # 卻還留著舊資料（這是2026-10-03正式站實測「冰塊有異味」這篇時真的發現的落差，不是假設情境）。
 _orig_ai_call_json_full_20d = SA._ai_call_json_full
 
-def fake_ai_call_json_full_knowledge_only(prompt, model=None, max_tokens=None):
+def fake_ai_call_json_full_knowledge_only(prompt, model=None, max_tokens=None, timeout=None):
     return ({
         "title": "冰塊有異味怎麼排查？", "slug": "/blog/ice-smell-check",
         "meta_title": "mt", "meta_description": "md", "ai_summary": "ai_summary",

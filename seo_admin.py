@@ -2410,9 +2410,15 @@ def _run_suggest_links_job(job_id, aid):
 
 # ── Claude AI 呼叫 ──────────────────────────────────────────────
 
-def _ai_call_full(prompt, model="claude-haiku-4-5", max_tokens=2000):
+def _ai_call_full(prompt, model="claude-haiku-4-5", max_tokens=2000, timeout=100):
     """跟_ai_call同一支邏輯，但多回傳stop_reason（"max_tokens"代表輸出被截斷），
-    供需要偵測截斷的呼叫端（例如文章生成）使用；不改_ai_call本身的2值回傳，避免動到既有10幾處呼叫端。"""
+    供需要偵測截斷的呼叫端（例如文章生成）使用；不改_ai_call本身的2值回傳，避免動到既有10幾處呼叫端。
+    timeout參數2026-10-23新增：文章生成（_run_generate_job）現在已經是背景thread執行，
+    不會再卡住處理HTTP請求的同步worker，正式站實測Sonnet配上這輪新加的「多個並列子論點」
+    結構指引後，產出內容變長，100秒內常常生不完、被這支函式自己的逾時擋下（錯誤訊息
+    "The read operation timed out"——這是正常攔截，不是crash，只是100秒對現在的生成需求
+    來說不夠用）。預設值維持100（analyze、連結建議等其他呼叫端都還在同步/短輸出情境，
+    不需要更長），只有_run_generate_job這種背景執行、長輸出的呼叫端另外傳更長的timeout。"""
     if not ANTHROPIC_API_KEY:
         return None, "ANTHROPIC_API_KEY 未設定", ""
     try:
@@ -2438,8 +2444,9 @@ def _ai_call_full(prompt, model="claude-haiku-4-5", max_tokens=2000):
         # 一定會比arbiter的監控先到期（2026-10-04實測仍被arbiter的WORKER TIMEOUT先殺掉，
         # 證實調數字這個做法本身不可靠）。真正解法是讓同步HTTP請求不要等在AI呼叫上
         # （見/admin/seo-generator/analyze改成背景任務＋job輪詢，_run_analyze_job）；
-        # 100秒維持原樣只是避免真的網路卡住時背景thread永遠不回應。
-        with urllib.request.urlopen(req, timeout=100) as r:
+        # 這個timeout參數本身只是避免真的網路卡住時背景thread永遠不回應，呼叫端要多長
+        # 自己決定（見函式docstring），不是這裡寫死。
+        with urllib.request.urlopen(req, timeout=timeout) as r:
             resp = json.loads(r.read().decode())
         text = resp["content"][0]["text"].strip()
         return text, "", resp.get("stop_reason", "")
@@ -2457,10 +2464,12 @@ def _ai_call(prompt, model="claude-haiku-4-5", max_tokens=2000):
     text, err, _ = _ai_call_full(prompt, model=model, max_tokens=max_tokens)
     return text, err
 
-def _ai_call_json_full(prompt, model="claude-sonnet-4-6", max_tokens=8000):
+def _ai_call_json_full(prompt, model="claude-sonnet-4-6", max_tokens=8000, timeout=100):
     """回傳(result, err, stop_reason)。stop_reason=="max_tokens"時代表輸出被截斷，
-    就算JSON剛好還能解析出來，內容本身也可能不完整，呼叫端應視為需要人工複檢。"""
-    text, err, stop_reason = _ai_call_full(prompt, model=model, max_tokens=max_tokens)
+    就算JSON剛好還能解析出來，內容本身也可能不完整，呼叫端應視為需要人工複檢。
+    timeout往下傳給_ai_call_full（見該函式docstring），預設100維持原行為，
+    背景執行、長輸出的呼叫端（例如_run_generate_job）會另外傳更長的值。"""
+    text, err, stop_reason = _ai_call_full(prompt, model=model, max_tokens=max_tokens, timeout=timeout)
     if err:
         return None, err, stop_reason
     m = re.search(r'\{[\s\S]*\}', text)
@@ -6982,7 +6991,10 @@ def _run_generate_job(job_id, brand_key, category, topic, analysis, opp_id=None,
         resolved_fields, _rf_sources, _ = _apply_filterbreath_knowledge_only_override(
             brand, category, resolved_fields, _rf_sources)
         prompt = _generate_article_prompt(brand, category, topic, analysis, knowledge_items, fields, brand_rule)
-        result, err, stop_reason = _ai_call_json_full(prompt, model="claude-sonnet-4-6", max_tokens=8000)
+        # timeout拉長到240秒（預設100）：這支已經是背景thread執行，不卡同步worker，
+        # 2026-10-23正式站實測發現Sonnet配上8000 max_tokens、又加了這輪「多個並列子論點」
+        # 結構指引後常常生不完100秒，240秒給足夠餘裕，見_ai_call_full docstring說明。
+        result, err, stop_reason = _ai_call_json_full(prompt, model="claude-sonnet-4-6", max_tokens=8000, timeout=240)
         if err:
             _q("UPDATE seo_generate_jobs SET status='error', error_msg=%s, updated_at=%s WHERE id=%s",
                (f"AI生成失敗：{err}", time.time(), job_id))
